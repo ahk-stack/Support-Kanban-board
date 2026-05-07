@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<script type="application/json" id="cowork-artifact-meta">
+{
+  "name": "Outlook Support Kanban",
+  "schemaVersion": 1,
+  "description": "Live Kanban board that pulls emails from Outlook, filters out no-reply/automated senders, and classifies each email as a support ticket with priority, category, sender, and date. Columns: New → In Progress → Resolved.",
+  "mcpTools": [
+    "mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__outlook_email_search",
+    "mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__read_resource",
+    "mcp__d3a4e2ad-3765-4c9a-b998-9479d5f47680__search_crm_objects"
+  ],
+  "mcpServerNames": [
+    "Microsoft 365",
+    "Microsoft 365",
+    "HubSpot"
+  ]
+}
+</script>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Support Kanban — Quinta</title>
+<style>
+:root{color-scheme:light;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a2e;min-height:100vh;}
+header{background:#fff;border-bottom:1px solid #e2e8f0;padding:11px 18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+.header-left h1{font-size:16px;font-weight:700;display:flex;align-items:center;gap:6px;}
+.header-left h1 small{font-size:11px;font-weight:400;color:#94a3b8;}
+.meta{font-size:11px;color:#64748b;margin-top:3px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.live-indicator{display:flex;align-items:center;gap:5px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:999px;padding:3px 10px;font-size:11px;font-weight:600;color:#15803d;}
+.live-dot{width:6px;height:6px;border-radius:50%;background:#16a34a;animation:pulse 1.5s infinite;}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.8)}}
+.poll-countdown{font-size:10px;color:#94a3b8;}
+.header-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.user-sel{display:flex;align-items:center;gap:5px;padding:5px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;}
+.user-sel label{font-size:11px;color:#64748b;font-weight:600;white-space:nowrap;}
+.user-sel select{font-size:12px;font-weight:700;border:none;background:transparent;cursor:pointer;color:#4f46e5;max-width:80px;}
+.workload-bar{display:flex;gap:4px;flex-wrap:wrap;max-width:280px;}
+.agent-pill{display:flex;align-items:center;gap:3px;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600;}
+.agent-pill .cnt{font-size:13px;font-weight:800;}
+.mentions-btn{position:relative;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:16px;line-height:1;transition:all .15s;}
+.mentions-btn:hover{background:#ede9fe;border-color:#c4b5fd;}
+.mentions-btn.has-mentions{background:#ede9fe;border-color:#a78bfa;}
+.mentions-badge{position:absolute;top:-6px;right:-6px;background:#ef4444;color:#fff;border-radius:999px;font-size:10px;font-weight:800;min-width:18px;height:18px;display:flex;align-items:center;justify-content:center;padding:0 4px;border:2px solid #fff;}
+#toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:999px;font-size:13px;font-weight:600;z-index:3000;opacity:0;transition:opacity .3s;pointer-events:none;white-space:nowrap;background:#1e293b;color:#fff;}
+#toast.show{opacity:1;}#toast.ok{background:#065f46;}#toast.move{background:#5b21b6;}#toast.spam-t{background:#dc2626;}
+
+/* ── Filter bar ── */
+.filter-bar{background:#fff;border-bottom:1px solid #f1f5f9;padding:9px 18px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
+.filter-label{font-size:11.5px;color:#64748b;font-weight:600;}
+.chip{font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid #e2e8f0;background:#fff;cursor:pointer;color:#475569;transition:all .15s;}
+.chip.active{background:#4f46e5;color:#fff;border-color:#4f46e5;}
+.sep{width:1px;background:#e2e8f0;margin:0 3px;align-self:stretch;}
+.sort-toggle{display:flex;border:1px solid #e2e8f0;border-radius:999px;overflow:hidden;}
+.sort-btn{font-size:11px;padding:3px 11px;border:none;background:#fff;cursor:pointer;color:#475569;transition:all .15s;white-space:nowrap;}
+.sort-btn.active{background:#4f46e5;color:#fff;}
+.filter-sel{font-size:11px;border:1px solid #e2e8f0;border-radius:999px;padding:3px 10px;background:#fff;cursor:pointer;color:#475569;max-width:160px;}
+/* Spam button */
+.spam-view-btn{position:relative;display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;padding:3px 12px;border-radius:999px;border:1.5px solid #fca5a5;background:#fff5f5;color:#dc2626;cursor:pointer;transition:all .15s;white-space:nowrap;}
+.spam-view-btn:hover{background:#fee2e2;}
+.spam-view-btn.active{background:#dc2626;color:#fff;border-color:#dc2626;}
+.spam-count-badge{background:#dc2626;color:#fff;border-radius:999px;font-size:9px;font-weight:800;min-width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;padding:0 4px;}
+.spam-view-btn.active .spam-count-badge{background:#fff;color:#dc2626;}
+
+.fstats{font-size:11px;color:#64748b;padding:5px 18px;background:#fff;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;}
+.hs-enriching{font-size:10.5px;color:#f59e0b;font-weight:600;display:flex;align-items:center;gap:4px;}
+.spinner-sm{width:12px;height:12px;border:2px solid #fcd34d;border-top-color:#f59e0b;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0;}
+.save-indicator{font-size:10px;color:#10b981;font-weight:600;display:flex;align-items:center;gap:3px;transition:opacity .5s;}
+
+/* ── Main board ── */
+.board{display:flex;gap:13px;padding:14px 18px;overflow-x:auto;min-height:calc(100vh - 175px);}
+.column{flex:1;min-width:265px;max-width:380px;display:flex;flex-direction:column;}
+.col-header{padding:10px 14px;border-radius:10px 10px 0 0;display:flex;align-items:center;justify-content:space-between;font-weight:700;font-size:13px;}
+.col-new .col-header{background:#ede9fe;color:#5b21b6;}
+.col-inp .col-header{background:#fef3c7;color:#92400e;}
+.col-res .col-header{background:#d1fae5;color:#065f46;}
+.col-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:rgba(0,0,0,.12);}
+.col-body{background:#e4e6ed;border-radius:0 0 10px 10px;padding:8px;flex:1;display:flex;flex-direction:column;gap:7px;min-height:180px;transition:background .15s;}
+.col-body.drag-over{background:#c7d2fe;}
+.col-body.just-received{animation:colFlash .6s ease;}
+@keyframes colFlash{0%{background:#c7d2fe;}100%{background:#e4e6ed;}}
+
+/* ── Cards ── */
+.card{background:#fff;border-radius:8px;padding:11px 12px;box-shadow:0 1px 3px rgba(0,0,0,.08);cursor:grab;border-left:3px solid #e2e8f0;transition:box-shadow .15s,transform .15s;user-select:none;}
+.card:hover{box-shadow:0 4px 14px rgba(0,0,0,.12);transform:translateY(-1px);}
+.card.dragging{opacity:.4;}
+.card.p-High{border-left-color:#ef4444;}.card.p-Medium{border-left-color:#f59e0b;}.card.p-Low{border-left-color:#10b981;}
+.card.tagged{outline:2px solid #4f46e5;}
+.card.is-new{animation:slideIn .35s cubic-bezier(.22,1,.36,1);}
+@keyframes slideIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+.card-row1{display:flex;align-items:flex-start;justify-content:space-between;gap:6px;margin-bottom:5px;}
+.card-title{font-size:12.5px;font-weight:600;color:#1e293b;line-height:1.4;flex:1;}
+.pbadge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:999px;flex-shrink:0;cursor:pointer;border:none;outline:none;}
+.pb-High{background:#fee2e2;color:#b91c1c;}.pb-Medium{background:#fef3c7;color:#92400e;}.pb-Low{background:#d1fae5;color:#065f46;}
+.card-summary{font-size:11px;color:#64748b;line-height:1.5;margin-bottom:7px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.card-controls{display:flex;align-items:center;gap:5px;margin-bottom:6px;}
+.cat-select{font-size:10px;border:1px solid #e2e8f0;border-radius:5px;padding:2px 5px;color:#475569;background:#f8fafc;cursor:pointer;flex:1;min-width:0;}
+.hs-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px;min-height:18px;}
+.hs-company{display:inline-flex;align-items:center;gap:4px;background:#fff7ed;border:1px solid #fed7aa;border-radius:5px;padding:2px 8px;font-size:10px;font-weight:600;color:#c2410c;max-width:200px;}
+.hs-company-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hs-link{color:#f59e0b;text-decoration:none;font-size:11px;flex-shrink:0;}
+.hs-contact{font-size:10px;color:#94a3b8;font-style:italic;}
+.hs-contact a{color:#94a3b8;text-decoration:none;}
+.hs-pending{font-size:10px;color:#cbd5e1;font-style:italic;}
+.card-footer{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px;}
+.card-sender{font-size:10.5px;color:#4f46e5;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px;}
+.card-sender-reply{font-size:10px;color:#94a3b8;display:flex;align-items:center;gap:3px;flex-wrap:wrap;}
+.card-actions{display:flex;align-items:center;gap:4px;}
+.agent-badge-card{font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;cursor:pointer;border:none;outline:none;color:#fff;}
+.com-btn{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:6px;font-size:10.5px;font-weight:600;color:#475569;padding:2px 7px;cursor:pointer;display:flex;align-items:center;gap:3px;}
+.com-btn:hover,.com-btn.has-comments{background:#ede9fe;color:#5b21b6;border-color:#c4b5fd;}
+.com-badge{background:#5b21b6;color:#fff;border-radius:999px;font-size:9px;font-weight:800;padding:0 5px;line-height:16px;}
+.open-email-btn{background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;font-size:10.5px;font-weight:600;color:#1d4ed8;padding:2px 7px;cursor:pointer;white-space:nowrap;}
+.card-date{font-size:10px;color:#94a3b8;}
+.loading{display:flex;flex-direction:column;align-items:center;justify-content:center;height:160px;color:#94a3b8;gap:10px;}
+.spinner{width:26px;height:26px;border:3px solid #e2e8f0;border-top-color:#4f46e5;border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty{text-align:center;padding:26px 14px;color:#94a3b8;font-size:12px;}
+.empty-icon{font-size:24px;margin-bottom:6px;}
+
+/* ── Spam view ── */
+#spam-view{display:none;flex-direction:column;min-height:calc(100vh - 175px);}
+#spam-view.active{display:flex;}
+.spam-view-header{padding:16px 24px 12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;}
+.spam-view-title{font-size:18px;font-weight:700;color:#dc2626;display:flex;align-items:center;gap:8px;}
+.spam-view-actions{display:flex;gap:8px;align-items:center;}
+.btn-back{font-size:12px;font-weight:600;padding:6px 14px;border-radius:7px;border:1px solid #e2e8f0;background:#fff;cursor:pointer;color:#475569;display:flex;align-items:center;gap:5px;}
+.btn-back:hover{background:#f1f5f9;}
+.btn-clear-spam{font-size:12px;font-weight:600;padding:6px 14px;border-radius:7px;border:1px solid #fca5a5;background:#fff5f5;cursor:pointer;color:#dc2626;}
+.btn-clear-spam:hover{background:#fee2e2;}
+.spam-list{flex:1;padding:0 24px 24px;display:flex;flex-direction:column;gap:8px;overflow-y:auto;}
+.spam-row{background:#fff;border-radius:10px;border:1px solid #fecaca;padding:12px 16px;display:flex;align-items:center;gap:12px;transition:box-shadow .15s;}
+.spam-row:hover{box-shadow:0 3px 12px rgba(220,38,38,.1);}
+.spam-row-icon{font-size:20px;flex-shrink:0;}
+.spam-row-info{flex:1;min-width:0;}
+.spam-row-subject{font-size:13px;font-weight:600;color:#1e293b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:3px;}
+.spam-row-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.spam-sender-chip{font-size:10.5px;color:#dc2626;background:#fff5f5;border:1px solid #fca5a5;border-radius:999px;padding:1px 8px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px;}
+.spam-company-chip{font-size:10.5px;color:#c2410c;background:#fff7ed;border:1px solid #fed7aa;border-radius:999px;padding:1px 8px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px;}
+.spam-date{font-size:10px;color:#94a3b8;white-space:nowrap;}
+.spam-row-actions{display:flex;gap:6px;flex-shrink:0;}
+.btn-restore{font-size:11px;font-weight:600;padding:4px 12px;border-radius:6px;border:1px solid #e2e8f0;background:#fff;cursor:pointer;color:#475569;}
+.btn-restore:hover{background:#f0fdf4;color:#065f46;border-color:#86efac;}
+.spam-empty{text-align:center;padding:60px 20px;color:#94a3b8;}
+.spam-empty-icon{font-size:48px;margin-bottom:12px;}
+
+/* ── Modals ── */
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:flex-start;justify-content:center;padding-top:36px;}
+.modal-bg.open{display:flex;}
+.modal{background:#fff;border-radius:12px;width:min(680px,94vw);max-height:86vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.25);}
+.modal-head{padding:14px 18px;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;}
+.modal-head h2{font-size:14px;font-weight:700;color:#1e293b;flex:1;line-height:1.4;}
+.modal-close-x{font-size:18px;background:none;border:none;cursor:pointer;color:#94a3b8;}
+.modal-meta-bar{padding:9px 18px;background:#f8fafc;border-bottom:1px solid #f1f5f9;display:flex;gap:14px;flex-wrap:wrap;}
+.modal-meta-bar span{font-size:11.5px;color:#64748b;}
+.modal-meta-bar strong{color:#1e293b;}
+.modal-body-scroll{padding:16px 18px;overflow-y:auto;flex:1;font-size:13px;line-height:1.7;color:#374151;}
+.modal-actions{padding:11px 18px;border-top:1px solid #f1f5f9;display:flex;gap:8px;justify-content:flex-end;}
+.btn-out{font-size:12px;padding:6px 14px;border-radius:7px;border:1px solid #e2e8f0;background:#fff;cursor:pointer;color:#475569;}
+.btn-out:hover{background:#f1f5f9;}
+.btn-primary{font-size:12px;padding:6px 16px;border-radius:7px;border:none;background:#4f46e5;color:#fff;cursor:pointer;font-weight:600;}
+.com-thread{display:flex;flex-direction:column;gap:12px;padding:14px 18px;overflow-y:auto;flex:1;min-height:120px;max-height:300px;}
+.comment-item{display:flex;gap:10px;}
+.comment-avatar{width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;flex-shrink:0;margin-top:2px;color:#fff;}
+.comment-bubble{flex:1;background:#f8fafc;border:1px solid #f1f5f9;border-radius:0 8px 8px 8px;padding:8px 12px;}
+.comment-header{display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap;}
+.comment-author{font-size:11.5px;font-weight:700;color:#1e293b;}
+.comment-time{font-size:10px;color:#94a3b8;}
+.comment-tags{display:flex;gap:4px;flex-wrap:wrap;margin-top:3px;}
+.ctag{font-size:10px;font-weight:700;padding:1px 7px;border-radius:999px;color:#fff;}
+.comment-text{font-size:12.5px;color:#374151;line-height:1.5;white-space:pre-wrap;word-break:break-word;}
+.no-comments{text-align:center;padding:28px;color:#94a3b8;font-size:12px;}
+.compose-area{border-top:1px solid #e2e8f0;padding:13px 18px;display:flex;flex-direction:column;gap:9px;background:#fafafa;border-radius:0 0 12px 12px;}
+.compose-label{font-size:11px;font-weight:600;color:#64748b;}
+.compose-textarea{width:100%;min-height:68px;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;font-size:12.5px;font-family:inherit;resize:vertical;color:#1e293b;background:#fff;}
+.compose-textarea:focus{outline:none;border-color:#4f46e5;}
+.compose-footer{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;}
+.tag-section{flex:1;}
+.tag-section label{font-size:11px;font-weight:600;color:#64748b;display:block;margin-bottom:5px;}
+.tag-grid{display:flex;gap:4px;flex-wrap:wrap;}
+.tag-chip{font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;cursor:pointer;border:1.5px solid transparent;transition:all .15s;user-select:none;opacity:.45;color:#fff;}
+.tag-chip.selected{opacity:1;border-color:rgba(255,255,255,.6);}
+.tag-chip:hover{opacity:.8;}
+.mention-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:13px 15px;margin-bottom:10px;}
+.mention-card.unread{border-left:3px solid #4f46e5;background:#fafbff;}
+.mention-card-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px;}
+.mention-ticket{font-size:12.5px;font-weight:700;color:#1e293b;flex:1;}
+.mention-time{font-size:10px;color:#94a3b8;white-space:nowrap;}
+.mention-from{font-size:11px;color:#64748b;margin-bottom:6px;display:flex;align-items:center;gap:6px;}
+.mention-from-avatar{width:18px;height:18px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:8px;font-weight:800;color:#fff;}
+.mention-tags{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;}
+.mention-tag{font-size:10px;font-weight:700;padding:1px 7px;border-radius:999px;color:#fff;}
+.mention-comment{font-size:12px;color:#374151;background:#f8fafc;border-radius:6px;padding:8px 10px;white-space:pre-wrap;word-break:break-word;}
+.mention-footer{margin-top:10px;display:flex;justify-content:flex-end;gap:6px;}
+.btn-mention-view{font-size:11px;font-weight:600;background:#4f46e5;color:#fff;border:none;border-radius:6px;padding:4px 12px;cursor:pointer;}
+.btn-mention-mark{font-size:11px;font-weight:600;background:#f1f5f9;color:#475569;border:none;border-radius:6px;padding:4px 12px;cursor:pointer;}
+.mentions-empty{text-align:center;padding:40px 20px;color:#94a3b8;}
+</style>
+</head>
+<body>
+<header>
+  <div class="header-left">
+    <h1>📋 Support Kanban <small>support@quinta.im</small></h1>
+    <div class="meta"><span class="live-indicator"><span class="live-dot"></span>LIVE</span><span id="meta">Loading…</span><span class="poll-countdown" id="poll-cd"></span></div>
+  </div>
+  <div class="header-right">
+    <button class="mentions-btn" id="mentions-btn" title="My Mentions">🔔<span class="mentions-badge" id="mentions-badge" style="display:none">0</span></button>
+    <div class="user-sel"><label>🧑 You:</label><select id="current-user"></select></div>
+    <div class="workload-bar" id="workload-bar"></div>
+  </div>
+</header>
+
+<div class="filter-bar">
+  <span class="filter-label">Priority:</span>
+  <button class="chip active" data-pf="all">All</button>
+  <button class="chip" data-pf="High">🔴 High</button>
+  <button class="chip" data-pf="Medium">🟡 Med</button>
+  <button class="chip" data-pf="Low">🟢 Low</button>
+  <div class="sep"></div>
+  <span class="filter-label">Agent:</span>
+  <select class="filter-sel" id="agent-filter"><option value="all">All agents</option></select>
+  <div class="sep"></div>
+  <span class="filter-label">Company:</span>
+  <select class="filter-sel" id="company-filter"><option value="all">All companies</option></select>
+  <div class="sep"></div>
+  <button class="chip" id="tagged-filter" data-af="tagged" style="display:none">🔔 Tagged me</button>
+  <div class="sep"></div>
+  <!-- Spam inbox button -->
+  <button class="spam-view-btn" id="spam-view-btn" title="View spam inbox">
+    🚫 Spam <span class="spam-count-badge" id="spam-count" style="display:none">0</span>
+  </button>
+  <div class="sep"></div>
+  <span class="filter-label">Sort:</span>
+  <div class="sort-toggle">
+    <button class="sort-btn active" id="sort-desc">↓ Newest</button>
+    <button class="sort-btn" id="sort-asc">↑ Oldest</button>
+  </div>
+</div>
+
+<div class="fstats">
+  <span id="fstats">Fetching…</span>
+  <span id="hs-status" class="hs-enriching" style="display:none"><span class="spinner-sm"></span><span id="hs-progress">Enriching with HubSpot…</span></span>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span id="save-indicator" class="save-indicator" style="opacity:0;">💾 Saved</span>
+    <span id="last-poll" style="font-size:10px;color:#94a3b8;"></span>
+  </div>
+</div>
+
+<!-- Main board -->
+<div class="board" id="main-board">
+  <div class="column col-new"><div class="col-header">📥 New <span class="col-badge" id="badge-new">0</span></div><div class="col-body" id="col-new" data-col="new"><div class="loading"><div class="spinner"></div><span>Fetching…</span></div></div></div>
+  <div class="column col-inp"><div class="col-header">⚙️ In Progress <span class="col-badge" id="badge-inp">0</span></div><div class="col-body" id="col-inp" data-col="inp"><div class="empty"><div class="empty-icon">🚧</div>Drag here</div></div></div>
+  <div class="column col-res"><div class="col-header">✅ Resolved <span class="col-badge" id="badge-res">0</span></div><div class="col-body" id="col-res" data-col="res"><div class="empty"><div class="empty-icon">🎉</div>Drag here</div></div></div>
+</div>
+
+<!-- Spam view (hidden by default) -->
+<div id="spam-view">
+  <div class="spam-view-header">
+    <div class="spam-view-title">🚫 Spam Inbox <span id="spam-view-count" style="font-size:14px;font-weight:400;color:#94a3b8;"></span></div>
+    <div class="spam-view-actions">
+      <button class="btn-clear-spam" id="btn-clear-spam">🗑️ Clear all spam</button>
+      <button class="btn-back" id="btn-back-board">← Back to Board</button>
+    </div>
+  </div>
+  <div class="spam-list" id="spam-list"></div>
+</div>
+
+<div id="toast"></div>
+
+<!-- Email modal -->
+<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal">✕</button></div><div class="modal-meta-bar" id="em-meta"></div><div class="modal-body-scroll" id="em-body"></div><div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-outlook">Open in Outlook ↗</button></div></div></div>
+<!-- Intern com modal -->
+<div class="modal-bg" id="com-modal"><div class="modal" style="max-width:560px;"><div class="modal-head"><div style="flex:1;min-width:0;"><h2 id="com-title"></h2><div style="font-size:11px;color:#94a3b8;margin-top:3px;" id="com-subtitle"></div></div><button class="modal-close-x" data-close="com-modal">✕</button></div><div class="com-thread" id="com-thread"></div><div class="compose-area"><div class="compose-label">Add internal comment</div><textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea><div class="compose-footer"><div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div><button class="btn-primary" id="com-post" style="align-self:flex-end;">Post</button></div></div></div></div>
+<!-- Mentions modal -->
+<div class="modal-bg" id="mentions-modal"><div class="modal" style="max-width:600px;"><div class="modal-head"><h2 id="mentions-title">🔔 My Mentions</h2><div style="display:flex;align-items:center;gap:8px;"><button class="btn-out" id="mark-all-read" style="font-size:11px;padding:4px 10px;">Mark all read</button><button class="modal-close-x" data-close="mentions-modal">✕</button></div></div><div style="font-size:12px;color:#64748b;padding:8px 18px 0;" id="mentions-info"></div><div style="display:flex;flex-direction:column;padding:14px 18px;overflow-y:auto;flex:1;" id="mentions-list"></div></div></div>
+
+<script>
+const SUPPORT_AGENTS=['SGU','SHE','ZIO','AHK','IBE','AMJ','ONA','ARA','MEZ','RMD','MAB','SFA','JAT','JFC','JBA','VPO','AZA','RKH','GGO','WPH','CFA','BKH'];
+const CS_AGENTS=['VGU','TBR','NAO','MBH'];
+const ALL_AGENTS=[...SUPPORT_AGENTS,...CS_AGENTS];
+const CLIENT_TAG='CLIENT';
+const EMAIL_MAP=Object.fromEntries(ALL_AGENTS.map(t=>[t,t.toLowerCase()+'@quinta.im']));
+const PALETTE=['#5b21b6','#1d4ed8','#065f46','#b45309','#9d174d','#0e7490','#7c3aed','#166534','#c2410c','#1e40af','#6b21a8','#0369a1','#7e22ce','#15803d','#b91c1c','#0891b2','#4f46e5','#dc2626','#059669','#d97706','#7c3aed','#0f766e'];
+function agentColor(t){let h=0;for(const c of t)h=(h*31+c.charCodeAt(0))%PALETTE.length;return PALETTE[h];}
+const SEARCH_TOOL='mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__outlook_email_search';
+const READ_TOOL='mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__read_resource';
+const HS_SEARCH='mcp__d3a4e2ad-3765-4c9a-b998-9479d5f47680__search_crm_objects';
+const HS_INSIGHTS={userIntent:'Enrich support tickets with HubSpot contact and company data',satisfaction:'NEUTRAL'};
+const SUPPORT_BOX='support@quinta.im';
+const CATEGORIES=['Technical failure','Bug Velma','RYA','Connectivity request','Other','Spam'];
+const PRIORITIES=['High','Medium','Low'];
+const COL_NAMES={new:'📥 New',inp:'⚙️ In Progress',res:'✅ Resolved'};
+const POLL_SECS=60,POLL_WIN_MINS=5;
+const STORAGE_KEY='quinta-kanban-v1',HS_CACHE_KEY='quinta-hs-cache-v4',READS_KEY='quinta-kanban-reads';
+const NO_REPLY_PATTERNS=['noreply','no-reply','donotreply','do-not-reply','mailer-daemon','postmaster','bounce@','bounces@','notifications@','alerts@','googlealerts','linkedin.com','twitter.com','facebook.com','@mailchimp','@sendgrid','@klaviyo','@constantcontact','executiveassistant@','@e.read.ai','atlassian@','jira@'];
+const NO_REPLY_SUBJECTS=['unsubscribe','you are subscribed','mailing list','google alert:','job alert','linkedin notification','weekly digest','monthly digest','order confirmation','shipment notification','your receipt'];
+
+function isQuintaSender(s){if(!s)return false;const d=(s.split('@')[1]||'').toLowerCase();return d.includes('quinta');}
+function getClientEmail(emailObj){const sender=emailObj?.sender||'';if(!isQuintaSender(sender))return sender.toLowerCase()||null;const recipients=Array.isArray(emailObj?.recipients)?emailObj.recipients:[];const client=recipients.find(r=>{if(!r||typeof r!=='string')return false;const rl=r.toLowerCase();if(rl===SUPPORT_BOX)return false;if(isQuintaSender(r))return false;if(NO_REPLY_PATTERNS.some(p=>rl.includes(p)))return false;return true;});return client?client.toLowerCase():null;}
+function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+(e.summary||'')).toLowerCase();return NO_REPLY_SUBJECTS.some(p=>tl.includes(p));}
+
+// ── State ──────────────────────────────────────────────────────────────────
+const seen={};
+let ticketState={},ticketPriority={},ticketCategory={},ticketAssignee={},ticketComments={},ticketClientEmail={};
+let spamSenders=new Set();
+let hsCache={},readMentions=new Set();
+const taggedTickets=new Set();
+let allTickets=[],pollSecsLeft=POLL_SECS,activeP='all',activeA='all',activeCompany='all',sortDesc=true;
+let viewMode='board'; // 'board' | 'spam'
+let comTicketId=null,selectedTags=new Set();
+const currentUser=()=>document.getElementById('current-user').value;
+
+// ── Persistence ────────────────────────────────────────────────────────────
+let _saveTimer=null;
+function saveState(){
+  try{
+    localStorage.setItem(STORAGE_KEY,JSON.stringify({ticketState,ticketPriority,ticketCategory,ticketAssignee,ticketComments,ticketClientEmail,spamSenders:[...spamSenders]}));
+    const ind=document.getElementById('save-indicator');
+    if(ind){ind.style.opacity='1';clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{ind.style.opacity='0';},2500);}
+  }catch(_){}
+}
+function loadState(){
+  try{const r=localStorage.getItem(STORAGE_KEY);if(r){const s=JSON.parse(r);if(s.ticketState)Object.assign(ticketState,s.ticketState);if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);if(s.ticketComments)Object.assign(ticketComments,s.ticketComments);if(s.ticketClientEmail)Object.assign(ticketClientEmail,s.ticketClientEmail);if(s.spamSenders)spamSenders=new Set(s.spamSenders);}}catch(_){}
+  try{const r=localStorage.getItem(HS_CACHE_KEY);if(r)hsCache=JSON.parse(r);}catch(_){}
+  try{const r=localStorage.getItem(READS_KEY);if(r)readMentions=new Set(JSON.parse(r));}catch(_){}
+}
+function saveReads(){try{localStorage.setItem(READS_KEY,JSON.stringify([...readMentions]));}catch(_){}}
+function saveHsCache(){try{localStorage.setItem(HS_CACHE_KEY,JSON.stringify(hsCache));}catch(_){}}
+
+// ── Spam management ────────────────────────────────────────────────────────
+function recordSpamSender(spamEmail){
+  if(!spamEmail||isQuintaSender(spamEmail)||spamSenders.has(spamEmail))return 0;
+  spamSenders.add(spamEmail);
+  let count=0;
+  allTickets.forEach(t=>{const te=ticketClientEmail[t.id]||t.email.sender?.toLowerCase();if(te===spamEmail){ticketCategory[t.id]='Spam';count++;}});
+  return count;
+}
+function getSpamTickets(){return allTickets.filter(t=>ticketCategory[t.id]==='Spam').sort((a,b)=>new Date(b.email.receivedDateTime||0)-new Date(a.email.receivedDateTime||0));}
+function updateSpamBadge(){
+  const cnt=getSpamTickets().length;
+  const badge=document.getElementById('spam-count');const btn=document.getElementById('spam-view-btn');
+  if(cnt>0){badge.textContent=cnt>99?'99+':cnt;badge.style.display='inline-flex';btn.classList.contains('active')||(btn.style.fontWeight='700');}
+  else{badge.style.display='none';}
+}
+
+// ── View switching ─────────────────────────────────────────────────────────
+function showBoardView(){
+  viewMode='board';
+  document.getElementById('main-board').style.display='flex';
+  document.getElementById('spam-view').classList.remove('active');
+  document.getElementById('spam-view-btn').classList.remove('active');
+  renderBoard();
+}
+function showSpamView(){
+  viewMode='spam';
+  document.getElementById('main-board').style.display='none';
+  document.getElementById('spam-view').classList.add('active');
+  document.getElementById('spam-view-btn').classList.add('active');
+  renderSpamView();
+}
+function renderSpamView(){
+  const spamTickets=getSpamTickets();
+  const listEl=document.getElementById('spam-list');
+  document.getElementById('spam-view-count').textContent=`(${spamTickets.length} ticket${spamTickets.length!==1?'s':''})`;
+  if(!spamTickets.length){
+    listEl.innerHTML='<div class="spam-empty"><div class="spam-empty-icon">✅</div><div style="font-size:16px;font-weight:700;color:#374151;margin-bottom:6px;">Inbox zero!</div><div style="font-size:13px;color:#94a3b8;">No spam tickets at the moment.</div></div>';
+    return;
+  }
+  listEl.innerHTML='';
+  spamTickets.forEach(t=>{
+    const{email,id}=t;
+    const clientEmail=ticketClientEmail[id]||null;
+    const hs=clientEmail?hsCache[clientEmail]:null;
+    const senderDisplay=clientEmail||email.sender||'—';
+    const row=document.createElement('div');row.className='spam-row';
+    row.innerHTML=`
+      <div class="spam-row-icon">🚫</div>
+      <div class="spam-row-info">
+        <div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div>
+        <div class="spam-row-meta">
+          <span class="spam-sender-chip" title="${esc(senderDisplay)}">✉️ ${esc(senderName(senderDisplay))}</span>
+          ${hs?.companyName?`<span class="spam-company-chip" title="${esc(hs.companyName)}">🏢 ${esc(hs.companyName)}</span>`:''}
+          <span class="spam-date">${fmtDate(email.receivedDateTime)}</span>
+        </div>
+      </div>
+      <div class="spam-row-actions">
+        <button class="open-email-btn" data-oe-spam="${id}" style="font-size:11px;">📧</button>
+        <button class="btn-restore" data-restore="${id}" title="Mark as not spam">↩️ Restore</button>
+      </div>`;
+    // Open email
+    row.querySelector(`[data-oe-spam="${id}"]`).addEventListener('click',()=>openEmailModal(t));
+    // Restore — removes from spam, sets to 'Other', removes from spamSenders if only ticket
+    row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{
+      ticketCategory[id]='Other';
+      // Check if any other ticket from same sender is still spam
+      const te=clientEmail||email.sender?.toLowerCase();
+      const otherSpam=allTickets.some(x=>x.id!==id&&(ticketClientEmail[x.id]||x.email.sender?.toLowerCase())===te&&ticketCategory[x.id]==='Spam');
+      if(!otherSpam&&te)spamSenders.delete(te);
+      saveState();renderSpamView();updateSpamBadge();
+      showToast('Ticket restored to board','ok');
+    });
+    listEl.appendChild(row);
+  });
+}
+
+// Clear all spam
+document.getElementById('btn-clear-spam').addEventListener('click',()=>{
+  const cnt=getSpamTickets().length;
+  if(!cnt)return;
+  if(!confirm(`Delete all ${cnt} spam ticket(s) from the board? (They stay in Outlook — just removed from the Kanban view.)`))return;
+  // Mark all spam as permanently removed (set to a resolved+spam state)
+  getSpamTickets().forEach(t=>{ticketState[t.id]='res';});
+  saveState();renderSpamView();updateSpamBadge();
+  showToast(`${cnt} spam ticket${cnt>1?'s':''} cleared`,'ok');
+});
+document.getElementById('btn-back-board').addEventListener('click',showBoardView);
+document.getElementById('spam-view-btn').addEventListener('click',()=>{if(viewMode==='spam')showBoardView();else showSpamView();});
+
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function isoMinsAgo(m){return new Date(Date.now()-m*60000).toISOString();}
+function isoDaysAgo(d){return new Date(Date.now()-d*86400000).toISOString();}
+function fmtDate(iso){if(!iso)return'';const d=new Date(iso),now=new Date(),diff=now-d,mins=Math.floor(diff/60000);if(mins<1)return'Just now';if(mins<60)return mins+'m ago';const hrs=Math.floor(diff/3600000);if(hrs<24)return'Today '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});const days=Math.floor(diff/86400000);if(days===1)return'Yesterday '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(days<7)return d.toLocaleDateString('en-GB',{weekday:'short',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});}
+function fmtTime(ts){return new Date(ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'});}
+function senderName(s){if(!s)return'Unknown';if(s.startsWith('/O=')){const m=s.match(/CN=([^/]+)$/i);return m?m[1]:s;}const m=s.match(/^(.+?)@/);return m?m[1].replace(/[._-]/g,' '):s;}
+function parseJsonStream(text){const r=[];let d=0,s=-1,inS=false,e2=false;for(let i=0;i<text.length;i++){const c=text[i];if(e2){e2=false;continue;}if(c==='\\'&&inS){e2=true;continue;}if(c==='"'){inS=!inS;continue;}if(inS)continue;if(c==='{'){if(d===0)s=i;d++;}else if(c==='}'){d--;if(d===0&&s!==-1){try{r.push(JSON.parse(text.slice(s,i+1)));}catch(_){}s=-1;}}}return r;}
+function extractEmails(res){if(!res||res.isError)return[];if(Array.isArray(res.structuredContent))return res.structuredContent;if(res.structuredContent&&typeof res.structuredContent==='object'){const a=Object.values(res.structuredContent).find(v=>Array.isArray(v));if(a)return a;}const raw=(res.content||[]).map(c=>c.text||'').join('');if(raw.trim().startsWith('['))try{return JSON.parse(raw);}catch(_){}return parseJsonStream(raw);}
+function hsResults(res){if(!res||res.isError)return[];const sc=res.structuredContent;if(sc?.results)return sc.results;if(Array.isArray(sc))return sc;const raw=(res.content||[]).map(c=>c.text||'').join('');try{const p=JSON.parse(raw);return p.results||p||[];}catch(_){return parseJsonStream(raw);}}
+
+async function enrichWithHubSpot(){
+  const emailSet=new Set();allTickets.forEach(t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);if(ce){ticketClientEmail[t.id]=ce;if(!(ce in hsCache))emailSet.add(ce);}});
+  const emails=[...emailSet];if(!emails.length)return;
+  const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';
+  const foundContacts=[];const BATCH=50;
+  for(let i=0;i<emails.length;i+=BATCH){const batch=emails.slice(i,i+BATCH);hsProgress.textContent=`Contacts ${Math.min(i+BATCH,emails.length)}/${emails.length}…`;const cRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'IN',values:batch}]}],properties:['email','firstname','lastname'],limit:BATCH,chatInsights:HS_INSIGHTS});const contacts=hsResults(cRes);batch.forEach(email=>{if(!contacts.find(c=>c.properties?.email?.toLowerCase()===email))hsCache[email]=null;});foundContacts.push(...contacts);}
+  const CONCURRENT=5;
+  for(let i=0;i<foundContacts.length;i+=CONCURRENT){const chunk=foundContacts.slice(i,i+CONCURRENT);hsProgress.textContent=`Companies ${Math.min(i+CONCURRENT,foundContacts.length)}/${foundContacts.length}…`;await Promise.all(chunk.map(async contact=>{const email=(contact.properties?.email||'').toLowerCase();if(!email||email in hsCache)return;const contactName=[contact.properties?.firstname,contact.properties?.lastname].filter(Boolean).join(' ')||email;const coRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIdValues:[parseInt(contact.id)]}]}],properties:['name','domain','createdate'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:10,chatInsights:HS_INSIGHTS});const companies=hsResults(coRes);const primary=companies[0]||null;hsCache[email]={contactId:contact.id,contactName,companyName:primary?.properties?.name||null,companyId:primary?.id||null,contactUrl:`https://app.hubspot.com/contacts/25445053/record/0-1/${contact.id}`,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:companies.map(c=>c.properties?.name).filter(Boolean)};}));saveHsCache();updateCompanyFilter();if(viewMode==='board')renderBoard();else renderSpamView();}
+  hsStatus.style.display='none';
+}
+
+function updateCompanyFilter(){const companies=new Map();allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(hs?.companyName)companies.set(hs.companyName,true);});const sel=document.getElementById('company-filter');const cur=sel.value;sel.innerHTML='<option value="all">All companies</option>';[...companies.keys()].sort((a,b)=>a.localeCompare(b)).forEach(name=>{const cnt=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&(()=>{const ce=ticketClientEmail[t.id];return ce&&hsCache[ce]?.companyName===name;})()).length;const o=document.createElement('option');o.value=name;o.textContent=name+' ('+cnt+')';if(name===cur)o.selected=true;sel.appendChild(o);});}
+function classifyPriority(e){const t=((e.subject||'')+(e.summary||'')).toLowerCase();if(e.importance==='high'||/urgent|asap|critical|not working|broken|error|cannot|bloqué/.test(t))return'High';if(/info|question|hello|bonjour|dear/.test(t))return'Low';return'Medium';}
+function classifyCategory(e){const t=((e.subject||'')+(e.summary||'')).toLowerCase();if(/connect|integr|pms|channel|webhook|api|crm/.test(t))return'Connectivity request';if(/velma|chatbot|bot/.test(t))return'Bug Velma';if(/rya|rethink|wrong answer/.test(t))return'RYA';if(/technical|down|not working|broken|error|fail/.test(t))return'Technical failure';return'Other';}
+function autoAssignNew(tickets){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));Object.entries(ticketAssignee).forEach(([,a])=>{if(a in load)load[a]++;});tickets.forEach(t=>{if(ticketAssignee[t.id])return;const agent=SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);ticketAssignee[t.id]=agent;load[agent]++;});}
+function updateWorkload(){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});const sorted=SUPPORT_AGENTS.map(a=>({a,n:load[a]})).sort((x,y)=>y.n-x.n).slice(0,5);document.getElementById('workload-bar').innerHTML=sorted.map(({a,n})=>`<div class="agent-pill" style="background:${agentColor(a)}20;color:${agentColor(a)}">${a} <span class="cnt">${n}</span></div>`).join('');}
+function showToast(msg,cls=''){const t=document.getElementById('toast');t.textContent=msg;t.className='show'+(cls?' '+cls:'');clearTimeout(t._timer);t._timer=setTimeout(()=>{t.className='';},4500);}
+function startCountdown(){pollSecsLeft=POLL_SECS;const cd=document.getElementById('poll-cd');const tick=setInterval(()=>{pollSecsLeft--;cd.textContent=pollSecsLeft>0?'· '+pollSecsLeft+'s':'· checking…';if(pollSecsLeft<=0)clearInterval(tick);},1000);}
+function rebuildTagged(){taggedTickets.clear();const me=currentUser();Object.entries(ticketComments).forEach(([id,cs])=>{if(cs.some(c=>c.tags&&c.tags.includes(me)))taggedTickets.add(id);});document.getElementById('tagged-filter').style.display=taggedTickets.size?'':'none';updateMentionsBadge();}
+function buildAgentUI(){const sel=document.getElementById('current-user');sel.innerHTML='<optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup>';const af=document.getElementById('agent-filter');af.innerHTML='<option value="all">All agents</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><option value="tagged">🔔 Tagged me</option>';const grid=document.getElementById('tag-grid');grid.innerHTML=[...SUPPORT_AGENTS,...CS_AGENTS,CLIENT_TAG].map(t=>{const bg=t===CLIENT_TAG?'#475569':agentColor(t);return`<span class="tag-chip" data-tag="${t}" style="background:${bg}">${t}${CS_AGENTS.includes(t)?' CS':''}</span>`;}).join('');grid.querySelectorAll('.tag-chip').forEach(chip=>{chip.addEventListener('click',()=>{const tag=chip.dataset.tag;if(selectedTags.has(tag)){selectedTags.delete(tag);chip.classList.remove('selected');}else{selectedTags.add(tag);chip.classList.add('selected');}});});}
+const nextAgent=cur=>{const i=SUPPORT_AGENTS.indexOf(cur);return SUPPORT_AGENTS[i>=0?(i+1)%SUPPORT_AGENTS.length:0];};
+const nextPriority=cur=>PRIORITIES[(PRIORITIES.indexOf(cur)+1)%PRIORITIES.length];
+
+function makeCard(ticket,isNew=false){
+  const{email,id}=ticket;const priority=ticketPriority[id]||ticket.priority;const agent=ticketAssignee[id]||SUPPORT_AGENTS[0];const cat=ticketCategory[id];const comments=ticketComments[id]||[];const isTagged=taggedTickets.has(id);const catOpts=CATEGORIES.map(c=>`<option value="${esc(c)}"${c===cat?' selected':''}>${esc(c)}</option>`).join('');const ac=agentColor(agent);const clientEmail=ticketClientEmail[id]||null;const isInternalReply=isQuintaSender(email.sender)&&!!clientEmail;const hs=clientEmail?hsCache[clientEmail]:undefined;
+  let hsHtml='';if(clientEmail===null)hsHtml='';else if(hs===undefined)hsHtml='<div class="hs-row"><span class="hs-pending">🔍 Looking up HubSpot…</span></div>';else if(hs!==null){let inner='';if(hs.companyName){inner+=`<span class="hs-company" title="${esc(hs.allCompanies?.join(' · ')||hs.companyName)}">🏢 <span class="hs-company-name">${esc(hs.companyName)}</span>`;if(hs.companyUrl)inner+=` <a class="hs-link" href="${esc(hs.companyUrl)}" target="_blank">⟶</a>`;inner+=`</span>`;}if(hs.contactName&&hs.contactName.toLowerCase()!==clientEmail){inner+=`<span class="hs-contact">`;if(hs.contactUrl)inner+=`<a href="${esc(hs.contactUrl)}" target="_blank">`;inner+=esc(hs.contactName);if(hs.contactUrl)inner+=`</a>`;inner+=`</span>`;}if(inner)hsHtml=`<div class="hs-row">${inner}</div>`;}
+  let senderHtml='';if(isInternalReply){senderHtml=`<div class="card-sender-reply"><span style="color:#4f46e5;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px;" title="${esc(clientEmail)}">👤 ${esc(senderName(clientEmail))}</span><span style="color:#94a3b8;">↩️ ${esc(senderName(email.sender))}</span></div>`;}else{senderHtml=`<span class="card-sender" title="${esc(email.sender)}">👤 ${esc(senderName(email.sender))}</span>`;}
+  const div=document.createElement('div');div.className=`card p-${priority}${isNew?' is-new':''}${isTagged?' tagged':''}`;div.draggable=true;div.dataset.id=id;
+  div.innerHTML=`<div class="card-row1"><div class="card-title">${esc(email.subject||'(no subject)')}</div><button class="pbadge pb-${priority}" data-pr="${id}">${priority}</button></div><div class="card-summary">${esc(email.summary||'No preview.')}</div><div class="card-controls"><select class="cat-select" data-cat="${id}">${catOpts}</select></div>${hsHtml}<div class="card-footer">${senderHtml}<div class="card-actions"><span class="card-date">${fmtDate(email.receivedDateTime)}</span><button class="open-email-btn" data-oe="${id}">📧 Open</button><button class="agent-badge-card" data-ag="${id}" style="background:${ac}">${agent}</button><button class="com-btn${comments.length?' has-comments':''}" data-oc="${id}">💬${comments.length?` <span class="com-badge">${comments.length}</span>`:''}</button></div></div>`;
+  div.addEventListener('dragstart',e=>{e.dataTransfer.setData('ticketId',id);setTimeout(()=>div.classList.add('dragging'),0);});div.addEventListener('dragend',()=>div.classList.remove('dragging'));
+  div.querySelector('[data-pr]').addEventListener('click',e=>{e.stopPropagation();ticketPriority[id]=nextPriority(priority);saveState();renderBoard();});
+  div.querySelector('[data-ag]').addEventListener('click',e=>{e.stopPropagation();ticketAssignee[id]=nextAgent(agent);saveState();updateWorkload();renderBoard();});
+  div.querySelector('[data-cat]').addEventListener('change',e=>{
+    const newCat=e.target.value;ticketCategory[id]=newCat;
+    if(newCat==='Spam'){
+      const spamEmail=ticketClientEmail[id]||email.sender?.toLowerCase();
+      if(spamEmail&&!isQuintaSender(spamEmail)){
+        const retroCount=recordSpamSender(spamEmail);
+        showToast(retroCount>1?`🚫 Spam recorded — ${retroCount} tickets marked`:'🚫 Spam sender recorded','spam-t');
+      }
+    }
+    saveState();renderBoard();updateSpamBadge();
+  });
+  div.querySelector('[data-oe]').addEventListener('click',ev=>{ev.stopPropagation();openEmailModal(ticket);});
+  div.querySelector('[data-oc]').addEventListener('click',ev=>{ev.stopPropagation();openComModal(ticket);});
+  return div;
+}
+
+function renderBoard(){
+  allTickets.sort((a,b)=>{const ta=new Date(a.email.receivedDateTime||0).getTime(),tb=new Date(b.email.receivedDateTime||0).getTime();return sortDesc?tb-ta:ta-tb;});
+  rebuildTagged();
+  ['new','inp','res'].forEach(col=>{
+    const tickets=allTickets.filter(t=>{
+      if(ticketCategory[t.id]==='Spam')return false; // ← spam NEVER shown in main board
+      const p=ticketPriority[t.id]||t.priority;
+      if(activeP!=='all'&&p!==activeP)return false;
+      if(activeA==='tagged')return taggedTickets.has(t.id);
+      if(activeA!=='all'&&ticketAssignee[t.id]!==activeA)return false;
+      if(activeCompany!=='all'){const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(!hs||hs.companyName!==activeCompany)return false;}
+      return(ticketState[t.id]||'new')===col;
+    });
+    const el=document.getElementById('col-'+col);const icons={new:'📭',inp:'🚧',res:'🎉'};el.innerHTML='';
+    if(!tickets.length)el.innerHTML=`<div class="empty"><div class="empty-icon">${icons[col]}</div>No tickets</div>`;
+    else tickets.forEach(t=>el.appendChild(makeCard(t)));
+    document.getElementById('badge-'+col).textContent=tickets.length;
+  });
+  updateWorkload();
+  updateSpamBadge();
+}
+
+document.getElementById('sort-desc').addEventListener('click',()=>{sortDesc=true;document.getElementById('sort-desc').classList.add('active');document.getElementById('sort-asc').classList.remove('active');renderBoard();});
+document.getElementById('sort-asc').addEventListener('click',()=>{sortDesc=false;document.getElementById('sort-asc').classList.add('active');document.getElementById('sort-desc').classList.remove('active');renderBoard();});
+document.querySelectorAll('[data-pf]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-pf]').forEach(x=>x.classList.remove('active'));b.classList.add('active');activeP=b.dataset.pf;renderBoard();}));
+document.getElementById('agent-filter').addEventListener('change',e=>{activeA=e.target.value;renderBoard();});
+document.getElementById('company-filter').addEventListener('change',e=>{activeCompany=e.target.value;renderBoard();});
+document.getElementById('current-user').addEventListener('change',()=>{renderBoard();updateMentionsBadge();});
+document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=ticketState[id]||'new';const newCol=col.dataset.col;if(prevCol===newCol)return;ticketState[id]=newCol;saveState();renderBoard();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);showToast('✓ Moved to '+COL_NAMES[newCol]+' — saved','move');});});
+document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
+document.querySelectorAll('.modal-bg').forEach(bg=>{bg.addEventListener('click',e=>{if(e.target===bg)bg.classList.remove('open');});});
+
+async function openEmailModal(ticket){const{email,id}=ticket;const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;document.getElementById('em-title').textContent=email.subject||'(no subject)';let metaHtml=isReply?`<span><strong>Client:</strong> ${esc(clientEmail)}</span><span><strong>Replied by:</strong> ${esc(email.sender)}</span>`:`<span><strong>From:</strong> ${esc(email.sender||'—')}</span>`;metaHtml+=`<span><strong>Received:</strong> ${fmtDate(email.receivedDateTime)}</span><span><strong>Agent:</strong> ${ticketAssignee[id]||'—'}</span>`;if(hs?.companyName)metaHtml+=`<span><strong>Company:</strong> ${esc(hs.companyName)}${hs.companyUrl?` <a href="${esc(hs.companyUrl)}" target="_blank" style="color:#f59e0b;font-size:11px;">↗ HubSpot</a>`:''}</span>`;if(hs?.allCompanies?.length>1)metaHtml+=`<span style="font-size:10px;color:#94a3b8;" title="${esc(hs.allCompanies.join(', '))}">+${hs.allCompanies.length-1} more</span>`;document.getElementById('em-meta').innerHTML=metaHtml;document.getElementById('em-body').innerHTML='<div class="loading"><div class="spinner"></div></div>';const ol=document.getElementById('em-outlook');ol.onclick=email.webLink?()=>window.open(email.webLink,'_blank'):null;ol.style.display=email.webLink?'':'none';document.getElementById('email-modal').classList.add('open');const uri=(email.uri||`mail:///messages/${email.id}`).split('?')[0]+'?owner='+encodeURIComponent(SUPPORT_BOX);const res=await window.cowork.callMcpTool(READ_TOOL,{uri});if(res.isError){document.getElementById('em-body').innerHTML=`<p style="color:#64748b;font-style:italic">${esc(email.summary||'No preview.')}</p>`;return;}const sc=res.structuredContent;let body='';if(sc){body=sc.body?.content||sc.bodyPreview||sc.preview||'';if((sc.body?.contentType||'').toLowerCase()==='html'){body=body.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<a /gi,'<a target="_blank" ');}else body=body.replace(/\n/g,'<br>');}if(!body){const raw=(res.content||[]).map(c=>c.text||'').join('');body=raw?raw.replace(/\n/g,'<br>'):'<em style="color:#94a3b8">No content.</em>';}document.getElementById('em-body').innerHTML=`<div style="overflow-wrap:break-word">${body}</div>`;}
+function renderThread(id){const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments">💬 No comments yet.</div>';return;}el.innerHTML=cs.map(c=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'#475569':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'#475569';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text">${esc(c.text)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
+function openComModal(ticket){const{email,id}=ticket;comTicketId=id;const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?' · 🏢 '+hs.companyName:'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'—';document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr} · ${ticketAssignee[id]||'—'} · ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
+document.getElementById('com-post').addEventListener('click',()=>{const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;if(!ticketComments[comTicketId])ticketComments[comTicketId]=[];const tags=[...selectedTags];const author=currentUser();ticketComments[comTicketId].push({author,text,tags,ts:Date.now()});document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));saveState();renderThread(comTicketId);renderBoard();const at=tags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast('Comment posted · Tagged: '+at.join(', '));else showToast('Comment posted');});
+function getMentions(user){const r=[];Object.entries(ticketComments).forEach(([tid,cs])=>{const t=allTickets.find(x=>x.id===tid);cs.forEach((c,ci)=>{if(c.tags&&c.tags.includes(user))r.push({ticketId:tid,ci,comment:c,ticket:t,key:`${tid}:${ci}`});});});return r.sort((a,b)=>(b.comment.ts||0)-(a.comment.ts||0));}
+function updateMentionsBadge(){const me=currentUser();const u=getMentions(me).filter(m=>!readMentions.has(m.key)).length;const badge=document.getElementById('mentions-badge');const btn=document.getElementById('mentions-btn');if(u>0){badge.textContent=u>99?'99+':u;badge.style.display='flex';btn.classList.add('has-mentions');}else{badge.style.display='none';btn.classList.remove('has-mentions');}}
+function renderMentions(){const me=currentUser();const mentions=getMentions(me);const unread=mentions.filter(m=>!readMentions.has(m.key)).length;document.getElementById('mentions-title').textContent='🔔 My Mentions — '+me;document.getElementById('mentions-info').textContent=mentions.length+' mention'+(mentions.length!==1?'s':'')+' · '+(unread>0?unread+' unread':'all read');const list=document.getElementById('mentions-list');if(!mentions.length){list.innerHTML='<div class="mentions-empty" style="text-align:center;padding:40px 20px;color:#94a3b8;"><div style="font-size:36px;margin-bottom:10px;">🔕</div><div>No mentions yet</div></div>';return;}list.innerHTML='';mentions.forEach(({ticketId,ci,comment,ticket,key})=>{const isUnread=!readMentions.has(key);const card=document.createElement('div');card.className='mention-card'+(isUnread?' unread':'');const tagHtml=(comment.tags||[]).filter(t=>t!==CLIENT_TAG).map(t=>`<span class="mention-tag" style="background:${agentColor(t)}">@${t}</span>`).join('');const bg=ALL_AGENTS.includes(comment.author)?agentColor(comment.author):'#64748b';const ttl=ticket?.email?.subject||'(deleted)';const ce=ticket?ticketClientEmail[ticket.id]:null;const hs=ce?hsCache[ce]:null;const coInfo=hs?.companyName?' · 🏢 '+hs.companyName:'';const col=ticketState[ticketId]||'new';const colLabel={new:'📥 New',inp:'⚙️ In Progress',res:'✅ Resolved'}[col]||'📥 New';card.innerHTML=`<div class="mention-card-top"><div><div class="mention-ticket">${esc(ttl)}</div><div style="font-size:10px;color:#94a3b8;">${colLabel}${coInfo}</div></div><span class="mention-time">${fmtTime(comment.ts)}</span></div><div class="mention-from"><span class="mention-from-avatar" style="background:${bg}">${esc(comment.author)}</span><strong>${esc(comment.author)}</strong> tagged you</div>${tagHtml?`<div class="mention-tags">${tagHtml}</div>`:''}<div class="mention-comment">${esc(comment.text)}</div><div class="mention-footer">${isUnread?`<button class="btn-mention-mark" data-key="${esc(key)}">Mark read</button>`:''} ${ticket?`<button class="btn-mention-view" data-tid="${esc(ticketId)}">View thread ↗</button>`:''}</div>`;card.querySelector('.btn-mention-mark')?.addEventListener('click',()=>{readMentions.add(key);saveReads();renderMentions();updateMentionsBadge();});card.querySelector('.btn-mention-view')?.addEventListener('click',()=>{readMentions.add(key);saveReads();document.getElementById('mentions-modal').classList.remove('open');if(ticket)openComModal(ticket);updateMentionsBadge();});card.addEventListener('click',()=>{if(isUnread){readMentions.add(key);saveReads();card.classList.remove('unread');updateMentionsBadge();}});list.appendChild(card);});}
+document.getElementById('mentions-btn').addEventListener('click',()=>{renderMentions();document.getElementById('mentions-modal').classList.add('open');setTimeout(()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});saveReads();updateMentionsBadge();},2000);});
+document.getElementById('mark-all-read').addEventListener('click',()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});saveReads();renderMentions();updateMentionsBadge();});
+
+function addTickets(emails){let n=0;emails.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;const t={id:e.id,email:e,priority:classifyPriority(e)};const ce=getClientEmail(e);if(ce)ticketClientEmail[e.id]=ce;const effectiveEmail=ce||e.sender?.toLowerCase();if(effectiveEmail&&spamSenders.has(effectiveEmail)){ticketCategory[e.id]='Spam';}else if(!ticketCategory[e.id]){ticketCategory[e.id]=classifyCategory(e);}if(!ticketAssignee[e.id]){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,allTickets.filter(x=>ticketAssignee[x.id]===a).length]));ticketAssignee[e.id]=SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);}allTickets.push(t);n++;});return n;}
+async function poll(){const after=isoMinsAgo(POLL_WIN_MINS);const res=await window.cowork.callMcpTool(SEARCH_TOOL,{limit:20,afterDateTime:after,mailboxOwnerEmail:SUPPORT_BOX});const n=addTickets(extractEmails(res));document.getElementById('last-poll').textContent='Checked: '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(n>0){saveState();showToast(n+' new ticket'+(n>1?'s':'')+' arrived!');if(viewMode==='board')renderBoard();else renderSpamView();enrichWithHubSpot();}startCountdown();}
+
+(async()=>{
+  buildAgentUI();loadState();
+  document.getElementById('fstats').textContent='Fetching latest emails…';
+  const[recentRes,weekRes]=await Promise.all([window.cowork.callMcpTool(SEARCH_TOOL,{limit:50,mailboxOwnerEmail:SUPPORT_BOX}),window.cowork.callMcpTool(SEARCH_TOOL,{limit:50,afterDateTime:isoDaysAgo(7),mailboxOwnerEmail:SUPPORT_BOX})]);
+  const raw=[...extractEmails(recentRes),...extractEmails(weekRes)];
+  const deduped=[...new Map(raw.filter(e=>e.id).map(e=>[e.id,e])).values()];
+  deduped.sort((a,b)=>new Date(b.receivedDateTime||0)-new Date(a.receivedDateTime||0));
+  const total=addTickets(deduped);
+  autoAssignNew(allTickets);
+  allTickets.forEach(t=>{const te=ticketClientEmail[t.id]||t.email.sender?.toLowerCase();if(te&&spamSenders.has(te))ticketCategory[t.id]='Spam';});
+  saveState();
+  const filtered=deduped.length-total,newest=allTickets.filter(t=>ticketCategory[t.id]!=='Spam')[0]?.email?.receivedDateTime;
+  document.getElementById('fstats').textContent=`${allTickets.filter(t=>ticketCategory[t.id]!=='Spam').length} tickets · ${filtered} automated excluded · most recent: ${newest?fmtDate(newest):'—'}`;
+  document.getElementById('meta').textContent=`${allTickets.length} tickets · polling every ${POLL_SECS}s`;
+  renderBoard();updateCompanyFilter();updateSpamBadge();startCountdown();
+  enrichWithHubSpot();setInterval(poll,POLL_SECS*1000);
+})();
+</script>
+</body>
+</html>

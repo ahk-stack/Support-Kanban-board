@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<script type="application/json" id="cowork-artifact-meta">
+{
+  "name": "Outlook Support Kanban",
+  "schemaVersion": 1,
+  "description": "Live Kanban board that pulls emails from Outlook, filters out no-reply/automated senders, and classifies each email as a support ticket with priority, category, sender, and date. Columns: New → In Progress → Resolved.",
+  "mcpTools": [
+    "mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__outlook_email_search"
+  ],
+  "mcpServerNames": [
+    "Microsoft 365"
+  ]
+}
+</script>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Support Ticket Kanban</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; color: #1a1a2e; min-height: 100vh; }
+
+  header { background: #fff; border-bottom: 1px solid #e2e8f0; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  header h1 { font-size: 18px; font-weight: 700; color: #1a1a2e; display: flex; align-items: center; gap: 8px; }
+  .meta { font-size: 12px; color: #64748b; margin-top: 2px; }
+  .stats { display: flex; gap: 16px; }
+  .stat { text-align: center; }
+  .stat-num { font-size: 22px; font-weight: 700; color: #4f46e5; }
+  .stat-label { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  .filter-bar { display: flex; gap: 8px; padding: 12px 24px; flex-wrap: wrap; align-items: center; background: #fff; border-bottom: 1px solid #f1f5f9; }
+  .filter-label { font-size: 12px; color: #64748b; font-weight: 500; }
+  .filter-btn { font-size: 11px; padding: 4px 10px; border-radius: 999px; border: 1px solid #e2e8f0; background: #fff; cursor: pointer; color: #475569; transition: all 0.15s; }
+  .filter-btn.active { background: #4f46e5; color: #fff; border-color: #4f46e5; }
+
+  .board { display: flex; gap: 16px; padding: 20px 24px; overflow-x: auto; min-height: calc(100vh - 130px); }
+  .column { flex: 1; min-width: 270px; max-width: 360px; display: flex; flex-direction: column; }
+  .col-header { padding: 12px 16px; border-radius: 10px 10px 0 0; display: flex; align-items: center; justify-content: space-between; font-weight: 600; font-size: 13px; }
+  .col-new .col-header { background: #ede9fe; color: #5b21b6; }
+  .col-inprogress .col-header { background: #fef3c7; color: #92400e; }
+  .col-resolved .col-header { background: #d1fae5; color: #065f46; }
+  .col-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(0,0,0,0.1); }
+
+  .col-body { background: #e8eaf0; border-radius: 0 0 10px 10px; padding: 10px; flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 200px; transition: background 0.15s; }
+  .col-body.drag-over { background: #c7d2fe; }
+
+  .card { background: #fff; border-radius: 8px; padding: 12px 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); cursor: grab; border-left: 3px solid transparent; transition: box-shadow 0.15s, transform 0.15s; user-select: none; }
+  .card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.13); transform: translateY(-1px); }
+  .card.dragging { opacity: 0.45; }
+  .card-high { border-left-color: #ef4444; }
+  .card-medium { border-left-color: #f59e0b; }
+  .card-low { border-left-color: #10b981; }
+
+  .card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .card-title { font-size: 13px; font-weight: 600; color: #1e293b; line-height: 1.4; flex: 1; }
+  .priority-badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; white-space: nowrap; flex-shrink: 0; }
+  .p-high { background: #fee2e2; color: #b91c1c; }
+  .p-medium { background: #fef3c7; color: #92400e; }
+  .p-low { background: #d1fae5; color: #065f46; }
+
+  .card-summary { font-size: 11.5px; color: #64748b; line-height: 1.5; margin-bottom: 8px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .card-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
+  .card-sender { font-size: 11px; color: #4f46e5; font-weight: 500; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-right { display: flex; align-items: center; gap: 6px; }
+  .category-tag { font-size: 10px; background: #f1f5f9; color: #475569; padding: 2px 6px; border-radius: 4px; }
+  .card-date { font-size: 10px; color: #94a3b8; }
+  .card-link { font-size: 10px; color: #4f46e5; text-decoration: none; }
+  .card-link:hover { text-decoration: underline; }
+
+  .loading { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 200px; color: #94a3b8; gap: 12px; }
+  .spinner { width: 32px; height: 32px; border: 3px solid #e2e8f0; border-top-color: #4f46e5; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .empty { text-align: center; padding: 30px 16px; color: #94a3b8; font-size: 13px; }
+  .empty-icon { font-size: 28px; margin-bottom: 8px; }
+  .error-box { margin: 16px; padding: 14px 16px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; color: #b91c1c; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>📋 Support Ticket Kanban</h1>
+    <div class="meta" id="meta">Loading emails from support@quinta.im…</div>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="stat-num" id="count-new">–</div><div class="stat-label">New</div></div>
+    <div class="stat"><div class="stat-num" id="count-progress">–</div><div class="stat-label">In Progress</div></div>
+    <div class="stat"><div class="stat-num" id="count-resolved">–</div><div class="stat-label">Resolved</div></div>
+  </div>
+</header>
+
+<div class="filter-bar">
+  <span class="filter-label">Priority:</span>
+  <button class="filter-btn active" data-filter="all">All</button>
+  <button class="filter-btn" data-filter="High">🔴 High</button>
+  <button class="filter-btn" data-filter="Medium">🟡 Medium</button>
+  <button class="filter-btn" data-filter="Low">🟢 Low</button>
+</div>
+
+<div class="board">
+  <div class="column col-new">
+    <div class="col-header">📥 New <span class="col-badge" id="badge-new">0</span></div>
+    <div class="col-body" id="col-new" data-col="new"><div class="loading"><div class="spinner"></div><span>Fetching…</span></div></div>
+  </div>
+  <div class="column col-inprogress">
+    <div class="col-header">⚙️ In Progress <span class="col-badge" id="badge-inprogress">0</span></div>
+    <div class="col-body" id="col-inprogress" data-col="inprogress"><div class="empty"><div class="empty-icon">🚧</div>Drag tickets here</div></div>
+  </div>
+  <div class="column col-resolved">
+    <div class="col-header">✅ Resolved <span class="col-badge" id="badge-resolved">0</span></div>
+    <div class="col-body" id="col-resolved" data-col="resolved"><div class="empty"><div class="empty-icon">🎉</div>Drag tickets here</div></div>
+  </div>
+</div>
+
+<script>
+const TOOL        = 'mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__outlook_email_search';
+const SUPPORT_BOX = 'support@quinta.im';
+
+const NO_REPLY_PATTERNS = [
+  'noreply','no-reply','donotreply','do-not-reply',
+  'notifications@','alerts@','googlealerts','executiveassistant@',
+  'atlassian@','linkedin.com','read.ai','@e.read','ollama.com',
+  'businessprofile','mailer-daemon','postmaster'
+];
+const HIGH_KW = ['urgent','asap','critical','emergency','broken','not working','down','error','failure','immediately','bloqué','bloquant'];
+const LOW_KW  = ['newsletter','recap','weekly','digest','fyi'];
+const CATS = {
+  'Integration': ['integration','pms','api','sync','connect','webhook','connector'],
+  'Bug / Issue':  ['error','bug','broken','not working','fail','crash','issue','problem'],
+  'Billing':      ['invoice','payment','subscription','billing','facture','cost','pricing'],
+  'Feature Req':  ['feature','request','enhancement','suggestion','improve'],
+};
+
+const ticketState = {};
+let allTickets = [];
+let activeFilter = 'all';
+
+function parseJsonStream(text) {
+  const results = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === '{') { if (depth === 0) start = i; depth++; }
+    else if (c === '}') {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        try { results.push(JSON.parse(text.slice(start, i + 1))); } catch(e) {}
+        start = -1;
+      }
+    }
+  }
+  return results;
+}
+
+function isNoReply(sender) {
+  if (!sender) return true;
+  const s = sender.toLowerCase();
+  // exclude the support mailbox itself sending to itself
+  if (s === SUPPORT_BOX) return true;
+  return NO_REPLY_PATTERNS.some(p => s.includes(p));
+}
+
+function classify(email) {
+  const text = ((email.subject||'') + ' ' + (email.summary||'')).toLowerCase();
+  let priority = 'Medium';
+  if (HIGH_KW.some(k => text.includes(k)) || email.importance === 'high') priority = 'High';
+  else if (LOW_KW.some(k => text.includes(k))) priority = 'Low';
+  let category = 'General';
+  for (const [cat, kws] of Object.entries(CATS)) {
+    if (kws.some(k => text.includes(k))) { category = cat; break; }
+  }
+  return { priority, category };
+}
+
+function fmtDate(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleDateString('en-GB', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+}
+
+function senderName(s) {
+  if (!s) return 'Unknown';
+  if (s.startsWith('/O=')) { const m = s.match(/CN=([^/]+)$/i); return m ? m[1] : s; }
+  const m = s.match(/^(.+?)@/);
+  return m ? m[1].replace(/[._]/g,' ') : s;
+}
+
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function makeCard(ticket) {
+  const { email, priority, category, id } = ticket;
+  const prioClass = priority === 'High' ? 'p-high' : priority === 'Low' ? 'p-low' : 'p-medium';
+  const div = document.createElement('div');
+  div.className = `card card-${priority.toLowerCase()}`;
+  div.draggable = true;
+  div.dataset.id = id;
+  div.dataset.priority = priority;
+  div.innerHTML = `
+    <div class="card-top">
+      <div class="card-title">${escHtml(email.subject || '(no subject)')}</div>
+      <span class="priority-badge ${prioClass}">${priority}</span>
+    </div>
+    <div class="card-summary">${escHtml(email.summary || 'No preview.')}</div>
+    <div class="card-footer">
+      <span class="card-sender" title="${escHtml(email.sender)}">👤 ${escHtml(senderName(email.sender))}</span>
+      <div class="card-right">
+        <span class="category-tag">${escHtml(category)}</span>
+        <span class="card-date">${fmtDate(email.receivedDateTime)}</span>
+        ${email.webLink ? `<a class="card-link" href="${escHtml(email.webLink)}" target="_blank">Open ↗</a>` : ''}
+      </div>
+    </div>`;
+  div.addEventListener('dragstart', e => { e.dataTransfer.setData('ticketId', id); setTimeout(()=>div.classList.add('dragging'),0); });
+  div.addEventListener('dragend', () => div.classList.remove('dragging'));
+  return div;
+}
+
+function renderBoard() {
+  const cols = { new: [], inprogress: [], resolved: [] };
+  for (const t of allTickets) {
+    if (activeFilter !== 'all' && t.priority !== activeFilter) continue;
+    cols[ticketState[t.id] || 'new'].push(t);
+  }
+  const icons  = { new:'📭', inprogress:'🚧', resolved:'🎉' };
+  const labels = { new:'No tickets', inprogress:'Drag tickets here', resolved:'Drag tickets here' };
+  for (const [col, tickets] of Object.entries(cols)) {
+    const el = document.getElementById('col-' + col);
+    el.innerHTML = '';
+    if (!tickets.length) {
+      el.innerHTML = `<div class="empty"><div class="empty-icon">${icons[col]}</div>${labels[col]}</div>`;
+    } else {
+      tickets.forEach(t => el.appendChild(makeCard(t)));
+    }
+    document.getElementById('badge-' + col).textContent = tickets.length;
+  }
+  document.getElementById('count-new').textContent      = cols.new.length;
+  document.getElementById('count-progress').textContent = cols.inprogress.length;
+  document.getElementById('count-resolved').textContent = cols.resolved.length;
+}
+
+function setupDrop() {
+  document.querySelectorAll('.col-body').forEach(col => {
+    col.addEventListener('dragover',  e => { e.preventDefault(); col.classList.add('drag-over'); });
+    col.addEventListener('dragleave', () => col.classList.remove('drag-over'));
+    col.addEventListener('drop', e => {
+      e.preventDefault(); col.classList.remove('drag-over');
+      const id = e.dataTransfer.getData('ticketId');
+      if (id) { ticketState[id] = col.dataset.col; renderBoard(); }
+    });
+  });
+}
+
+function setupFilters() {
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeFilter = btn.dataset.filter;
+      renderBoard();
+    });
+  });
+}
+
+(async () => {
+  setupDrop();
+  setupFilters();
+
+  const result = await window.cowork.callMcpTool(TOOL, {
+    limit: 50,
+    afterDateTime: 'last 30 days',
+    mailboxOwnerEmail: SUPPORT_BOX
+  });
+
+  if (result.isError) {
+    document.getElementById('col-new').innerHTML =
+      `<div class="error-box">⚠️ Could not load emails from <strong>${SUPPORT_BOX}</strong>.<br>Make sure you have delegate access to this mailbox in Outlook.</div>`;
+    document.getElementById('meta').textContent = 'Error loading emails.';
+    return;
+  }
+
+  // Parse — try structuredContent first, then streaming JSON from text
+  let emails = [];
+  if (Array.isArray(result.structuredContent)) {
+    emails = result.structuredContent;
+  } else if (result.structuredContent && typeof result.structuredContent === 'object') {
+    const arr = Object.values(result.structuredContent).find(v => Array.isArray(v));
+    if (arr) emails = arr;
+  }
+  if (!emails.length) {
+    const raw = (result.content || []).map(c => c.text || '').join('');
+    emails = raw.trim().startsWith('[') ? (() => { try { return JSON.parse(raw); } catch(e) { return []; } })() : parseJsonStream(raw);
+  }
+
+  allTickets = emails
+    .filter(e => !isNoReply(e.sender) && (e.subject || e.summary))
+    .map((e, i) => {
+      const { priority, category } = classify(e);
+      return { id: e.id || String(i), email: e, priority, category };
+    });
+
+  document.getElementById('meta').textContent =
+    `${allTickets.length} client email${allTickets.length !== 1 ? 's' : ''} · support@quinta.im · last 30 days · reload to refresh`;
+
+  renderBoard();
+})();
+</script>
+</body>
+</html>

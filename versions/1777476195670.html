@@ -1,4 +1,5 @@
-<!DOCTYPE html><script type="application/json" id="cowork-artifact-meta">
+<!DOCTYPE html>
+<script type="application/json" id="cowork-artifact-meta">
 {
   "name": "Outlook Support Kanban",
   "schemaVersion": 1,
@@ -6,16 +7,12 @@
   "mcpTools": [
     "mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__outlook_email_search",
     "mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__read_resource",
-    "mcp__d3a4e2ad-3765-4c9a-b998-9479d5f47680__search_crm_objects",
-    "mcp__filesystem__write_file",
-    "mcp__filesystem__read_text_file"
+    "mcp__d3a4e2ad-3765-4c9a-b998-9479d5f47680__search_crm_objects"
   ],
   "mcpServerNames": [
     "Microsoft 365",
     "Microsoft 365",
-    "HubSpot",
-    "filesystem",
-    "filesystem"
+    "HubSpot"
   ]
 }
 </script>
@@ -359,23 +356,6 @@ header{background:#fff;border-bottom:1px solid #e2e8f0;padding:11px 18px;display
 </div>
 
 <script>
-if(window.location.protocol==='file:'){
-  document.body.innerHTML='<div style="font-family:Segoe UI,Arial,sans-serif;padding:32px;color:#1e293b"><h2 style="margin:0 0 10px">Run Via Web Server</h2><p style="margin:0 0 10px">This Kanban must be opened from <strong>http://localhost:3000</strong>, not as a local file.</p><p style="margin:0">Close this tab and open: <a href="http://localhost:3000">http://localhost:3000</a></p></div>';
-  throw new Error('file_mode_not_supported');
-}
-if(!window.cowork||typeof window.cowork.callMcpTool!=='function'){
-  window.cowork={
-    callMcpTool:async(tool,args={})=>{
-      const res=await fetch('/api/mcp-proxy',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({tool,args})});
-      if(!res.ok){
-        let msg='proxy_error';
-        try{const j=await res.json();msg=j.error||msg;}catch(_){}
-        return{isError:true,error:msg};
-      }
-      return res.json();
-    }
-  };
-}
 const SUPPORT_AGENTS=['SGU','SHE','ZIO','AHK','IBE','AMJ','ONA','ARA','MEZ','RMD','MAB','SFA','JAT','JFC','JBA','VPO','AZA','RKH','GGO','WPH','CFA','BKH'];
 const CS_AGENTS=['VGU','TBR','NAO','MBH'];
 const ALL_AGENTS=[...SUPPORT_AGENTS,...CS_AGENTS];
@@ -388,45 +368,11 @@ const READ_TOOL='mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__read_resource';
 const HS_SEARCH='mcp__d3a4e2ad-3765-4c9a-b998-9479d5f47680__search_crm_objects';
 const HS_INSIGHTS={userIntent:'Enrich support tickets with HubSpot contact and company data',satisfaction:'NEUTRAL'};
 const SUPPORT_BOX='support@quinta.im';
-const CATEGORIES=['Content / RYA','Integration','Config Request','Platform / Access','IT Escalation','Other','Spam'];
+const CATEGORIES=['Technical failure','Bug Velma','RYA','Connectivity request','Other','Spam'];
 const PRIORITIES=['High','Medium','Low'];
-const TICKET_SUBTYPES=[
-{id:'1.1',type:'Content / RYA',label:'Wrong answer ? dialog exists, data incorrect',tier:'P3',priority:'Medium',responseHours:24},
-{id:'1.2',type:'Content / RYA',label:'Outdated answer ? hotel changed policy',tier:'P3',priority:'Medium',responseHours:24},
-{id:'1.3',type:'Content / RYA',label:'Missing dialog ? topic not configured at all',tier:'P3',priority:'Medium',responseHours:24},
-{id:'1.4',type:'Content / RYA',label:'Partial answer ? dialog exists, fields missing',tier:'P3',priority:'Medium',responseHours:24},
-{id:'1.5',type:'Content / RYA',label:'Broken transactional link ? booking/payment URL dead',tier:'P2',priority:'High',responseHours:4},
-{id:'1.6',type:'Content / RYA',label:'Wrong language ? response in incorrect language',tier:'P3',priority:'Medium',responseHours:24},
-{id:'1.7',type:'Content / RYA',label:'Hotelier-blocked ? awaiting hotel validation',tier:'Paused',priority:'Low',responseHours:null},
-{id:'1.8',type:'Content / RYA',label:'Fallback triggered incorrectly ? dialog exists but unreached',tier:'P2',priority:'High',responseHours:4},
-{id:'2.1',type:'Integration',label:'PMS sync failure',tier:'P2',priority:'High',responseHours:4},
-{id:'2.2',type:'Integration',label:'Booking engine broken',tier:'P1',priority:'High',responseHours:2},
-{id:'2.3',type:'Integration',label:'Channel disconnected',tier:'P2',priority:'High',responseHours:4},
-{id:'2.4',type:'Integration',label:'Token expired',tier:'P2',priority:'High',responseHours:4},
-{id:'2.5',type:'Integration',label:'OTA connection broken',tier:'P2',priority:'High',responseHours:4},
-{id:'2.6',type:'Integration',label:'CRM integration failure',tier:'P3',priority:'Medium',responseHours:24},
-{id:'2.7',type:'Integration',label:'Velma script missing',tier:'P2',priority:'High',responseHours:4},
-{id:'2.8',type:'Integration',label:'Payment gateway failure',tier:'P1',priority:'High',responseHours:2},
-{id:'2.9',type:'Integration',label:'Channel mapping error',tier:'P3',priority:'Medium',responseHours:24},
-{id:'3.1',type:'Config Request',label:'Dialog update',tier:'P3',priority:'Medium',responseHours:24},
-{id:'3.2',type:'Config Request',label:'New dialog filling',tier:'P3',priority:'Medium',responseHours:24},
-{id:'3.3',type:'Config Request',label:'Channel implementation',tier:'P3',priority:'Medium',responseHours:24},
-{id:'3.4',type:'Config Request',label:'Language addition',tier:'P3',priority:'Medium',responseHours:24},
-{id:'3.5',type:'Config Request',label:'Transactional link update',tier:'P3',priority:'Medium',responseHours:24},
-{id:'4.1',type:'Platform / Access',label:'Velma fully down',tier:'P1',priority:'High',responseHours:2},
-{id:'4.2',type:'Platform / Access',label:'Account access issue',tier:'P3',priority:'Medium',responseHours:24},
-{id:'4.3',type:'Platform / Access',label:'Account status stuck',tier:'P3',priority:'Medium',responseHours:24},
-{id:'4.4',type:'Platform / Access',label:'Feature not activated',tier:'P3',priority:'Medium',responseHours:24},
-{id:'4.5',type:'Platform / Access',label:'Analytics not showing',tier:'P3',priority:'Medium',responseHours:24},
-{id:'5.1',type:'IT Escalation',label:'Platform bug',tier:'P1',priority:'High',responseHours:2},
-{id:'5.2',type:'IT Escalation',label:'Connector bug',tier:'P2',priority:'High',responseHours:4},
-{id:'5.3',type:'IT Escalation',label:'Intent detection failure',tier:'P2',priority:'High',responseHours:4},
-{id:'5.4',type:'IT Escalation',label:'Infrastructure timeout',tier:'P1',priority:'High',responseHours:2}
-];
-const SUBTYPE_BY_ID=Object.fromEntries(TICKET_SUBTYPES.map(x=>[x.id,x]));
 const COL_NAMES={new:'📥 New',inp:'⚙️ In Progress',res:'✅ Resolved'};
 const POLL_SECS=60,POLL_WIN_MINS=5;
-const hasCowork=typeof window!=='undefined'&&window.cowork&&typeof window.cowork.callMcpTool==='function';
+const STORAGE_KEY='quinta-kanban-v1',HS_CACHE_KEY='quinta-hs-cache-v5',READS_KEY='quinta-kanban-reads';
 // ── SLA ─────────────────────────────────────────────────────────────────────
 const SLA_HOURS={High:4,Medium:24,Low:48};
 // ── Jira config — set your Jira base URL ────────────────────────────────────
@@ -435,65 +381,34 @@ const JIRA_URL=''; // e.g. 'https://yourcompany.atlassian.net/browse/'
 const BLOCKED_EMAILS=new Set(['noreply@email.teams.microsoft.com','noreply@emeaemail.teams.microsoft.com','partnerships@hoteltechreport.com','no-reply@sharepointonline.com','nab@quicktext.im','alert@quicktext.im','lka@quicktext.im','oum@quicktext.im','hello@quicktext.im','mfe@quicktext.im','news@news.zafirohotels.com','newsletter@mail.hotelvor9.de','alicia@ainews.com','customermarketing@hubspot.com','events@send.zapier.com','learn@send.zapier.com','reminders@facebookmail.com','friendsuggestion@facebookmail.com','hello@news.onlyyouhotels.com','no-reply@accounts.google.com','jordan.hollander@hoteltechreport.com','jordan@hoteltechreport.com','hello@info.grammarly.com','newsletter@aquapalacehotel.com','portblue@email.portbluehotels.com','hello@scribehow.com','no-reply@scribehow.com','team@mail.perplexity.ai','canvadesignschool@engage.canva.com','strawberryjam@substack.com','recommendations@discover.pinterest.com','grandmagichotel@fabulous-hotels.com','dreamcastle@fabulous-hotels.com','support@e.read.ai','noreply@booking.com','email.campaign@sg.booking.com','notify@bayt.com','googlealerts-noreply@google.com','noreply@google.com','twilio-notifications@twilio.com','teamtwilio@team.twilio.com','comments-noreply@docs.google.com','quicktext@mail.sleekplan.com','inspire@emailing.hotelmousai.com','no-reply@360dialog.com','no-reply@teams.mail.microsoft','no-reply@outlook.mail.microsoft','hello@marketing.aircall.io','precheckin@pueblobonito.com','info@crownparadise.com','clients@mail2.blauhotels.com','clientes@mail2.blauhotels.com','comercial@emailing.hotelesdunas.com','notify@mail.trae.ai','no-reply@valentinhotels.com','trademarks@springbirdip.com','no-reply@euc1.monday.com','reservationita@clients.myway-hotels.com','reservas@alcossebrehotel.com','news@hesperiaconnection.com','hkiriakrem1984@gmail.com','info@hotelacapulcolloret.com','terrapinn@tp2.terrapinn.com','hello@ecommcapitals.com','contact-ile@roussillhotel.com','info@ghreymar.com','sas@quinta.im']);
 const BLOCKED_DOMAINS=new Set(['quicktext.im','colossalfactory.com','email.teams.microsoft.com','emeaemail.teams.microsoft.com','facebookmail.com','sg.booking.com','mail.sleekplan.com','teams.mail.microsoft','outlook.mail.microsoft']);
 const NO_REPLY_PATTERNS=['noreply','no-reply','donotreply','do-not-reply','mailer-daemon','postmaster','bounce@','bounces@','notifications@','alerts@','googlealerts','linkedin.com','twitter.com','@mailchimp','@sendgrid','@klaviyo','@constantcontact','executiveassistant@','@e.read.ai','atlassian@','jira@'];
-const NO_REPLY_SUBJECTS=['unsubscribe','you are subscribed','mailing list','google alert:','job alert','linkedin notification','weekly digest','monthly digest','order confirmation','shipment notification','your receipt','newsletter','news digest','microsoft teams meeting','meeting invitation','accepted:','declined:','tentative:','join microsoft teams','teams meeting'];
+const NO_REPLY_SUBJECTS=['unsubscribe','you are subscribed','mailing list','google alert:','job alert','linkedin notification','weekly digest','monthly digest','order confirmation','shipment notification','your receipt'];
 
 function isQuintaSender(s){if(!s)return false;const d=(s.split('@')[1]||'').toLowerCase();return d.includes('quinta');}
 function getClientEmail(emailObj){const sender=emailObj?.sender||'';if(!isQuintaSender(sender))return sender.toLowerCase()||null;const recipients=Array.isArray(emailObj?.recipients)?emailObj.recipients:[];const client=recipients.find(r=>{if(!r||typeof r!=='string')return false;const rl=r.toLowerCase();if(rl===SUPPORT_BOX)return false;if(isQuintaSender(r))return false;if(NO_REPLY_PATTERNS.some(p=>rl.includes(p)))return false;return true;});return client?client.toLowerCase():null;}
-function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(NO_REPLY_SUBJECTS.some(p=>tl.includes(p)))return true;if(/\b(newsletter|webinar|digest|event reminder)\b/.test(tl))return true;if(/(microsoft teams meeting|join microsoft teams meeting|meeting invitation|accepted:|declined:|tentative:)/.test(tl))return true;return false;}
+function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+(e.summary||'')).toLowerCase();return NO_REPLY_SUBJECTS.some(p=>tl.includes(p));}
 
 // ── State ──────────────────────────────────────────────────────────────────
 const seen={};
-let ticketState={},ticketPriority={},ticketCategory={},ticketSubtype={},ticketAssignee={},ticketComments={},ticketClientEmail={};
+let ticketState={},ticketPriority={},ticketCategory={},ticketAssignee={},ticketComments={},ticketClientEmail={};
 let ticketCreatedAt={};
 let ticketJira={};   // ticketId → Jira key (e.g. 'QT-1234') | null
 let spamSenders=new Set();
-let hsCache={},domainCompanyCache={},readMentions=new Set();
+let hsCache={},readMentions=new Set();
 const taggedTickets=new Set();
 let allTickets=[],pollSecsLeft=POLL_SECS,activeP='all',activeA='all',activeCompany='all',activeJira=false,sortDesc=true;
 let viewMode='board',comTicketId=null,jiraTicketId=null,selectedTags=new Set();
 const currentUser=()=>document.getElementById('current-user').value;
 
 let _saveTimer=null;
-async function apiGetState(){
-  try{
-    const res=await fetch('/api/state',{credentials:'include'});
-    if(!res.ok)return null;
-    return await res.json();
-  }catch(_){return null;}
-}
-async function apiSaveState(payload){
-  try{
-    await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(payload)});
-  }catch(_){}
-}
-function saveState(){
-  const payload={ticketState,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketComments,ticketClientEmail,ticketCreatedAt,ticketJira,spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions]};
-  void apiSaveState(payload);
-  const ind=document.getElementById('save-indicator');
-  if(ind){ind.style.opacity='1';clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{ind.style.opacity='0';},2500);}
-}
-async function loadState(){
-  const s=await apiGetState();
-  if(!s)return;
-  if(s.ticketState)Object.assign(ticketState,s.ticketState);
-  if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
-  if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
-  if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);
-  if(s.ticketComments)Object.assign(ticketComments,s.ticketComments);
-  if(s.ticketClientEmail)Object.assign(ticketClientEmail,s.ticketClientEmail);
-  if(s.ticketCreatedAt)Object.assign(ticketCreatedAt,s.ticketCreatedAt);
-  if(s.ticketJira)Object.assign(ticketJira,s.ticketJira);
-  if(s.spamSenders)spamSenders=new Set(s.spamSenders);
-  if(s.hsCache&&typeof s.hsCache==='object')hsCache=s.hsCache;if(s.domainCompanyCache&&typeof s.domainCompanyCache==='object')domainCompanyCache=s.domainCompanyCache;
-  if(Array.isArray(s.readMentions))readMentions=new Set(s.readMentions);
-}
-function saveReads(){saveState();}
-function saveHsCache(){saveState();}
+function saveState(){try{localStorage.setItem(STORAGE_KEY,JSON.stringify({ticketState,ticketPriority,ticketCategory,ticketAssignee,ticketComments,ticketClientEmail,ticketCreatedAt,ticketJira,spamSenders:[...spamSenders]}));const ind=document.getElementById('save-indicator');if(ind){ind.style.opacity='1';clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{ind.style.opacity='0';},2500);}}catch(_){}}
+function loadState(){try{const r=localStorage.getItem(STORAGE_KEY);if(r){const s=JSON.parse(r);if(s.ticketState)Object.assign(ticketState,s.ticketState);if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);if(s.ticketComments)Object.assign(ticketComments,s.ticketComments);if(s.ticketClientEmail)Object.assign(ticketClientEmail,s.ticketClientEmail);if(s.ticketCreatedAt)Object.assign(ticketCreatedAt,s.ticketCreatedAt);if(s.ticketJira)Object.assign(ticketJira,s.ticketJira);if(s.spamSenders)spamSenders=new Set(s.spamSenders);}}catch(_){}try{const r=localStorage.getItem(HS_CACHE_KEY);if(r)hsCache=JSON.parse(r);}catch(_){}try{const r=localStorage.getItem(READS_KEY);if(r)readMentions=new Set(JSON.parse(r));}catch(_){}}
+function saveReads(){try{localStorage.setItem(READS_KEY,JSON.stringify([...readMentions]));}catch(_){}}
+function saveHsCache(){try{localStorage.setItem(HS_CACHE_KEY,JSON.stringify(hsCache));}catch(_){}}
 
 // ── SLA ──────────────────────────────────────────────────────────────────────
 function fmtDuration(ms){const h=Math.floor(ms/3600000);const m=Math.floor((ms%3600000)/60000);if(h>=24){const d=Math.floor(h/24);const rh=h%24;return rh?`${d}d ${rh}h`:`${d}d`;}if(h>0)return m?`${h}h ${m}m`:`${h}h`;return Math.max(0,m)+'m';}
-function getSLAStatus(id){const createdAt=ticketCreatedAt[id];if(!createdAt)return null;const col=ticketState[id]||'new';if(col==='res')return null;const st=SUBTYPE_BY_ID[ticketSubtype[id]||''];if(st?.tier==='Paused')return{text:'Paused (awaiting hotel)',cls:'sla-warn',overdue:false};const hrs=st?.responseHours||(SLA_HOURS[ticketPriority[id]||'Medium']||24);const slaMs=hrs*3600000;const elapsed=Date.now()-new Date(createdAt).getTime();const remaining=slaMs-elapsed;if(remaining<=0){return{text:fmtDuration(Math.abs(remaining))+' overdue',cls:'sla-breach',overdue:true};}const pct=remaining/slaMs;const cls=pct>0.5?'sla-ok':pct>0.25?'sla-warn':'sla-urgent';return{text:fmtDuration(remaining)+' left',cls,overdue:false};}
-function refreshSLABadges(){document.querySelectorAll('[data-sla-id]').forEach(el=>{const id=el.dataset.slaId;const priority=el.dataset.slaPriority;const status=getSLAStatus(id);if(!status){el.style.display='none';return;}el.style.display='';el.textContent='⏱ '+status.text;el.className='sla-badge '+status.cls;});}
+function getSLAStatus(id,priority){const createdAt=ticketCreatedAt[id];if(!createdAt)return null;const col=ticketState[id]||'new';if(col==='res')return null;const slaMs=(SLA_HOURS[priority]||24)*3600000;const elapsed=Date.now()-new Date(createdAt).getTime();const remaining=slaMs-elapsed;if(remaining<=0){return{text:fmtDuration(Math.abs(remaining))+' overdue',cls:'sla-breach',overdue:true};}const pct=remaining/slaMs;const cls=pct>0.5?'sla-ok':pct>0.25?'sla-warn':'sla-urgent';return{text:fmtDuration(remaining)+' left',cls,overdue:false};}
+function refreshSLABadges(){document.querySelectorAll('[data-sla-id]').forEach(el=>{const id=el.dataset.slaId;const priority=el.dataset.slaPriority;const status=getSLAStatus(id,priority);if(!status){el.style.display='none';return;}el.style.display='';el.textContent='⏱ '+status.text;el.className='sla-badge '+status.cls;});}
 
 // ── Spam ─────────────────────────────────────────────────────────────────────
 function recordSpamSender(spamEmail){if(!spamEmail||isQuintaSender(spamEmail)||spamSenders.has(spamEmail))return 0;spamSenders.add(spamEmail);let count=0;allTickets.forEach(t=>{const te=ticketClientEmail[t.id]||t.email.sender?.toLowerCase();if(te===spamEmail){ticketCategory[t.id]='Spam';count++;}});return count;}
@@ -592,14 +507,16 @@ function parseJsonStream(text){const r=[];let d=0,s=-1,inS=false,e2=false;for(le
 function extractEmails(res){if(!res||res.isError)return[];if(Array.isArray(res.structuredContent))return res.structuredContent;if(res.structuredContent&&typeof res.structuredContent==='object'){const a=Object.values(res.structuredContent).find(v=>Array.isArray(v));if(a)return a;}const raw=(res.content||[]).map(c=>c.text||'').join('');if(raw.trim().startsWith('['))try{return JSON.parse(raw);}catch(_){}return parseJsonStream(raw);}
 function hsResults(res){if(!res||res.isError)return[];const sc=res.structuredContent;if(sc?.results)return sc.results;if(Array.isArray(sc))return sc;const raw=(res.content||[]).map(c=>c.text||'').join('');try{const p=JSON.parse(raw);return p.results||p||[];}catch(_){return parseJsonStream(raw);}}
 
-async function findCompanyByDomain(email,excludeContactId){const domain=(email.split('@')[1]||'').toLowerCase();if(!domain||domain.includes('quinta')||['gmail.com','yahoo.com','hotmail.com','outlook.com','live.com'].includes(domain))return{companies:[],via:null};if(domain in domainCompanyCache)return domainCompanyCache[domain];const domRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{filters:[{propertyName:'domain',operator:'EQ',value:domain}]}],properties:['name','domain','createdate'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const domCos=hsResults(domRes);if(domCos.length){const v={companies:domCos,via:'domain'};domainCompanyCache[domain]=v;saveHsCache();return v;}const peerRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'CONTAINS_TOKEN',value:'@'+domain}]}],properties:['email'],limit:8,chatInsights:HS_INSIGHTS});const peers=hsResults(peerRes).filter(c=>c.properties?.email&&(!excludeContactId||c.id.toString()!==excludeContactId.toString()));for(const peer of peers.slice(0,4)){const pCoRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIdValues:[parseInt(peer.id)]}]}],properties:['name','domain','createdate'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const pCos=hsResults(pCoRes);if(pCos.length){const v={companies:pCos,via:'domain-contact'};domainCompanyCache[domain]=v;saveHsCache();return v;}}const v={companies:[],via:null};domainCompanyCache[domain]=v;return v;}
+async function findCompanyByDomain(email,excludeContactId){const domain=(email.split('@')[1]||'').toLowerCase();if(!domain||domain.includes('quinta')||['gmail.com','yahoo.com','hotmail.com','outlook.com','live.com'].includes(domain))return{companies:[],via:null};const domRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{filters:[{propertyName:'domain',operator:'EQ',value:domain}]}],properties:['name','domain','createdate'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const domCos=hsResults(domRes);if(domCos.length)return{companies:domCos,via:'domain'};const peerRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'CONTAINS_TOKEN',value:'@'+domain}]}],properties:['email'],limit:8,chatInsights:HS_INSIGHTS});const peers=hsResults(peerRes).filter(c=>c.properties?.email&&(!excludeContactId||c.id.toString()!==excludeContactId.toString()));for(const peer of peers.slice(0,4)){const pCoRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIdValues:[parseInt(peer.id)]}]}],properties:['name','domain','createdate'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const pCos=hsResults(pCoRes);if(pCos.length)return{companies:pCos,via:'domain-contact'};}return{companies:[],via:null};}
 
-async function enrichWithHubSpot(){try{if(!hasCowork)return;const emailSet=new Set();allTickets.forEach(t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);if(ce){ticketClientEmail[t.id]=ce;if(!(ce in hsCache))emailSet.add(ce);}});const emails=[...emailSet];if(!emails.length)return;const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const foundContacts=[];const notFoundEmails=[];const BATCH=50;for(let i=0;i<emails.length;i+=BATCH){const batch=emails.slice(i,i+BATCH);hsProgress.textContent=`Contacts ${Math.min(i+BATCH,emails.length)}/${emails.length}?`;const cRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'IN',values:batch}]}],properties:['email','firstname','lastname'],limit:BATCH,chatInsights:HS_INSIGHTS});if(cRes?.isError)throw new Error(cRes.error||'hubspot_error');const contacts=hsResults(cRes);batch.forEach(email=>{if(!contacts.find(c=>c.properties?.email?.toLowerCase()===email))notFoundEmails.push(email);});foundContacts.push(...contacts);}const CONCURRENT=5;for(let i=0;i<foundContacts.length;i+=CONCURRENT){const chunk=foundContacts.slice(i,i+CONCURRENT);hsProgress.textContent=`Companies ${Math.min(i+CONCURRENT,foundContacts.length)}/${foundContacts.length}?`;await Promise.all(chunk.map(async contact=>{const email=(contact.properties?.email||'').toLowerCase();if(!email||email in hsCache)return;const contactName=[contact.properties?.firstname,contact.properties?.lastname].filter(Boolean).join(' ')||email;const coRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIdValues:[parseInt(contact.id)]}]}],properties:['name','domain','createdate'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:10,chatInsights:HS_INSIGHTS});if(coRes?.isError)throw new Error(coRes.error||'hubspot_error');let companies=hsResults(coRes);let inferredVia=null;if(!companies.length){const fb=await findCompanyByDomain(email,contact.id);companies=fb.companies;inferredVia=fb.via;}const primary=companies[0]||null;hsCache[email]={contactId:contact.id,contactName,companyName:primary?.properties?.name||null,companyId:primary?.id||null,contactUrl:`https://app.hubspot.com/contacts/25445053/record/0-1/${contact.id}`,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:companies.map(c=>c.properties?.name).filter(Boolean),inferredVia};}));saveHsCache();updateCompanyFilter();if(viewMode==='board')renderBoard();else renderSpamView();}for(let i=0;i<notFoundEmails.length;i+=CONCURRENT){const chunk=notFoundEmails.slice(i,i+CONCURRENT);await Promise.all(chunk.map(async email=>{if(email in hsCache)return;const fb=await findCompanyByDomain(email,null);if(fb.companies.length){const primary=fb.companies[0];hsCache[email]={contactId:null,contactName:null,companyName:primary?.properties?.name||null,companyId:primary?.id||null,contactUrl:null,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:fb.companies.map(c=>c.properties?.name).filter(Boolean),inferredVia:fb.via};}else{hsCache[email]=null;}}));saveHsCache();updateCompanyFilter();if(viewMode==='board')renderBoard();else renderSpamView();}hsStatus.style.display='none';}catch(e){const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const msg=String(e?.message||e||'').toLowerCase();if(msg.includes('hubspot_not_connected')){hsProgress.innerHTML='HubSpot not connected. <a href="/auth/hubspot/start" style="color:#4f46e5;font-weight:700;">Connect now</a>';return;}hsProgress.textContent='HubSpot sync error';}}
+async function enrichWithHubSpot(){const emailSet=new Set();allTickets.forEach(t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);if(ce){ticketClientEmail[t.id]=ce;if(!(ce in hsCache))emailSet.add(ce);}});const emails=[...emailSet];if(!emails.length)return;const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const foundContacts=[];const notFoundEmails=[];const BATCH=50;for(let i=0;i<emails.length;i+=BATCH){const batch=emails.slice(i,i+BATCH);hsProgress.textContent=`Contacts ${Math.min(i+BATCH,emails.length)}/${emails.length}…`;const cRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'IN',values:batch}]}],properties:['email','firstname','lastname'],limit:BATCH,chatInsights:HS_INSIGHTS});const contacts=hsResults(cRes);batch.forEach(email=>{if(!contacts.find(c=>c.properties?.email?.toLowerCase()===email))notFoundEmails.push(email);});foundContacts.push(...contacts);}
+const CONCURRENT=5;for(let i=0;i<foundContacts.length;i+=CONCURRENT){const chunk=foundContacts.slice(i,i+CONCURRENT);hsProgress.textContent=`Companies ${Math.min(i+CONCURRENT,foundContacts.length)}/${foundContacts.length}…`;await Promise.all(chunk.map(async contact=>{const email=(contact.properties?.email||'').toLowerCase();if(!email||email in hsCache)return;const contactName=[contact.properties?.firstname,contact.properties?.lastname].filter(Boolean).join(' ')||email;const coRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIdValues:[parseInt(contact.id)]}]}],properties:['name','domain','createdate'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:10,chatInsights:HS_INSIGHTS});let companies=hsResults(coRes);let inferredVia=null;if(!companies.length){const fb=await findCompanyByDomain(email,contact.id);companies=fb.companies;inferredVia=fb.via;}const primary=companies[0]||null;hsCache[email]={contactId:contact.id,contactName,companyName:primary?.properties?.name||null,companyId:primary?.id||null,contactUrl:`https://app.hubspot.com/contacts/25445053/record/0-1/${contact.id}`,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:companies.map(c=>c.properties?.name).filter(Boolean),inferredVia};}));saveHsCache();updateCompanyFilter();if(viewMode==='board')renderBoard();else renderSpamView();}
+for(let i=0;i<notFoundEmails.length;i+=CONCURRENT){const chunk=notFoundEmails.slice(i,i+CONCURRENT);await Promise.all(chunk.map(async email=>{if(email in hsCache)return;const fb=await findCompanyByDomain(email,null);if(fb.companies.length){const primary=fb.companies[0];hsCache[email]={contactId:null,contactName:null,companyName:primary?.properties?.name||null,companyId:primary?.id||null,contactUrl:null,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:fb.companies.map(c=>c.properties?.name).filter(Boolean),inferredVia:fb.via};}else{hsCache[email]=null;}}));saveHsCache();updateCompanyFilter();if(viewMode==='board')renderBoard();else renderSpamView();}
+hsStatus.style.display='none';}
 
 function updateCompanyFilter(){const companies=new Map();allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(hs?.companyName)companies.set(hs.companyName,true);});const sel=document.getElementById('company-filter');const cur=sel.value;sel.innerHTML='<option value="all">All companies</option>';[...companies.keys()].sort((a,b)=>a.localeCompare(b)).forEach(name=>{const cnt=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&(()=>{const ce=ticketClientEmail[t.id];return ce&&hsCache[ce]?.companyName===name;})()).length;const o=document.createElement('option');o.value=name;o.textContent=name+' ('+cnt+')';if(name===cur)o.selected=true;sel.appendChild(o);});}
-function classifyPriority(e){const st=classifySubtype(e);if(st&&SUBTYPE_BY_ID[st])return SUBTYPE_BY_ID[st].priority;const t=((e.subject||'')+(e.summary||'')).toLowerCase();if(e.importance==='high'||/urgent|asap|critical|not working|broken|error|cannot|bloqu/.test(t))return'High';if(/info|question|hello|bonjour|dear/.test(t))return'Low';return'Medium';}
-function classifyCategory(e){const st=classifySubtype(e);if(st&&SUBTYPE_BY_ID[st])return SUBTYPE_BY_ID[st].type;return'Other';}
-function classifySubtype(e){const t=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(/velma fully down|chatbot not responding|platform down/.test(t))return '4.1';if(/booking engine broken|widget missing|booking widget/.test(t))return '2.2';if(/payment gateway|payment not processing/.test(t))return '2.8';if(/pms sync|availability|rates not flowing/.test(t))return '2.1';if(/channel disconnected|whatsapp|instagram|messenger/.test(t))return '2.3';if(/token expired/.test(t))return '2.4';if(/ota|expedia|booking\.com/.test(t))return '2.5';if(/crm integration/.test(t))return '2.6';if(/script missing|install(ed)? on .*website/.test(t))return '2.7';if(/mapping error|room type|rate mapped/.test(t))return '2.9';if(/wrong language/.test(t))return '1.6';if(/missing dialog/.test(t))return '1.3';if(/partial answer|fields missing/.test(t))return '1.4';if(/broken transactional link|booking\/payment url/.test(t))return '1.5';if(/fallback triggered|unreached/.test(t))return '1.8';if(/outdated answer|policy changed/.test(t))return '1.2';if(/rya|wrong answer|rethink/.test(t))return '1.1';if(/account access|cannot log in|login issue/.test(t))return '4.2';if(/account status stuck|pending|setup not transitioning/.test(t))return '4.3';if(/feature not activated|q brain|module missing/.test(t))return '4.4';if(/analytics not showing|q-bi|reporting dashboard/.test(t))return '4.5';if(/platform bug/.test(t))return '5.1';if(/connector bug/.test(t))return '5.2';if(/intent detection failure|misclassif/.test(t))return '5.3';if(/infrastructure|timing out|timeout/.test(t))return '5.4';if(/connect|integr|pms|channel|webhook|api|crm/.test(t))return '2.6';if(/velma|chatbot|bot/.test(t))return '1.1';return '3.1';}
+function classifyPriority(e){const t=((e.subject||'')+(e.summary||'')).toLowerCase();if(e.importance==='high'||/urgent|asap|critical|not working|broken|error|cannot|bloqué/.test(t))return'High';if(/info|question|hello|bonjour|dear/.test(t))return'Low';return'Medium';}
+function classifyCategory(e){const t=((e.subject||'')+(e.summary||'')).toLowerCase();if(/connect|integr|pms|channel|webhook|api|crm/.test(t))return'Connectivity request';if(/velma|chatbot|bot/.test(t))return'Bug Velma';if(/rya|rethink|wrong answer/.test(t))return'RYA';if(/technical|down|not working|broken|error|fail/.test(t))return'Technical failure';return'Other';}
 function autoAssignNew(tickets){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));Object.entries(ticketAssignee).forEach(([,a])=>{if(a in load)load[a]++;});tickets.forEach(t=>{if(ticketAssignee[t.id])return;const agent=SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);ticketAssignee[t.id]=agent;load[agent]++;});}
 function updateWorkload(){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});const sorted=SUPPORT_AGENTS.map(a=>({a,n:load[a]})).sort((x,y)=>y.n-x.n).slice(0,5);document.getElementById('workload-bar').innerHTML=sorted.map(({a,n})=>`<div class="agent-pill" style="background:${agentColor(a)}20;color:${agentColor(a)}">${a} <span class="cnt">${n}</span></div>`).join('');}
 function showToast(msg,cls=''){const t=document.getElementById('toast');t.textContent=msg;t.className='show'+(cls?' '+cls:'');clearTimeout(t._timer);t._timer=setTimeout(()=>{t.className='';},4500);}
@@ -622,7 +539,7 @@ function makeCard(ticket,isNew=false){
   const cat=ticketCategory[id];
   const comments=ticketComments[id]||[];
   const isTagged=taggedTickets.has(id);
-  const subtype=ticketSubtype[id]||'';const catOpts=CATEGORIES.map(c=>`<option value="${esc(c)}"${c===cat?' selected':''}>${esc(c)}</option>`).join('');const subOpts=TICKET_SUBTYPES.filter(x=>x.type===cat).map(x=>`<option value="${x.id}"${x.id===subtype?' selected':''}>${x.id} ? ${esc(x.label)}</option>`).join('');
+  const catOpts=CATEGORIES.map(c=>`<option value="${esc(c)}"${c===cat?' selected':''}>${esc(c)}</option>`).join('');
   const ac=agentColor(agent);
   const clientEmail=ticketClientEmail[id]||null;
   const isInternalReply=isQuintaSender(email.sender)&&!!clientEmail;
@@ -630,8 +547,8 @@ function makeCard(ticket,isNew=false){
   const jiraKey=ticketJira[id]||null;
 
   // SLA badge
-  const slaStatus=getSLAStatus(id);
-  const slaBadgeHtml=slaStatus?`<div class="sla-row"><span class="sla-badge ${slaStatus.cls}" data-sla-id="${id}" data-sla-priority="${esc(priority)}" title="SLA target">⏱ ${slaStatus.text}</span></div>`:'';
+  const slaStatus=getSLAStatus(id,priority);
+  const slaBadgeHtml=slaStatus?`<div class="sla-row"><span class="sla-badge ${slaStatus.cls}" data-sla-id="${id}" data-sla-priority="${esc(priority)}" title="SLA: ${SLA_HOURS[priority]}h target">⏱ ${slaStatus.text}</span></div>`:'';
 
   // HubSpot row
   let hsHtml='';
@@ -658,7 +575,7 @@ function makeCard(ticket,isNew=false){
       <button class="pbadge pb-${priority}" data-pr="${id}">${priority}</button>
     </div>
     <div class="card-summary">${esc(email.summary||'No preview.')}</div>
-    <div class="card-controls"><select class="cat-select" data-cat="${id}">${catOpts}</select><select class="cat-select" data-sub="${id}">${subOpts||'<option value="">No subtype</option>'}</select></div>
+    <div class="card-controls"><select class="cat-select" data-cat="${id}">${catOpts}</select></div>
     ${slaBadgeHtml}${hsHtml}
     <div class="card-footer">
       ${senderHtml}
@@ -734,7 +651,6 @@ async function openEmailModal(ticket){
   const ol=document.getElementById('em-outlook');ol.onclick=email.webLink?()=>window.open(email.webLink,'_blank'):null;ol.style.display=email.webLink?'':'none';
   document.getElementById('email-modal').classList.add('open');
   const uri=(email.uri||`mail:///messages/${email.id}`).split('?')[0]+'?owner='+encodeURIComponent(SUPPORT_BOX);
-  if(!hasCowork){document.getElementById('em-body').innerHTML=`<p style="color:#64748b;font-style:italic">Outlook content preview is only available in MCP mode.</p>`;return;}
   const res=await window.cowork.callMcpTool(READ_TOOL,{uri});
   if(res.isError){document.getElementById('em-body').innerHTML=`<p style="color:#64748b;font-style:italic">${esc(email.summary||'No preview.')}</p>`;return;}
   const sc=res.structuredContent;let body='';
@@ -753,30 +669,17 @@ function renderMentions(){const me=currentUser();const mentions=getMentions(me);
 document.getElementById('mentions-btn').addEventListener('click',()=>{renderMentions();document.getElementById('mentions-modal').classList.add('open');setTimeout(()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});saveReads();updateMentionsBadge();},2000);});
 document.getElementById('mark-all-read').addEventListener('click',()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});saveReads();renderMentions();updateMentionsBadge();});
 
-function addTickets(emails){let n=0;emails.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;const subtype=classifySubtype(e);const st=SUBTYPE_BY_ID[subtype]||null;const t={id:e.id,email:e,priority:st?.priority||classifyPriority(e)};const ce=getClientEmail(e);if(ce)ticketClientEmail[e.id]=ce;if(!ticketCreatedAt[e.id])ticketCreatedAt[e.id]=e.receivedDateTime||new Date().toISOString();const effectiveEmail=ce||e.sender?.toLowerCase();if(effectiveEmail&&spamSenders.has(effectiveEmail)){ticketCategory[e.id]='Spam';}else if(!ticketCategory[e.id]){ticketCategory[e.id]=st?.type||classifyCategory(e);}if(!ticketSubtype[e.id]&&st)ticketSubtype[e.id]=st.id;if(st)ticketPriority[e.id]=st.priority;if(!ticketAssignee[e.id]){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,allTickets.filter(x=>ticketAssignee[x.id]===a).length]));ticketAssignee[e.id]=SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);}allTickets.push(t);n++;});return n;}
-async function poll(){if(!hasCowork){startCountdown();return;}const after=isoMinsAgo(POLL_WIN_MINS);const res=await window.cowork.callMcpTool(SEARCH_TOOL,{limit:20,afterDateTime:after,mailboxOwnerEmail:SUPPORT_BOX});const n=addTickets(extractEmails(res));document.getElementById('last-poll').textContent='Checked: '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(n>0){saveState();showToast(n+' new ticket'+(n>1?'s':'')+' arrived!');if(viewMode==='board')renderBoard();else renderSpamView();enrichWithHubSpot();}startCountdown();}
+function addTickets(emails){let n=0;emails.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;const t={id:e.id,email:e,priority:classifyPriority(e)};const ce=getClientEmail(e);if(ce)ticketClientEmail[e.id]=ce;if(!ticketCreatedAt[e.id])ticketCreatedAt[e.id]=e.receivedDateTime||new Date().toISOString();const effectiveEmail=ce||e.sender?.toLowerCase();if(effectiveEmail&&spamSenders.has(effectiveEmail)){ticketCategory[e.id]='Spam';}else if(!ticketCategory[e.id]){ticketCategory[e.id]=classifyCategory(e);}if(!ticketAssignee[e.id]){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,allTickets.filter(x=>ticketAssignee[x.id]===a).length]));ticketAssignee[e.id]=SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);}allTickets.push(t);n++;});return n;}
+async function poll(){const after=isoMinsAgo(POLL_WIN_MINS);const res=await window.cowork.callMcpTool(SEARCH_TOOL,{limit:20,afterDateTime:after,mailboxOwnerEmail:SUPPORT_BOX});const n=addTickets(extractEmails(res));document.getElementById('last-poll').textContent='Checked: '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(n>0){saveState();showToast(n+' new ticket'+(n>1?'s':'')+' arrived!');if(viewMode==='board')renderBoard();else renderSpamView();enrichWithHubSpot();}startCountdown();}
 
 (async()=>{
-  buildAgentUI();
-  await loadState();
+  buildAgentUI();loadState();
   document.getElementById('fstats').textContent='Fetching latest emails…';
   const[recentRes,weekRes]=await Promise.all([window.cowork.callMcpTool(SEARCH_TOOL,{limit:50,mailboxOwnerEmail:SUPPORT_BOX}),window.cowork.callMcpTool(SEARCH_TOOL,{limit:50,afterDateTime:isoDaysAgo(7),mailboxOwnerEmail:SUPPORT_BOX})]);
-  if(recentRes?.isError||weekRes?.isError){
-    const err=(recentRes?.error||weekRes?.error||'').toLowerCase();
-    if(err.includes('m365_not_connected')||err.includes('graph_refresh_error_')){
-      document.getElementById('fstats').innerHTML='Microsoft 365 mailbox is not connected. <a href=\"/auth/microsoft/start\" style=\"color:#4f46e5;font-weight:700;\">Connect now</a>';
-    }else{
-      document.getElementById('fstats').textContent='Mailbox sync error: '+(recentRes?.error||weekRes?.error||'unknown');
-    }
-    document.getElementById('meta').textContent='Secure web mode active (manual tickets + board workflow available)';
-    renderBoard();updateCompanyFilter();updateSpamBadge();updateJiraBadge();
-    setInterval(refreshSLABadges,60000);
-    return;
-  }
   const raw=[...extractEmails(recentRes),...extractEmails(weekRes)];
   const deduped=[...new Map(raw.filter(e=>e.id).map(e=>[e.id,e])).values()];
   deduped.sort((a,b)=>new Date(b.receivedDateTime||0)-new Date(a.receivedDateTime||0));
-  addTickets(deduped);
+  const total=addTickets(deduped);
   autoAssignNew(allTickets);
   allTickets.forEach(t=>{const te=ticketClientEmail[t.id]||t.email.sender?.toLowerCase();if(te&&spamSenders.has(te))ticketCategory[t.id]='Spam';});
   saveState();

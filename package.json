@@ -1,0 +1,18 @@
+﻿{
+  "name": "outlook-support-kanban-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Secure web app wrapper for Outlook Support Kanban",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "express-session": "^1.18.1",
+    "helmet": "^8.0.0"
+  }
+}

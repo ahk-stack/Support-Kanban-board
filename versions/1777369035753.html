@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<script type="application/json" id="cowork-artifact-meta">
+{
+  "name": "Outlook Support Kanban",
+  "schemaVersion": 1,
+  "description": "Live Kanban board that pulls emails from Outlook, filters out no-reply/automated senders, and classifies each email as a support ticket with priority, category, sender, and date. Columns: New → In Progress → Resolved.",
+  "mcpTools": [
+    "mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__outlook_email_search",
+    "mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__read_resource"
+  ],
+  "mcpServerNames": [
+    "Microsoft 365",
+    "Microsoft 365"
+  ]
+}
+</script>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Support Kanban — Quinta</title>
+<style>
+:root{color-scheme:light;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a2e;min-height:100vh;}
+header{background:#fff;border-bottom:1px solid #e2e8f0;padding:11px 18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+.header-left h1{font-size:16px;font-weight:700;display:flex;align-items:center;gap:6px;}
+.header-left h1 small{font-size:11px;font-weight:400;color:#94a3b8;}
+.meta{font-size:11px;color:#64748b;margin-top:3px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.live-indicator{display:flex;align-items:center;gap:5px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:999px;padding:3px 10px;font-size:11px;font-weight:600;color:#15803d;}
+.live-dot{width:6px;height:6px;border-radius:50%;background:#16a34a;animation:pulse 1.5s infinite;}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.8)}}
+.poll-countdown{font-size:10px;color:#94a3b8;}
+.header-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.user-sel{display:flex;align-items:center;gap:5px;padding:5px 10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;}
+.user-sel label{font-size:11px;color:#64748b;font-weight:600;white-space:nowrap;}
+.user-sel select{font-size:12px;font-weight:700;border:none;background:transparent;cursor:pointer;color:#4f46e5;max-width:80px;}
+.workload-bar{display:flex;gap:4px;flex-wrap:wrap;max-width:320px;}
+.agent-pill{display:flex;align-items:center;gap:3px;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600;}
+.agent-pill .cnt{font-size:13px;font-weight:800;}
+#toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);padding:10px 22px;border-radius:999px;font-size:13px;font-weight:600;z-index:3000;opacity:0;transition:opacity .3s;pointer-events:none;white-space:nowrap;background:#1e293b;color:#fff;}
+#toast.show{opacity:1;}
+#toast.ok{background:#065f46;}
+#toast.info{background:#1d4ed8;}
+.filter-bar{background:#fff;border-bottom:1px solid #f1f5f9;padding:9px 18px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
+.filter-label{font-size:11.5px;color:#64748b;font-weight:600;}
+.chip{font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid #e2e8f0;background:#fff;cursor:pointer;color:#475569;transition:all .15s;}
+.chip.active{background:#4f46e5;color:#fff;border-color:#4f46e5;}
+.sep{width:1px;background:#e2e8f0;margin:0 3px;align-self:stretch;}
+.sort-toggle{display:flex;border:1px solid #e2e8f0;border-radius:999px;overflow:hidden;}
+.sort-btn{font-size:11px;padding:3px 11px;border:none;background:#fff;cursor:pointer;color:#475569;transition:all .15s;white-space:nowrap;}
+.sort-btn.active{background:#4f46e5;color:#fff;}
+.agent-filter-sel{font-size:11px;border:1px solid #e2e8f0;border-radius:999px;padding:3px 10px;background:#fff;cursor:pointer;color:#475569;}
+.fstats{font-size:11px;color:#64748b;padding:5px 18px;background:#fff;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center;}
+.board{display:flex;gap:13px;padding:14px 18px;overflow-x:auto;min-height:calc(100vh - 165px);}
+.column{flex:1;min-width:265px;max-width:370px;display:flex;flex-direction:column;}
+.col-header{padding:10px 14px;border-radius:10px 10px 0 0;display:flex;align-items:center;justify-content:space-between;font-weight:700;font-size:13px;}
+.col-new .col-header{background:#ede9fe;color:#5b21b6;}
+.col-inp .col-header{background:#fef3c7;color:#92400e;}
+.col-res .col-header{background:#d1fae5;color:#065f46;}
+.col-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:rgba(0,0,0,.12);}
+.col-body{background:#e4e6ed;border-radius:0 0 10px 10px;padding:8px;flex:1;display:flex;flex-direction:column;gap:7px;min-height:180px;transition:background .15s;}
+.col-body.drag-over{background:#c7d2fe;}
+.card{background:#fff;border-radius:8px;padding:11px 12px;box-shadow:0 1px 3px rgba(0,0,0,.08);cursor:grab;border-left:3px solid #e2e8f0;transition:box-shadow .15s,transform .15s;user-select:none;}
+.card:hover{box-shadow:0 4px 14px rgba(0,0,0,.12);transform:translateY(-1px);}
+.card.dragging{opacity:.4;}
+.card.p-High{border-left-color:#ef4444;}.card.p-Medium{border-left-color:#f59e0b;}.card.p-Low{border-left-color:#10b981;}
+.card.tagged{outline:2px solid #4f46e5;}
+.card.is-new{animation:slideIn .35s cubic-bezier(.22,1,.36,1);}
+@keyframes slideIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+.card-row1{display:flex;align-items:flex-start;justify-content:space-between;gap:6px;margin-bottom:5px;}
+.card-title{font-size:12.5px;font-weight:600;color:#1e293b;line-height:1.4;flex:1;}
+.pbadge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:999px;flex-shrink:0;cursor:pointer;border:none;outline:none;}
+.pb-High{background:#fee2e2;color:#b91c1c;}.pb-Medium{background:#fef3c7;color:#92400e;}.pb-Low{background:#d1fae5;color:#065f46;}
+.card-summary{font-size:11px;color:#64748b;line-height:1.5;margin-bottom:7px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.card-controls{display:flex;align-items:center;gap:5px;margin-bottom:7px;}
+.cat-select{font-size:10px;border:1px solid #e2e8f0;border-radius:5px;padding:2px 5px;color:#475569;background:#f8fafc;cursor:pointer;flex:1;min-width:0;}
+.card-footer{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px;}
+.card-sender{font-size:10.5px;color:#4f46e5;font-weight:500;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.card-actions{display:flex;align-items:center;gap:4px;}
+.agent-badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;cursor:pointer;border:none;outline:none;color:#fff;}
+.com-btn{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:6px;font-size:10.5px;font-weight:600;color:#475569;padding:2px 7px;cursor:pointer;display:flex;align-items:center;gap:3px;}
+.com-btn:hover,.com-btn.has-comments{background:#ede9fe;color:#5b21b6;border-color:#c4b5fd;}
+.com-badge{background:#5b21b6;color:#fff;border-radius:999px;font-size:9px;font-weight:800;padding:0 5px;line-height:16px;}
+.open-email-btn{background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;font-size:10.5px;font-weight:600;color:#1d4ed8;padding:2px 7px;cursor:pointer;white-space:nowrap;}
+.card-date{font-size:10px;color:#94a3b8;}
+.loading{display:flex;flex-direction:column;align-items:center;justify-content:center;height:160px;color:#94a3b8;gap:10px;}
+.spinner{width:26px;height:26px;border:3px solid #e2e8f0;border-top-color:#4f46e5;border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty{text-align:center;padding:26px 14px;color:#94a3b8;font-size:12px;}
+.empty-icon{font-size:24px;margin-bottom:6px;}
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:flex-start;justify-content:center;padding-top:36px;}
+.modal-bg.open{display:flex;}
+.modal{background:#fff;border-radius:12px;width:min(680px,94vw);max-height:86vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.25);}
+.modal-head{padding:14px 18px;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;}
+.modal-head h2{font-size:14px;font-weight:700;color:#1e293b;flex:1;line-height:1.4;}
+.modal-close-x{font-size:18px;background:none;border:none;cursor:pointer;color:#94a3b8;}
+.modal-meta-bar{padding:9px 18px;background:#f8fafc;border-bottom:1px solid #f1f5f9;display:flex;gap:14px;flex-wrap:wrap;}
+.modal-meta-bar span{font-size:11.5px;color:#64748b;}
+.modal-meta-bar strong{color:#1e293b;}
+.modal-body-scroll{padding:16px 18px;overflow-y:auto;flex:1;font-size:13px;line-height:1.7;color:#374151;}
+.modal-actions{padding:11px 18px;border-top:1px solid #f1f5f9;display:flex;gap:8px;justify-content:flex-end;}
+.btn-out{font-size:12px;padding:6px 14px;border-radius:7px;border:1px solid #e2e8f0;background:#fff;cursor:pointer;color:#475569;}
+.btn-out:hover{background:#f1f5f9;}
+.btn-primary{font-size:12px;padding:6px 16px;border-radius:7px;border:none;background:#4f46e5;color:#fff;cursor:pointer;font-weight:600;}
+.com-thread{display:flex;flex-direction:column;gap:12px;padding:14px 18px;overflow-y:auto;flex:1;min-height:120px;max-height:300px;}
+.comment-item{display:flex;gap:10px;}
+.comment-avatar{width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;flex-shrink:0;margin-top:2px;color:#fff;}
+.comment-bubble{flex:1;background:#f8fafc;border:1px solid #f1f5f9;border-radius:0 8px 8px 8px;padding:8px 12px;}
+.comment-header{display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap;}
+.comment-author{font-size:11.5px;font-weight:700;color:#1e293b;}
+.comment-time{font-size:10px;color:#94a3b8;}
+.comment-tags{display:flex;gap:4px;flex-wrap:wrap;margin-top:3px;}
+.ctag{font-size:10px;font-weight:700;padding:1px 7px;border-radius:999px;color:#fff;}
+.comment-text{font-size:12.5px;color:#374151;line-height:1.5;white-space:pre-wrap;word-break:break-word;}
+.no-comments{text-align:center;padding:28px;color:#94a3b8;font-size:12px;}
+.teams-banner{background:#f0f4ff;border:1px solid #c7d2fe;border-radius:8px;padding:9px 12px;display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px;}
+.teams-banner-text{font-size:11px;color:#3730a3;font-weight:500;}
+.teams-banner-btn{font-size:11px;font-weight:700;background:#5b5ea6;color:#fff;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;white-space:nowrap;flex-shrink:0;}
+.teams-banner-btn:hover{background:#4338ca;}
+.compose-area{border-top:1px solid #e2e8f0;padding:13px 18px;display:flex;flex-direction:column;gap:9px;background:#fafafa;border-radius:0 0 12px 12px;}
+.compose-label{font-size:11px;font-weight:600;color:#64748b;}
+.compose-textarea{width:100%;min-height:68px;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;font-size:12.5px;font-family:inherit;resize:vertical;color:#1e293b;background:#fff;}
+.compose-textarea:focus{outline:none;border-color:#4f46e5;}
+.compose-footer{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;}
+.tag-section{flex:1;}
+.tag-section label{font-size:11px;font-weight:600;color:#64748b;display:block;margin-bottom:5px;}
+.tag-grid{display:flex;gap:4px;flex-wrap:wrap;}
+.tag-chip{font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;cursor:pointer;border:1.5px solid transparent;transition:all .15s;user-select:none;opacity:.45;color:#fff;}
+.tag-chip.selected{opacity:1;border-color:rgba(255,255,255,.6);}
+.tag-chip:hover{opacity:.8;}
+</style>
+</head>
+<body>
+<header>
+  <div class="header-left">
+    <h1>📋 Support Kanban <small>support@quinta.im</small></h1>
+    <div class="meta"><span class="live-indicator"><span class="live-dot"></span>LIVE</span><span id="meta">Loading…</span><span class="poll-countdown" id="poll-cd"></span></div>
+  </div>
+  <div class="header-right">
+    <div class="user-sel"><label>🧑 You:</label><select id="current-user"></select></div>
+    <div class="workload-bar" id="workload-bar"></div>
+  </div>
+</header>
+<div class="filter-bar">
+  <span class="filter-label">Priority:</span>
+  <button class="chip active" data-pf="all">All</button>
+  <button class="chip" data-pf="High">🔴 High</button>
+  <button class="chip" data-pf="Medium">🟡 Med</button>
+  <button class="chip" data-pf="Low">🟢 Low</button>
+  <div class="sep"></div>
+  <span class="filter-label">Agent:</span>
+  <select class="agent-filter-sel" id="agent-filter"><option value="all">All agents</option></select>
+  <button class="chip" id="tagged-filter" data-af="tagged" style="display:none">🔔 Tagged me</button>
+  <div class="sep"></div>
+  <span class="filter-label">Sort:</span>
+  <div class="sort-toggle">
+    <button class="sort-btn active" id="sort-desc">↓ Newest</button>
+    <button class="sort-btn" id="sort-asc">↑ Oldest</button>
+  </div>
+</div>
+<div class="fstats"><span id="fstats">Fetching…</span><span id="last-poll" style="font-size:10px;color:#94a3b8;"></span></div>
+<div class="board">
+  <div class="column col-new"><div class="col-header">📥 New <span class="col-badge" id="badge-new">0</span></div><div class="col-body" id="col-new" data-col="new"><div class="loading"><div class="spinner"></div><span>Fetching…</span></div></div></div>
+  <div class="column col-inp"><div class="col-header">⚙️ In Progress <span class="col-badge" id="badge-inp">0</span></div><div class="col-body" id="col-inp" data-col="inp"><div class="empty"><div class="empty-icon">🚧</div>Drag here</div></div></div>
+  <div class="column col-res"><div class="col-header">✅ Resolved <span class="col-badge" id="badge-res">0</span></div><div class="col-body" id="col-res" data-col="res"><div class="empty"><div class="empty-icon">🎉</div>Drag here</div></div></div>
+</div>
+<div id="toast"></div>
+<div class="modal-bg" id="email-modal">
+  <div class="modal">
+    <div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal">✕</button></div>
+    <div class="modal-meta-bar" id="em-meta"></div>
+    <div class="modal-body-scroll" id="em-body"></div>
+    <div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-outlook">Open in Outlook ↗</button></div>
+  </div>
+</div>
+<div class="modal-bg" id="com-modal">
+  <div class="modal" style="max-width:560px;">
+    <div class="modal-head">
+      <div style="flex:1;min-width:0;"><h2 id="com-title"></h2><div style="font-size:11px;color:#94a3b8;margin-top:3px;" id="com-subtitle"></div></div>
+      <button class="modal-close-x" data-close="com-modal">✕</button>
+    </div>
+    <div class="com-thread" id="com-thread"></div>
+    <div class="compose-area">
+      <div class="compose-label">Add internal comment</div>
+      <textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea>
+      <div class="compose-footer">
+        <div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div>
+        <button class="btn-primary" id="com-post" style="align-self:flex-end;">Post</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const SUPPORT_AGENTS=['SGU','SHE','ZIO','AHK','IBE','AMJ','ONA','ARA','MEZ','RMD','MAB','SFA','JAT','JFC','JBA','VPO','AZA','RKH','GGO','WPH','CFA','BKH'];
+const CS_AGENTS=['VGU','TBR','NAO','MBH'];
+const ALL_AGENTS=[...SUPPORT_AGENTS,...CS_AGENTS];
+const CLIENT_TAG='CLIENT';
+const EMAIL_MAP=Object.fromEntries(ALL_AGENTS.map(t=>[t,t.toLowerCase()+'@quinta.im']));
+const PALETTE=['#5b21b6','#1d4ed8','#065f46','#b45309','#9d174d','#0e7490','#7c3aed','#166534','#c2410c','#1e40af','#6b21a8','#0369a1','#7e22ce','#15803d','#b91c1c','#0891b2','#4f46e5','#dc2626','#059669','#d97706','#7c3aed','#0f766e'];
+function agentColor(t){let h=0;for(const c of t)h=(h*31+c.charCodeAt(0))%PALETTE.length;return PALETTE[h];}
+const SEARCH_TOOL='mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__outlook_email_search';
+const READ_TOOL='mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__read_resource';
+const SUPPORT_BOX='support@quinta.im';
+const CATEGORIES=['Technical failure','Bug Velma','RYA','Connectivity request','Other','Spam'];
+const PRIORITIES=['High','Medium','Low'];
+const POLL_SECS=60,POLL_WIN_MINS=5,STORAGE_KEY='quinta-kanban-v1';
+const NO_REPLY_PATTERNS=['noreply','no-reply','donotreply','do-not-reply','mailer-daemon','postmaster','bounce@','bounces@','notifications@','alerts@','googlealerts','linkedin.com','twitter.com','facebook.com','@mailchimp','@sendgrid','@klaviyo','@constantcontact','executiveassistant@','@e.read.ai','atlassian@','jira@'];
+const NO_REPLY_SUBJECTS=['unsubscribe','you are subscribed','mailing list','google alert:','job alert','linkedin notification','weekly digest','monthly digest','order confirmation','shipment notification','your receipt'];
+function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+(e.summary||'')).toLowerCase();return NO_REPLY_SUBJECTS.some(p=>tl.includes(p));}
+const seen={};let ticketState={},ticketPriority={},ticketCategory={},ticketAssignee={},ticketComments={};
+const taggedTickets=new Set();let allTickets=[],pollSecsLeft=POLL_SECS,activeP='all',activeA='all',sortDesc=true,comTicketId=null,selectedTags=new Set();
+const currentUser=()=>document.getElementById('current-user').value;
+function saveState(){try{localStorage.setItem(STORAGE_KEY,JSON.stringify({ticketState,ticketPriority,ticketCategory,ticketAssignee,ticketComments}));}catch(_){}}
+function loadState(){try{const raw=localStorage.getItem(STORAGE_KEY);if(!raw)return;const s=JSON.parse(raw);if(s.ticketState)Object.assign(ticketState,s.ticketState);if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);if(s.ticketComments)Object.assign(ticketComments,s.ticketComments);}catch(_){}}
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function isoMinsAgo(m){return new Date(Date.now()-m*60000).toISOString();}
+function isoDaysAgo(d){return new Date(Date.now()-d*86400000).toISOString();}
+function fmtDate(iso){if(!iso)return'';const d=new Date(iso),now=new Date(),diff=now-d,mins=Math.floor(diff/60000);if(mins<1)return'Just now';if(mins<60)return mins+'m ago';const hrs=Math.floor(diff/3600000);if(hrs<24)return'Today '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});const days=Math.floor(diff/86400000);if(days===1)return'Yesterday '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(days<7)return d.toLocaleDateString('en-GB',{weekday:'short',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});}
+function fmtTime(ts){return new Date(ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'});}
+function senderName(s){if(!s)return'Unknown';if(s.startsWith('/O=')){const m=s.match(/CN=([^/]+)$/i);return m?m[1]:s;}const m=s.match(/^(.+?)@/);return m?m[1].replace(/[._-]/g,' '):s;}
+function parseJsonStream(text){const r=[];let d=0,s=-1,inS=false,e2=false;for(let i=0;i<text.length;i++){const c=text[i];if(e2){e2=false;continue;}if(c==='\\'&&inS){e2=true;continue;}if(c==='"'){inS=!inS;continue;}if(inS)continue;if(c==='{'){if(d===0)s=i;d++;}else if(c==='}'){d--;if(d===0&&s!==-1){try{r.push(JSON.parse(text.slice(s,i+1)));}catch(_){}s=-1;}}}return r;}
+function extractEmails(res){if(!res||res.isError)return[];if(Array.isArray(res.structuredContent))return res.structuredContent;if(res.structuredContent&&typeof res.structuredContent==='object'){const a=Object.values(res.structuredContent).find(v=>Array.isArray(v));if(a)return a;}const raw=(res.content||[]).map(c=>c.text||'').join('');if(raw.trim().startsWith('['))try{return JSON.parse(raw);}catch(_){}return parseJsonStream(raw);}
+function classifyPriority(e){const t=((e.subject||'')+(e.summary||'')).toLowerCase();if(e.importance==='high'||/urgent|asap|critical|not working|broken|error|cannot|bloqué/.test(t))return'High';if(/info|question|hello|bonjour|dear/.test(t))return'Low';return'Medium';}
+function classifyCategory(e){const t=((e.subject||'')+(e.summary||'')).toLowerCase();if(/connect|integr|pms|channel|webhook|api|crm/.test(t))return'Connectivity request';if(/velma|chatbot|bot/.test(t))return'Bug Velma';if(/rya|rethink|wrong answer/.test(t))return'RYA';if(/technical|down|not working|broken|error|fail/.test(t))return'Technical failure';return'Other';}
+function autoAssign(tickets){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));Object.entries(ticketAssignee).forEach(([,a])=>{if(a in load)load[a]++;});tickets.forEach(t=>{if(ticketAssignee[t.id])return;const agent=SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);ticketAssignee[t.id]=agent;load[agent]++;});}
+function updateWorkload(){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));allTickets.forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});const sorted=SUPPORT_AGENTS.map(a=>({a,n:load[a]})).sort((x,y)=>y.n-x.n).slice(0,5);document.getElementById('workload-bar').innerHTML=sorted.map(({a,n})=>`<div class="agent-pill" style="background:${agentColor(a)}20;color:${agentColor(a)}">${a} <span class="cnt">${n}</span></div>`).join('');}
+
+// ── Teams deep link — stored separately, referenced by index ───────────
+// URL stored in JS array to avoid HTML attribute escaping issues
+const _teamsLinks=[];
+
+function buildTeamsLink(tags, comment, ticketSubject, poster){
+  const agentTags=tags.filter(t=>t!==CLIENT_TAG);
+  if(!agentTags.length)return null;
+  const emails=agentTags.map(t=>EMAIL_MAP[t]).filter(Boolean).join(',');
+  const msg='[Support Kanban] '+poster+' tagged you on ticket: "'+ticketSubject+'"\n\nComment: '+comment.slice(0,300)+(comment.length>300?'...':'');
+  return 'https://teams.microsoft.com/l/chat/0/0?users='+encodeURIComponent(emails)+'&message='+encodeURIComponent(msg);
+}
+
+function openTeamsLink(idx){
+  const url=_teamsLinks[idx];
+  if(!url)return;
+  // Try msteams:// protocol first (opens desktop app), then web fallback
+  const desktopUrl=url.replace('https://teams.microsoft.com','msteams://teams.microsoft.com');
+  try{
+    const a=document.createElement('a');
+    a.href=desktopUrl;
+    a.target='_blank';
+    a.rel='noopener';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }catch(_){
+    const a=document.createElement('a');
+    a.href=url;
+    a.target='_blank';
+    a.rel='noopener';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+}
+
+function showToast(msg,cls=''){const t=document.getElementById('toast');t.textContent=msg;t.className='show'+(cls?' '+cls:'');clearTimeout(t._timer);t._timer=setTimeout(()=>{t.className='';},5000);}
+function startCountdown(){pollSecsLeft=POLL_SECS;const cd=document.getElementById('poll-cd');const tick=setInterval(()=>{pollSecsLeft--;cd.textContent=pollSecsLeft>0?'· '+pollSecsLeft+'s':'· checking…';if(pollSecsLeft<=0)clearInterval(tick);},1000);}
+function rebuildTagged(){taggedTickets.clear();const me=currentUser();Object.entries(ticketComments).forEach(([id,cs])=>{if(cs.some(c=>c.tags.includes(me)))taggedTickets.add(id);});document.getElementById('tagged-filter').style.display=taggedTickets.size?'':'none';}
+function buildAgentUI(){
+  const sel=document.getElementById('current-user');
+  sel.innerHTML='<optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup>';
+  const af=document.getElementById('agent-filter');
+  af.innerHTML='<option value="all">All agents</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><option value="tagged">🔔 Tagged me</option>';
+  const grid=document.getElementById('tag-grid');
+  grid.innerHTML=[...SUPPORT_AGENTS,...CS_AGENTS,CLIENT_TAG].map(t=>{
+    const bg=t===CLIENT_TAG?'#475569':agentColor(t);
+    return`<span class="tag-chip" data-tag="${t}" style="background:${bg}" title="${EMAIL_MAP[t]||t}">${t}${CS_AGENTS.includes(t)?' CS':''}</span>`;
+  }).join('');
+  grid.querySelectorAll('.tag-chip').forEach(chip=>{chip.addEventListener('click',()=>{const tag=chip.dataset.tag;if(selectedTags.has(tag)){selectedTags.delete(tag);chip.classList.remove('selected');}else{selectedTags.add(tag);chip.classList.add('selected');}});});
+}
+const nextAgent=cur=>{const i=SUPPORT_AGENTS.indexOf(cur);return SUPPORT_AGENTS[i>=0?(i+1)%SUPPORT_AGENTS.length:0];};
+const nextPriority=cur=>PRIORITIES[(PRIORITIES.indexOf(cur)+1)%PRIORITIES.length];
+function makeCard(ticket,isNew=false){
+  const{email,id}=ticket;const priority=ticketPriority[id]||ticket.priority;const agent=ticketAssignee[id]||SUPPORT_AGENTS[0];const cat=ticketCategory[id];const comments=ticketComments[id]||[];const isTagged=taggedTickets.has(id);const catOpts=CATEGORIES.map(c=>`<option value="${esc(c)}"${c===cat?' selected':''}>${esc(c)}</option>`).join('');const ac=agentColor(agent);
+  const div=document.createElement('div');div.className=`card p-${priority}${isNew?' is-new':''}${isTagged?' tagged':''}`;div.draggable=true;div.dataset.id=id;
+  div.innerHTML=`<div class="card-row1"><div class="card-title">${esc(email.subject||'(no subject)')}</div><button class="pbadge pb-${priority}" data-pr="${id}">${priority}</button></div><div class="card-summary">${esc(email.summary||'No preview.')}</div><div class="card-controls"><select class="cat-select" data-cat="${id}">${catOpts}</select></div><div class="card-footer"><span class="card-sender" title="${esc(email.sender)}">👤 ${esc(senderName(email.sender))}</span><div class="card-actions"><span class="card-date">${fmtDate(email.receivedDateTime)}</span><button class="open-email-btn" data-oe="${id}">📧 Open</button><button class="agent-badge" data-ag="${id}" style="background:${ac}">${agent}</button><button class="com-btn${comments.length?' has-comments':''}" data-oc="${id}">💬${comments.length?` <span class="com-badge">${comments.length}</span>`:''}</button></div></div>`;
+  div.addEventListener('dragstart',e=>{e.dataTransfer.setData('ticketId',id);setTimeout(()=>div.classList.add('dragging'),0);});div.addEventListener('dragend',()=>div.classList.remove('dragging'));
+  div.querySelector('[data-pr]').addEventListener('click',e=>{e.stopPropagation();ticketPriority[id]=nextPriority(priority);saveState();renderBoard();});
+  div.querySelector('[data-ag]').addEventListener('click',e=>{e.stopPropagation();ticketAssignee[id]=nextAgent(agent);saveState();updateWorkload();renderBoard();});
+  div.querySelector('[data-cat]').addEventListener('change',e=>{ticketCategory[id]=e.target.value;saveState();});
+  div.querySelector('[data-oe]').addEventListener('click',ev=>{ev.stopPropagation();openEmailModal(ticket);});
+  div.querySelector('[data-oc]').addEventListener('click',ev=>{ev.stopPropagation();openComModal(ticket);});
+  return div;
+}
+function renderBoard(){
+  allTickets.sort((a,b)=>{const ta=new Date(a.email.receivedDateTime||0).getTime(),tb=new Date(b.email.receivedDateTime||0).getTime();return sortDesc?tb-ta:ta-tb;});
+  rebuildTagged();
+  ['new','inp','res'].forEach(col=>{const tickets=allTickets.filter(t=>{const p=ticketPriority[t.id]||t.priority;if(activeP!=='all'&&p!==activeP)return false;if(activeA==='tagged')return taggedTickets.has(t.id);if(activeA!=='all'&&ticketAssignee[t.id]!==activeA)return false;return(ticketState[t.id]||'new')===col;});const el=document.getElementById('col-'+col);const icons={new:'📭',inp:'🚧',res:'🎉'};el.innerHTML='';if(!tickets.length)el.innerHTML=`<div class="empty"><div class="empty-icon">${icons[col]}</div>No tickets</div>`;else tickets.forEach(t=>el.appendChild(makeCard(t)));document.getElementById('badge-'+col).textContent=tickets.length;});
+  updateWorkload();
+}
+document.getElementById('sort-desc').addEventListener('click',()=>{sortDesc=true;document.getElementById('sort-desc').classList.add('active');document.getElementById('sort-asc').classList.remove('active');renderBoard();});
+document.getElementById('sort-asc').addEventListener('click',()=>{sortDesc=false;document.getElementById('sort-asc').classList.add('active');document.getElementById('sort-desc').classList.remove('active');renderBoard();});
+document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(id){ticketState[id]=col.dataset.col;saveState();renderBoard();}});});
+document.querySelectorAll('[data-pf]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-pf]').forEach(x=>x.classList.remove('active'));b.classList.add('active');activeP=b.dataset.pf;renderBoard();}));
+document.getElementById('agent-filter').addEventListener('change',e=>{activeA=e.target.value;renderBoard();});
+document.getElementById('current-user').addEventListener('change',renderBoard);
+document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
+document.querySelectorAll('.modal-bg').forEach(bg=>{bg.addEventListener('click',e=>{if(e.target===bg)bg.classList.remove('open');});});
+
+// ── Thread: event delegation for Teams buttons ─────────────────────────
+document.getElementById('com-thread').addEventListener('click',e=>{
+  const btn=e.target.closest('.teams-banner-btn');
+  if(btn){
+    const idx=parseInt(btn.dataset.linkIdx,10);
+    openTeamsLink(idx);
+  }
+});
+
+async function openEmailModal(ticket){const{email,id}=ticket;document.getElementById('em-title').textContent=email.subject||'(no subject)';document.getElementById('em-meta').innerHTML=`<span><strong>From:</strong> ${esc(email.sender||'—')}</span><span><strong>Received:</strong> ${fmtDate(email.receivedDateTime)}</span><span><strong>Agent:</strong> ${ticketAssignee[id]||'—'}</span><span><strong>Category:</strong> ${ticketCategory[id]||'—'}</span>`;document.getElementById('em-body').innerHTML='<div class="loading"><div class="spinner"></div></div>';const ol=document.getElementById('em-outlook');ol.onclick=email.webLink?()=>window.open(email.webLink,'_blank'):null;ol.style.display=email.webLink?'':'none';document.getElementById('email-modal').classList.add('open');const uri=(email.uri||`mail:///messages/${email.id}`).split('?')[0]+'?owner='+encodeURIComponent(SUPPORT_BOX);const res=await window.cowork.callMcpTool(READ_TOOL,{uri});if(res.isError){document.getElementById('em-body').innerHTML=`<p style="color:#64748b;font-style:italic">${esc(email.summary||'No preview.')}</p>`;return;}const sc=res.structuredContent;let body='';if(sc){body=sc.body?.content||sc.bodyPreview||sc.preview||'';if((sc.body?.contentType||'').toLowerCase()==='html'){body=body.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<a /gi,'<a target="_blank" ');}else body=body.replace(/\n/g,'<br>');}if(!body){const raw=(res.content||[]).map(c=>c.text||'').join('');body=raw?raw.replace(/\n/g,'<br>'):'<em style="color:#94a3b8">No content.</em>';}document.getElementById('em-body').innerHTML=`<div style="overflow-wrap:break-word">${body}</div>`;}
+
+function renderThread(id){
+  _teamsLinks.length=0; // reset link store for this render
+  const cs=ticketComments[id]||[];
+  const el=document.getElementById('com-thread');
+  if(!cs.length){el.innerHTML='<div class="no-comments">💬 No comments yet.</div>';return;}
+
+  const ticket=allTickets.find(t=>t.id===id);
+
+  el.innerHTML=cs.map(c=>{
+    const tagHtml=c.tags.map(t=>{const bg=t===CLIENT_TAG?'#475569':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');
+    const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'#475569';
+    const agentTags=c.tags.filter(t=>t!==CLIENT_TAG);
+    let teamsBanner='';
+    if(agentTags.length&&ticket){
+      const url=buildTeamsLink(c.tags,c.text,ticket.email.subject||'',c.author);
+      if(url){
+        const idx=_teamsLinks.length;
+        _teamsLinks.push(url); // store URL safely in JS, reference by index
+        teamsBanner=`<div class="teams-banner"><span class="teams-banner-text">Teams chat ready for: ${agentTags.join(', ')}</span><button class="teams-banner-btn" data-link-idx="${idx}">Open in Teams</button></div>`;
+      }
+    }
+    return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text">${esc(c.text)}</div>${teamsBanner}</div></div>`;
+  }).join('');
+  el.scrollTop=el.scrollHeight;
+}
+
+function openComModal(ticket){const{email,id}=ticket;comTicketId=id;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${ticketAssignee[id]||'—'} · ${ticketCategory[id]||'—'} · ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
+
+document.getElementById('com-post').addEventListener('click',()=>{
+  const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;
+  if(!ticketComments[comTicketId])ticketComments[comTicketId]=[];
+  const tags=[...selectedTags];const author=currentUser();
+  ticketComments[comTicketId].push({author,text,tags,ts:Date.now()});
+  document.getElementById('com-input').value='';selectedTags.clear();
+  document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));
+  saveState();renderThread(comTicketId);renderBoard();
+  const agentTags=tags.filter(t=>t!==CLIENT_TAG);
+  if(agentTags.length){
+    const ticket=allTickets.find(t=>t.id===comTicketId);
+    const url=ticket?buildTeamsLink(tags,text,ticket.email.subject||'',author):null;
+    if(url){
+      showToast('Comment posted — opening Teams...','info');
+      setTimeout(()=>openTeamsLink(_teamsLinks.length-1),300);
+    }else{showToast('Comment posted · Tagged: '+agentTags.join(', '));}
+  }else{showToast('Comment posted');}
+});
+
+function addTickets(emails){let n=0;emails.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;const t={id:e.id,email:e,priority:classifyPriority(e)};if(!ticketCategory[e.id])ticketCategory[e.id]=classifyCategory(e);if(!ticketAssignee[e.id]){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,allTickets.filter(x=>ticketAssignee[x.id]===a).length]));ticketAssignee[e.id]=SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);}allTickets.push(t);n++;});return n;}
+async function poll(){const after=isoMinsAgo(POLL_WIN_MINS);const res=await window.cowork.callMcpTool(SEARCH_TOOL,{limit:20,afterDateTime:after,mailboxOwnerEmail:SUPPORT_BOX});const n=addTickets(extractEmails(res));document.getElementById('last-poll').textContent='Checked: '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(n>0){saveState();showToast(n+' new ticket'+(n>1?'s':'')+' arrived!');renderBoard();}startCountdown();}
+(async()=>{
+  buildAgentUI();loadState();
+  document.getElementById('fstats').textContent='Fetching latest emails…';
+  const[recentRes,weekRes]=await Promise.all([window.cowork.callMcpTool(SEARCH_TOOL,{limit:50,mailboxOwnerEmail:SUPPORT_BOX}),window.cowork.callMcpTool(SEARCH_TOOL,{limit:50,afterDateTime:isoDaysAgo(7),mailboxOwnerEmail:SUPPORT_BOX})]);
+  const raw=[...extractEmails(recentRes),...extractEmails(weekRes)];
+  const deduped=[...new Map(raw.filter(e=>e.id).map(e=>[e.id,e])).values()];
+  deduped.sort((a,b)=>new Date(b.receivedDateTime||0)-new Date(a.receivedDateTime||0));
+  const total=addTickets(deduped);
+  const unassigned=allTickets.filter(t=>!ticketAssignee[t.id]);
+  if(unassigned.length){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));Object.values(ticketAssignee).forEach(a=>{if(a in load)load[a]++;});unassigned.forEach(t=>{const agent=SUPPORT_AGENTS.reduce((m,a)=>load[a]<load[m]?a:m,SUPPORT_AGENTS[0]);ticketAssignee[t.id]=agent;load[agent]++;});saveState();}
+  const filtered=deduped.length-total,newest=allTickets[0]?.email?.receivedDateTime;
+  document.getElementById('fstats').textContent=`${total} tickets · ${filtered} automated excluded · most recent: ${newest?fmtDate(newest):'—'}`;
+  document.getElementById('meta').textContent=`${total} tickets · polling every ${POLL_SECS}s`;
+  renderBoard();startCountdown();setInterval(poll,POLL_SECS*1000);
+})();
+</script>
+</body>
+</html>
