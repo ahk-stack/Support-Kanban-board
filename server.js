@@ -30,12 +30,20 @@ const HAS_STATIC_HUBSPOT_TOKEN = !!HUBSPOT_TOKEN && HUBSPOT_TOKEN.startsWith('pa
 const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID || '';
 const HUBSPOT_CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET || '';
 const HUBSPOT_REDIRECT_URI = process.env.HUBSPOT_REDIRECT_URI || `http://localhost:${PORT}/auth/hubspot/callback`;
-const HUBSPOT_SCOPES = process.env.HUBSPOT_SCOPES || 'crm.objects.contacts.read crm.objects.companies.read crm.objects.deals.read crm.objects.tickets.read crm.objects.owners.read';
+const HUBSPOT_SCOPES = process.env.HUBSPOT_SCOPES || 'crm.objects.contacts.read crm.objects.companies.read crm.objects.deals.read crm.objects.tickets.read crm.objects.owners.read cms.site_search.read';
 const HUBSPOT_PKCE_CODE_VERIFIER = process.env.HUBSPOT_PKCE_CODE_VERIFIER || '';
 const HUBSPOT_PKCE_CODE_CHALLENGE = process.env.HUBSPOT_PKCE_CODE_CHALLENGE || '';
 const HUBSPOT_AUTHORIZE_BASE = process.env.HUBSPOT_AUTHORIZE_BASE || 'https://app.hubspot.com/oauth/authorize';
+const HUBSPOT_TICKET_PIPELINE = String(process.env.HUBSPOT_TICKET_PIPELINE || '').trim();
+const HUBSPOT_TICKET_STAGE = String(process.env.HUBSPOT_TICKET_STAGE || '').trim();
 const HUBSPOT_READ_SCOPE_SET = new Set(
   HUBSPOT_SCOPES
+    .split(/\s+/)
+    .map(s => s.trim())
+    .filter(Boolean)
+);
+const HUBSPOT_ALLOWED_WRITE_SCOPES = new Set(
+  String(process.env.HUBSPOT_ALLOWED_WRITE_SCOPES || 'tickets crm.objects.tickets.write')
     .split(/\s+/)
     .map(s => s.trim())
     .filter(Boolean)
@@ -109,6 +117,20 @@ function hasOnlyReadHubspotScopes(scopeStr) {
     .filter(Boolean);
   if (!scopes.length) return true;
   return scopes.every(isReadOnlyHubspotScope);
+}
+function isAllowedHubspotScope(scope) {
+  if (!scope || typeof scope !== 'string') return false;
+  if (scope === 'oauth') return true;
+  if (scope.endsWith('.read')) return true;
+  return HUBSPOT_ALLOWED_WRITE_SCOPES.has(scope);
+}
+function hasOnlyAllowedHubspotScopes(scopeStr) {
+  const scopes = String(scopeStr || '')
+    .split(/\s+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+  if (!scopes.length) return true;
+  return scopes.every(isAllowedHubspotScope);
 }
 function writeBackupSnapshot(state) {
   fs.mkdirSync(VERSIONS_DIR, { recursive: true });
@@ -280,6 +302,31 @@ async function hubspotSearch(args) {
   return res.json();
 }
 
+async function hubspotListTicketPipelines(token) {
+  const r = await fetch('https://api.hubapi.com/crm/v3/pipelines/tickets', {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!r.ok) {
+    const txt = await r.text();
+    throw new Error(`hubspot_ticket_pipelines_error_${r.status}:${txt.slice(0, 220)}`);
+  }
+  const j = await r.json();
+  return Array.isArray(j?.results) ? j.results : [];
+}
+
+function pickDefaultTicketStage(pipeline) {
+  const stages = Array.isArray(pipeline?.stages) ? pipeline.stages : [];
+  if (!stages.length) return null;
+  const openStage = stages.find(s => String(s?.metadata?.ticketState || '').toUpperCase() === 'OPEN');
+  if (openStage) return openStage;
+  const sorted = [...stages].sort((a, b) => {
+    const da = Number(a?.displayOrder || 0);
+    const db = Number(b?.displayOrder || 0);
+    return da - db;
+  });
+  return sorted[0] || null;
+}
+
 async function hubspotGetCompanyById(token, companyId, properties = []) {
   const qs = properties.length ? `?properties=${encodeURIComponent(properties.join(','))}` : '';
   const r = await fetch(`https://api.hubapi.com/crm/v3/objects/companies/${encodeURIComponent(companyId)}${qs}`, {
@@ -327,6 +374,105 @@ async function hubspotGetOwnerById(token, ownerId) {
     fullName: fullName || null,
     email: String(j.email || '').trim() || null
   };
+}
+
+function stripHtml(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeForQuery(text) {
+  const stop = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'have', 'your', 'you', 'are', 'was', 'were', 'but', 'not', 'can', 'cant', 'will', 'would', 'our', 'their', 'about', 'issue', 'error', 'ticket', 'support', 'please', 'thanks', 'thank']);
+  const counts = new Map();
+  String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 4 && !stop.has(w))
+    .forEach(w => counts.set(w, (counts.get(w) || 0) + 1));
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([w]) => w).slice(0, 10);
+}
+
+function cleanHighlightedText(s) {
+  return stripHtml(String(s || '').replace(/<\/?span[^>]*>/gi, ''));
+}
+
+async function graphGetMessageWithAttachments(token, mailbox, msgId) {
+  const msg = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=id,subject,body,bodyPreview,from,toRecipients,receivedDateTime,webLink,hasAttachments`, token);
+  let attachments = [];
+  if (msg?.hasAttachments) {
+    const at = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=15&$select=id,name,contentType,size,isInline,contentBytes`, token);
+    attachments = Array.isArray(at?.value) ? at.value : [];
+  }
+  const attachmentFindings = [];
+  const attachmentTextChunks = [];
+  attachments.forEach(a => {
+    const name = String(a?.name || 'attachment');
+    const contentType = String(a?.contentType || '').toLowerCase();
+    const size = Number(a?.size || 0);
+    if (a?.isInline) return;
+    if (contentType.startsWith('text/') || contentType.includes('json') || contentType.includes('xml') || contentType.includes('csv')) {
+      try {
+        const decoded = Buffer.from(String(a.contentBytes || ''), 'base64').toString('utf8');
+        const clipped = decoded.slice(0, 12000);
+        attachmentTextChunks.push(`Attachment ${name}: ${clipped}`);
+        attachmentFindings.push(`${name} (${contentType || 'text'}) parsed`);
+        return;
+      } catch (_) {}
+    }
+    attachmentFindings.push(`${name} (${contentType || 'binary'}, ${size} bytes) detected but not fully parsable`);
+  });
+  const bodyType = String(msg?.body?.contentType || 'text').toLowerCase();
+  const bodyText = bodyType === 'html' ? stripHtml(msg?.body?.content || '') : String(msg?.body?.content || msg?.bodyPreview || '');
+  return { message: msg, bodyText, attachmentFindings, attachmentText: attachmentTextChunks.join('\n\n') };
+}
+
+async function hubspotSearchKnowledgeArticles(token, query, limit = 5) {
+  const params = new URLSearchParams({
+    q: query,
+    type: 'KNOWLEDGE_ARTICLE',
+    limit: String(Math.min(Math.max(Number(limit) || 5, 1), 10)),
+    length: 'LONG'
+  });
+  const res = await fetch(`https://api.hubapi.com/cms/site-search/2026-03/search?${params.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`hubspot_kb_search_error_${res.status}:${txt.slice(0, 220)}`);
+  }
+  const data = await res.json();
+  const results = Array.isArray(data?.results) ? data.results : [];
+  return results.map(r => ({
+    id: r.id,
+    title: cleanHighlightedText(r.title || 'Untitled article'),
+    description: cleanHighlightedText(r.description || ''),
+    url: r.url || null,
+    score: Number(r.score || 0)
+  }));
+}
+
+function buildDebugProposal(context, kbArticles) {
+  const summaryBase = `Issue analyzed from email subject "${context.subject || '(no subject)'}"${context.companyName ? ` for ${context.companyName}` : ''}.`;
+  const steps = [];
+  if (kbArticles.length) {
+    const top = kbArticles[0];
+    steps.push(`Review article "${top.title}" and apply the documented fix path first.`);
+    if (top.description) steps.push(top.description.split(/(?<=[.!?])\s+/).slice(0, 2).join(' '));
+    steps.push('Validate in staging/test flow, then request client confirmation with exact reproduction steps.');
+  } else {
+    steps.push('Reproduce the issue with the same inputs from the customer email.');
+    steps.push('Check recent integration/authentication/config changes in the impacted system.');
+    steps.push('Gather logs/screenshots and escalate with clear reproduction if issue persists.');
+  }
+  return { summary: summaryBase, steps: steps.filter(Boolean) };
 }
 
 async function hubspotListOwners(token) {
@@ -489,7 +635,7 @@ app.get('/auth/hubspot/start', requireAuth, (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
   req.session.hubspotState = state;
   const usePkce = !!HUBSPOT_PKCE_CODE_VERIFIER && !!HUBSPOT_PKCE_CODE_CHALLENGE;
-  const enforcedScopes = [...HUBSPOT_READ_SCOPE_SET].filter(isReadOnlyHubspotScope).join(' ');
+  const enforcedScopes = [...HUBSPOT_READ_SCOPE_SET].filter(isAllowedHubspotScope).join(' ');
   const useMcpUserAuthorize = HUBSPOT_AUTHORIZE_BASE.includes('/oauth/authorize/user');
   const params = new URLSearchParams({
     client_id: HUBSPOT_CLIENT_ID,
@@ -531,8 +677,8 @@ app.get('/auth/hubspot/callback', requireAuth, async (req, res) => {
       return res.status(500).send(`HubSpot token exchange failed: ${t}`);
     }
     const tokenJson = await tokenRes.json();
-    if (tokenJson.scope && !hasOnlyReadHubspotScopes(tokenJson.scope)) {
-      return res.status(403).send(`HubSpot granted non-read scope(s): ${tokenJson.scope || 'none'}`);
+    if (tokenJson.scope && !hasOnlyAllowedHubspotScopes(tokenJson.scope)) {
+      return res.status(403).send(`HubSpot granted disallowed scope(s): ${tokenJson.scope || 'none'}`);
     }
     const tokens = {
       accessToken: tokenJson.access_token,
@@ -917,6 +1063,231 @@ app.get('/api/hubspot/data-hygiene', requireAuth, async (req, res) => {
     };
     dataHygieneCache = { generatedAt: Date.now(), payload };
     return res.json(payload);
+  } catch (err) {
+    return res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+app.post('/api/debug-expert', requireAuth, async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const ticketId = String(payload.ticketId || '').trim();
+    const email = payload.email || {};
+    if (!ticketId || !email?.uri) return res.status(400).json({ error: 'missing_ticket_email_context' });
+
+    const idMatch = String(email.uri || '').match(/mail:\/\/\/messages\/([^?]+)/);
+    const msgId = idMatch?.[1];
+    if (!msgId) return res.status(400).json({ error: 'missing_message_id' });
+
+    const mailbox = 'support@quinta.im';
+    const graphToken = await graphDelegatedToken(req);
+    const detailed = await graphGetMessageWithAttachments(graphToken, mailbox, msgId);
+
+    const baseText = [
+      String(email.subject || ''),
+      String(email.summary || ''),
+      String(detailed.bodyText || ''),
+      String(detailed.attachmentText || '')
+    ].join('\n');
+    const queryTerms = tokenizeForQuery(baseText);
+    const kbQuery = queryTerms.slice(0, 8).join(' ') || String(email.subject || '').trim() || 'support issue';
+
+    const hubspotToken = await getHubspotAccessToken(req);
+    let kbArticles = [];
+    try {
+      kbArticles = await hubspotSearchKnowledgeArticles(hubspotToken, kbQuery, 6);
+    } catch (_) {
+      kbArticles = [];
+    }
+
+    const proposal = buildDebugProposal({
+      subject: email.subject || detailed?.message?.subject || '',
+      companyName: payload.companyName || null
+    }, kbArticles);
+
+    return res.json({
+      ticketId,
+      queryUsed: kbQuery,
+      summary: proposal.summary,
+      steps: proposal.steps,
+      articles: kbArticles.slice(0, 5),
+      attachmentFindings: detailed.attachmentFindings || []
+    });
+  } catch (err) {
+    return res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+app.get('/api/hubspot/tickets/pipelines', requireAuth, async (req, res) => {
+  try {
+    const token = await getHubspotAccessToken(req);
+    const pipelines = await hubspotListTicketPipelines(token);
+    return res.json({
+      pipelines: pipelines.map(p => ({
+        id: String(p.id || ''),
+        label: p.label || '',
+        stages: (Array.isArray(p.stages) ? p.stages : []).map(s => ({
+          id: String(s.id || ''),
+          label: s.label || '',
+          displayOrder: Number(s.displayOrder || 0)
+        }))
+      }))
+    });
+  } catch (err) {
+    return res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+app.post('/api/hubspot/tickets/sync', requireAuth, async (req, res) => {
+  try {
+    const token = await getHubspotAccessToken(req);
+    const {
+      kanbanTicketId,
+      companyId,
+      subject,
+      description,
+      priority,
+      category,
+      receivedAt,
+      assignee
+    } = req.body || {};
+    if (!kanbanTicketId) return res.status(400).json({ error: 'missing_kanban_ticket_id' });
+    if (!companyId) return res.status(400).json({ error: 'missing_company_id' });
+
+    const hsPriority = (() => {
+      const p = String(priority || '').toLowerCase();
+      if (p === 'high') return 'HIGH';
+      if (p === 'low') return 'LOW';
+      return 'MEDIUM';
+    })();
+    // Prefer explicit env values first so user-level OAuth tokens don't need pipeline discovery permission.
+    let pipelineId = HUBSPOT_TICKET_PIPELINE || '';
+    let stageId = HUBSPOT_TICKET_STAGE || '';
+    if (!pipelineId || !stageId) {
+      try {
+        const pipelines = await hubspotListTicketPipelines(token);
+        const selectedPipeline = (() => {
+          if (pipelineId) {
+            const byEnv = pipelines.find(p => String(p?.id || '') === pipelineId);
+            if (byEnv) return byEnv;
+          }
+          const def = pipelines.find(p => p?.default === true);
+          return def || pipelines[0] || null;
+        })();
+        pipelineId = pipelineId || (selectedPipeline?.id ? String(selectedPipeline.id) : '');
+        if (!stageId) {
+          const fallbackStage = selectedPipeline ? pickDefaultTicketStage(selectedPipeline) : null;
+          stageId = fallbackStage?.id ? String(fallbackStage.id) : '';
+        }
+      } catch (e) {
+        const msg = String(e?.message || e || '');
+        if (msg.includes('hubspot_ticket_pipelines_error_403')) {
+          // Last-resort fallback for user-level OAuth restrictions.
+          pipelineId = pipelineId || '0';
+          stageId = stageId || '1';
+        } else {
+          throw e;
+        }
+      }
+    }
+    if (!pipelineId || !stageId) {
+      return res.status(400).json({ error: 'hubspot_ticket_pipeline_stage_not_resolved_set_HUBSPOT_TICKET_PIPELINE_and_HUBSPOT_TICKET_STAGE' });
+    }
+
+    const content = [
+      `Created by Support Kanban`,
+      `Kanban ticket: ${kanbanTicketId}`,
+      assignee ? `Assigned agent: ${assignee}` : null,
+      category ? `Category: ${category}` : null,
+      receivedAt ? `Received: ${receivedAt}` : null,
+      '',
+      String(description || '').trim()
+    ].filter(Boolean).join('\n');
+
+    const createPayload = {
+      properties: {
+        subject: String(subject || `Support ticket ${kanbanTicketId}`).slice(0, 255),
+        content: content.slice(0, 60000),
+        hs_ticket_priority: hsPriority,
+        hs_pipeline: pipelineId,
+        hs_pipeline_stage: stageId
+      }
+    };
+
+    const createRes = await fetch('https://api.hubapi.com/crm/v3/objects/tickets', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(createPayload)
+    });
+    let created = null;
+    let createErrorText = '';
+    if (!createRes.ok) {
+      createErrorText = await createRes.text();
+    } else {
+      created = await createRes.json();
+    }
+
+    // Fallback for portals/apps using legacy `tickets` scope behavior (only for scope/permission style failures).
+    const shouldTryLegacyFallback = !created?.id && /scope|forbidden|unauthorized|oauth|permission|MISSING_SCOPES/i.test(createErrorText || '');
+    if (!created?.id && shouldTryLegacyFallback) {
+      const legacyPayload = {
+        properties: [
+          { name: 'subject', value: String(subject || `Support ticket ${kanbanTicketId}`).slice(0, 255) },
+          { name: 'content', value: content.slice(0, 60000) },
+          { name: 'hs_ticket_priority', value: hsPriority },
+          { name: 'hs_pipeline', value: pipelineId },
+          { name: 'hs_pipeline_stage', value: stageId }
+        ],
+        associations: {
+          associatedCompanyIds: [Number(companyId)].filter(n => Number.isFinite(n))
+        }
+      };
+      const legacyRes = await fetch('https://api.hubapi.com/crm-objects/v1/objects/tickets', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(legacyPayload)
+      });
+      if (!legacyRes.ok) {
+        const legacyTxt = await legacyRes.text();
+        return res.status(legacyRes.status).json({
+          error: `hubspot_ticket_create_failed_v3:${createErrorText.slice(0, 240)} | legacy:${legacyTxt.slice(0, 240)}`
+        });
+      }
+      const legacyCreated = await legacyRes.json().catch(() => ({}));
+      const legacyId = legacyCreated?.objectId || legacyCreated?.id || null;
+      if (!legacyId) {
+        return res.status(500).json({ error: 'hubspot_ticket_create_failed_legacy_missing_id' });
+      }
+      return res.json({
+        ok: true,
+        kanbanTicketId: String(kanbanTicketId),
+        hubspotTicketId: String(legacyId),
+        hubspotTicketUrl: `https://app.hubspot.com/contacts/25445053/record/0-5/${legacyId}`
+      });
+    } else if (!created?.id) {
+      return res.status(createRes.status || 400).json({ error: `hubspot_ticket_create_failed_v3:${(createErrorText || '').slice(0, 280)}` });
+    }
+
+    const assocRes = await fetch(`https://api.hubapi.com/crm/v4/objects/tickets/${encodeURIComponent(created.id)}/associations/default/companies/${encodeURIComponent(companyId)}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!assocRes.ok) {
+      const txt = await assocRes.text();
+      return res.status(assocRes.status).json({ error: `hubspot_ticket_association_failed:${txt.slice(0, 280)}` });
+    }
+    return res.json({
+      ok: true,
+      kanbanTicketId: String(kanbanTicketId),
+      hubspotTicketId: String(created.id),
+      hubspotTicketUrl: `https://app.hubspot.com/contacts/25445053/record/0-5/${created.id}`
+    });
   } catch (err) {
     return res.status(500).json({ error: String(err.message || err) });
   }

@@ -1,4 +1,35 @@
-# Support Kanban Board - Full Project Handoff (Updated May 25, 2026)
+# Support Kanban Board - Full Project Handoff (Updated May 29, 2026)
+
+## Latest Incident + Lessons Learned (May 29, 2026)
+
+### What happened
+- HubSpot ticket sync appeared stuck (`Syncing` / `Queued`) and did not consistently switch to `See on HubSpot`.
+- Root causes were:
+  1. UI state not reflecting blocked/failed sync paths clearly.
+  2. HubSpot user-level OAuth token denied tickets pipeline discovery endpoint (`403`).
+  3. Re-auth flow hit unauthorized when started outside an authenticated Kanban session.
+
+### Fixes implemented
+- Frontend sync state hardening:
+  - timeout + stale in-flight cleanup
+  - explicit blocked/failed state (`Retry HubSpot`)
+  - clearer queued vs in-flight status
+- Backend HubSpot sync hardening:
+  - pipeline/stage resolution now prefers env IDs first
+  - fallback behavior when pipeline endpoint is blocked
+- OAuth flow guidance:
+  - re-auth must start from logged-in app session
+
+### New mandatory operating procedure
+1. Every significant change must update:
+   - codebase
+   - `README.md`
+   - `handoff.md`
+2. Every release candidate must create:
+   - local backup snapshot
+   - git commit
+   - version tag
+3. Production deploys only from `main`, development continues on `develop`.
 
 ## Project Location
 - Local working directory: `C:\Users\AkramHKIRI\Desktop\outlook-support-kanban`
@@ -54,6 +85,16 @@ Behavior:
 - Shared mailbox reads via Microsoft Graph
 - Tokens persisted locally
 
+### Debug Expert Agent
+Routes:
+- `POST /api/debug-expert`
+
+Behavior:
+- Pulls full Outlook message content for a ticket (body + attachment metadata/text when parseable)
+- Builds issue query terms and searches HubSpot knowledge base (site search API)
+- Returns proposed troubleshooting steps + relevant KB links
+- Frontend posts the proposal as an internal ticket comment and tags the current assignee
+
 ### HubSpot
 Routes:
 - `GET /auth/hubspot/start`
@@ -64,11 +105,13 @@ Routes:
 - `GET /api/hubspot/companies/:companyId/network`
 - `GET /api/hubspot/data-hygiene`
 - `GET /api/hubspot/owners/resolve`
+- `POST /api/hubspot/tickets/sync`
 
 Behavior:
 - OAuth + token refresh persistence
 - Read-focused scope validation
 - Owner resolver includes multiple lookup attempts and fallback list scan
+- Kanban ticket sync can create HubSpot tickets and associate them with the related company record
 
 ## Data Hygiene Dashboard (New)
 Available from CRM sidebar (`Data Hygiene`) and Companies report mode.
@@ -147,6 +190,10 @@ Implemented:
 - `HUBSPOT_CLIENT_SECRET`
 - `HUBSPOT_REDIRECT_URI`
 - `HUBSPOT_SCOPES`
+  - Must include `cms.site_search.read` for Debug Expert KB search
+  - Must include `tickets` (HubSpot legacy write scope) for Kanban→HubSpot ticket creation sync
+- `HUBSPOT_ALLOWED_WRITE_SCOPES`
+  - Defaults to `tickets crm.objects.tickets.write`
 - `HUBSPOT_PKCE_CODE_VERIFIER`
 - `HUBSPOT_PKCE_CODE_CHALLENGE`
 - `HUBSPOT_AUTHORIZE_BASE`
@@ -197,6 +244,17 @@ Flow:
 4. Tag releases on `main` (`v1.0.0`, `v1.1.0`, ...)
 
 This protects colleagues from disruptions while CRM development continues.
+
+## Backup + Release Automation (Implemented)
+
+Scripts added:
+- `npm run backup:create`
+- `npm run backup:list`
+- `npm run release:snapshot -- -Version <x.y.z> -Message \"...\"`
+
+Behavior:
+- Backup snapshots are created in `backups/` (git-ignored) with retention of latest 30.
+- Release snapshot script creates backup, commits pending changes, and tags release (`vX.Y.Z`).
 
 ## Notes
 - `.env` remains git-ignored.

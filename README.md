@@ -34,3 +34,37 @@ Runs as a **Claude Cowork artifact** with the **Microsoft 365 MCP connector** au
 | SHE | Support Agent |
 | ZIO | Support Agent |
 | AHK | Support Agent |
+
+## Backup And Version Control (Mandatory)
+
+This project now includes a mandatory operational workflow to avoid regressions.
+
+### Local backups
+
+- Create backup: `npm run backup:create`
+- List backups: `npm run backup:list`
+- Backups are stored in `backups/` (git-ignored)
+- Automatic retention keeps the latest 30 backups
+
+### Release snapshots
+
+- Create a release snapshot:  
+  `npm run release:snapshot -- -Version 1.0.0 -Message "stable prod baseline"`
+- This will:
+  1. Create a local backup
+  2. Commit pending changes
+  3. Create an annotated git tag `v<version>`
+
+### Branch policy
+
+- `main`: production only (stable)
+- `develop`: ongoing CRM features
+- `feature/*`: short-lived feature branches from `develop`
+
+### Deploy safety rule
+
+- Always deploy from `main`
+- Merge tested changes into `main` only during scheduled release windows
+- Push with tags for every release:
+  - `git push origin main`
+  - `git push origin --tags`

@@ -5,7 +5,10 @@
   "description": "Secure web app wrapper for Outlook Support Kanban",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "backup:create": "powershell -ExecutionPolicy Bypass -File .\\scripts\\backup-create.ps1",
+    "backup:list": "powershell -ExecutionPolicy Bypass -File .\\scripts\\backup-list.ps1",
+    "release:snapshot": "powershell -ExecutionPolicy Bypass -File .\\scripts\\release-snapshot.ps1"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
