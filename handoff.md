@@ -14,6 +14,7 @@ This app is now a secure support operations platform with CRM foundation compone
 5. Data Hygiene dashboard (HubSpot-backed reporting)
 6. Assignment orchestration (CS + support)
 7. Left CRM navigation shell for future modules
+8. KPI dashboard (ticket/status/agent analytics with time filters)
 
 ## Architecture
 - Frontend: single-page app in `index.html` (vanilla JS/CSS)
@@ -26,6 +27,7 @@ This app is now a secure support operations platform with CRM foundation compone
 
 ## Key Files
 - `index.html`: board UI, CRM sidebar, companies workspace, co-owner mapping, data hygiene view
+  - Includes new KPI page under the CRM sidebar
 - `server.js`: auth, OAuth flows, token refresh, state APIs, HubSpot APIs, data hygiene API
 - `public/login.html`: local login form
 - `.env.example`: env template
@@ -89,6 +91,22 @@ Left-side navigation added:
 - Spam Inbox
 - Companies
 - Data Hygiene
+- KPIs
+
+## KPI Dashboard (New)
+Available from CRM sidebar (`KPIs`).
+
+Metrics:
+1. Number of tickets by status (`New`, `In Progress`, `Resolved`)
+2. Number of tickets by agent with status breakdown
+
+Time filters:
+- Today
+- Last week
+- Last 30 days
+- This quarter
+- Last quarter
+- This year
 
 ## Assignment Logic Status
 Implemented:

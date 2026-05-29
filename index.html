@@ -446,6 +446,9 @@ header{
     <div class="crm-side-title">Quinta CRM</div>
     <div class="crm-nav">
       <button class="crm-nav-btn active" id="board-view-btn">📥 Support Board</button>
+      <div id="support-subnav" style="padding-left:10px;margin-top:4px;margin-bottom:4px;">
+        <button class="crm-nav-btn" id="ticket-kpi-view-btn" style="font-size:14px;padding:7px 10px;border-radius:10px;">📈 Ticket KPIs</button>
+      </div>
       <button class="crm-nav-btn" id="spam-view-btn">🚫 Spam Inbox <span class="spam-count-badge" id="spam-count" style="display:none">0</span></button>
       <button class="crm-nav-btn" id="companies-view-btn">🏢 Companies</button>
       <button class="crm-nav-btn" id="dashboard-view-btn">📊 Data Hygiene</button>
@@ -531,6 +534,93 @@ header{
     </div>
   </div>
   <div id="companies-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;"></div>
+</div>
+<div id="kpi-view" style="display:none;min-height:calc(100vh - 175px);padding:14px 18px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+    <div style="font-family:'Caladea',serif;font-size:24px;">KPI Dashboard</div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <label for="kpi-time-filter" style="font-size:12px;color:#555;">Time range</label>
+      <select class="filter-sel" id="kpi-time-filter" style="max-width:210px;">
+        <option value="today">Today</option>
+        <option value="last_week">Last week</option>
+        <option value="last_30_days">Last 30 days</option>
+        <option value="this_quarter">This quarter</option>
+        <option value="last_quarter">Last quarter</option>
+        <option value="this_year">This year</option>
+      </select>
+      <label for="kpi-team-filter" style="font-size:12px;color:#555;">Team</label>
+      <select class="filter-sel" id="kpi-team-filter" style="max-width:170px;">
+        <option value="all">All agents</option>
+        <option value="cs">CS only</option>
+        <option value="support">Support only</option>
+      </select>
+      <label for="kpi-agent-filter" style="font-size:12px;color:#555;">Agent</label>
+      <select class="filter-sel" id="kpi-agent-filter" style="max-width:170px;">
+        <option value="all">All</option>
+      </select>
+    </div>
+  </div>
+  <div id="kpi-range-label" style="font-size:12px;color:#666;margin-bottom:10px;">Loading…</div>
+  <div id="kpi-status-cards" style="display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:12px;margin-bottom:12px;"></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+    <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
+      <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Status</div>
+      <div id="kpi-status-chart"></div>
+    </div>
+    <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
+      <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Agent Workload by Status</div>
+      <div id="kpi-agent-chart"></div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+    <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
+      <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Company</div>
+      <div style="overflow:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="text-align:left;border-bottom:1px solid #ddd;">
+              <th style="padding:8px 10px;">Company</th>
+              <th style="padding:8px 10px;">Tickets</th>
+            </tr>
+          </thead>
+          <tbody id="kpi-company-rows"></tbody>
+        </table>
+      </div>
+    </div>
+    <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
+      <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets Linked to Jira</div>
+      <div style="overflow:auto;">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr style="text-align:left;border-bottom:1px solid #ddd;">
+              <th style="padding:8px 10px;">Ticket</th>
+              <th style="padding:8px 10px;">Company</th>
+              <th style="padding:8px 10px;">Agent</th>
+              <th style="padding:8px 10px;">Jira</th>
+            </tr>
+          </thead>
+          <tbody id="kpi-jira-ticket-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
+    <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Agent (Status Breakdown)</div>
+    <div style="overflow:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid #ddd;">
+            <th style="padding:8px 10px;">Agent</th>
+            <th style="padding:8px 10px;">Total</th>
+            <th style="padding:8px 10px;">New</th>
+            <th style="padding:8px 10px;">In Progress</th>
+            <th style="padding:8px 10px;">Resolved</th>
+          </tr>
+        </thead>
+        <tbody id="kpi-agent-rows"></tbody>
+      </table>
+    </div>
+  </div>
 </div>
   </main>
 </div>
@@ -764,6 +854,9 @@ const DEFAULT_COOWNER_NAME_MAPPINGS={
 let dataHygieneReport=null;
 let dataHygieneLoading=false;
 let dataHygieneError='';
+let kpiTimeFilter='today';
+let kpiTeamFilter='all';
+let kpiAgentFilter='all';
 let actionHistory=[];
 const taggedTickets=new Set();
 let allTickets=[],pollSecsLeft=POLL_SECS,activeP='all',activeA='all',activeCompany='all',activeJira=false,sortDesc=true;
@@ -867,10 +960,11 @@ function recordSpamSender(spamEmail){if(!spamEmail||isQuintaSender(spamEmail)||s
 function getSpamTickets(){return allTickets.filter(t=>ticketCategory[t.id]==='Spam').sort((a,b)=>new Date(b.email.receivedDateTime||0)-new Date(a.email.receivedDateTime||0));}
 function updateSpamBadge(){const cnt=getSpamTickets().length;const badge=document.getElementById('spam-count');const btn=document.getElementById('spam-view-btn');if(cnt>0){badge.textContent=cnt>99?'99+':cnt;badge.style.display='inline-flex';}else{badge.style.display='none';}(cnt>0&&!btn.classList.contains('active'))&&(btn.style.fontWeight='700');}
 function setSideNavActive(mode){
-  document.getElementById('board-view-btn')?.classList.toggle('active',mode==='board');
+  document.getElementById('board-view-btn')?.classList.toggle('active',mode==='board'||mode==='kpi');
   document.getElementById('spam-view-btn')?.classList.toggle('active',mode==='spam');
   document.getElementById('companies-view-btn')?.classList.toggle('active',mode==='companies');
   document.getElementById('dashboard-view-btn')?.classList.toggle('active',mode==='dashboard');
+  document.getElementById('ticket-kpi-view-btn')?.classList.toggle('active',mode==='kpi');
 }
 
 // ── Jira badge count ─────────────────────────────────────────────────────────
@@ -947,10 +1041,105 @@ document.getElementById('ct-submit').addEventListener('click',()=>{
 });
 
 // ── View switching ────────────────────────────────────────────────────────────
-function showBoardView(){viewMode='board';document.getElementById('main-board').style.display='flex';document.getElementById('spam-view').classList.remove('active');document.getElementById('companies-view').style.display='none';setSideNavActive('board');renderBoard();}
-function showSpamView(){viewMode='spam';document.getElementById('main-board').style.display='none';document.getElementById('companies-view').style.display='none';document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');renderSpamView();}
-function showDashboardView(){companiesViewType='report';viewMode='companies';document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('companies-view').style.display='block';setSideNavActive('dashboard');renderCompaniesView();}
-function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else renderCompaniesView();}
+function showBoardView(){viewMode='board';document.getElementById('main-board').style.display='flex';document.getElementById('spam-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';setSideNavActive('board');renderBoard();}
+function showSpamView(){viewMode='spam';document.getElementById('main-board').style.display='none';document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');renderSpamView();}
+function showDashboardView(){companiesViewType='report';viewMode='companies';document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('kpi-view').style.display='none';document.getElementById('companies-view').style.display='block';setSideNavActive('dashboard');renderCompaniesView();}
+function showKpiView(){viewMode='kpi';document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='block';setSideNavActive('kpi');renderKpiView();}
+function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='kpi')renderKpiView();else renderCompaniesView();}
+function ticketTimestampMs(t){
+  const id=t?.id;
+  const raw=t?.email?.receivedDateTime||ticketCreatedAt[id]||null;
+  const ms=raw?new Date(raw).getTime():NaN;
+  return Number.isFinite(ms)?ms:null;
+}
+function startOfDayMs(d){return new Date(d.getFullYear(),d.getMonth(),d.getDate()).getTime();}
+function quarterStartMonth(m){return Math.floor(m/3)*3;}
+function getKpiBounds(key){
+  const now=new Date();
+  const nowMs=now.getTime();
+  const dayStart=startOfDayMs(now);
+  const dayMs=86400000;
+  let start=0,end=nowMs;
+  if(key==='today'){start=dayStart;}
+  else if(key==='last_week'){const dow=(now.getDay()+6)%7;const thisWeekStart=dayStart-(dow*dayMs);start=thisWeekStart-(7*dayMs);end=thisWeekStart-1;}
+  else if(key==='last_30_days'){start=dayStart-(29*dayMs);}
+  else if(key==='this_quarter'){start=new Date(now.getFullYear(),quarterStartMonth(now.getMonth()),1).getTime();}
+  else if(key==='last_quarter'){const thisQuarterStart=new Date(now.getFullYear(),quarterStartMonth(now.getMonth()),1).getTime();const thisQuarterDate=new Date(thisQuarterStart);start=new Date(thisQuarterDate.getFullYear(),thisQuarterDate.getMonth()-3,1).getTime();end=thisQuarterStart-1;}
+  else if(key==='this_year'){start=new Date(now.getFullYear(),0,1).getTime();}
+  return{start,end};
+}
+function fmtKpiRangeLabel(key,b){
+  const fmt=ms=>new Date(ms).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+  const labels={today:'Today',last_week:'Last week',last_30_days:'Last 30 days',this_quarter:'This quarter',last_quarter:'Last quarter',this_year:'This year'};
+  return`${labels[key]||'Range'} · ${fmt(b.start)} to ${fmt(b.end)}`;
+}
+function renderKpiView(){
+  const bounds=getKpiBounds(kpiTimeFilter);
+  const companyForTicket=t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);return ce&&hsCache[ce]?.companyName?hsCache[ce].companyName:null;};
+  const ticketMatchesTeam=t=>{
+    const ag=ticketAssignee[t.id]||'';
+    if(kpiTeamFilter==='cs')return CS_AGENTS.includes(ag);
+    if(kpiTeamFilter==='support')return SUPPORT_AGENTS.includes(ag);
+    return true;
+  };
+  const ticketMatchesCompany=t=>{
+    if(activeCompany==='all')return true;
+    return companyForTicket(t)===activeCompany;
+  };
+  const inRange=allTickets
+    .filter(t=>ticketCategory[t.id]!=='Spam')
+    .filter(t=>{const ms=ticketTimestampMs(t);return ms!==null&&ms>=bounds.start&&ms<=bounds.end;})
+    .filter(ticketMatchesCompany)
+    .filter(t=>!activeJira||!!ticketJira[t.id])
+    .filter(ticketMatchesTeam)
+    .filter(t=>kpiAgentFilter==='all'||(ticketAssignee[t.id]||'Unassigned')===kpiAgentFilter);
+  const statusCounts={new:0,inp:0,res:0};
+  const agentRows={};
+  inRange.forEach(t=>{
+    const id=t.id;
+    const st=ticketState[id]||'new';
+    if(st in statusCounts)statusCounts[st]++;
+    const ag=ticketAssignee[id]||'Unassigned';
+    if(!agentRows[ag])agentRows[ag]={agent:ag,total:0,new:0,inp:0,res:0};
+    agentRows[ag].total++;
+    if(st in statusCounts)agentRows[ag][st]++;
+  });
+  const agentFilterEl=document.getElementById('kpi-agent-filter');
+  const teamAgents=kpiTeamFilter==='cs'?CS_AGENTS:(kpiTeamFilter==='support'?SUPPORT_AGENTS:ALL_AGENTS);
+  const uniqAgents=new Set(teamAgents);
+  allTickets.forEach(t=>{const ag=ticketAssignee[t.id]||'';if(!ag)return;if(kpiTeamFilter==='cs'&&!CS_AGENTS.includes(ag))return;if(kpiTeamFilter==='support'&&!SUPPORT_AGENTS.includes(ag))return;uniqAgents.add(ag);});
+  const options=['<option value="all">All</option>',...Array.from(uniqAgents).sort((a,b)=>a.localeCompare(b)).map(a=>`<option value="${esc(a)}">${esc(a)}</option>`)];
+  agentFilterEl.innerHTML=options.join('');
+  if(kpiAgentFilter!=='all'&&!uniqAgents.has(kpiAgentFilter))kpiAgentFilter='all';
+  agentFilterEl.value=kpiAgentFilter;
+  document.getElementById('kpi-time-filter').value=kpiTimeFilter;
+  document.getElementById('kpi-team-filter').value=kpiTeamFilter;
+  const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All agents');
+  const agentLabel=kpiAgentFilter==='all'?'All agents':kpiAgentFilter;
+  document.getElementById('kpi-range-label').textContent=`Tickets considered: ${inRange.length} (non-spam) · ${fmtKpiRangeLabel(kpiTimeFilter,bounds)} · ${teamLabel} · ${agentLabel}`;
+  document.getElementById('kpi-status-cards').innerHTML=`
+    <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">New</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.new}</div></div>
+    <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">In Progress</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.inp}</div></div>
+    <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">Resolved</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.res}</div></div>`;
+  const rows=Object.values(agentRows).sort((a,b)=>b.total-a.total||a.agent.localeCompare(b.agent));
+  const maxStatus=Math.max(1,statusCounts.new,statusCounts.inp,statusCounts.res);
+  document.getElementById('kpi-status-chart').innerHTML=`
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <div><div style="font-size:12px;margin-bottom:4px;">New (${statusCounts.new})</div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:12px;width:${Math.round((statusCounts.new/maxStatus)*100)}%;background:#f59e0b;"></div></div></div>
+      <div><div style="font-size:12px;margin-bottom:4px;">In Progress (${statusCounts.inp})</div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:12px;width:${Math.round((statusCounts.inp/maxStatus)*100)}%;background:#3b82f6;"></div></div></div>
+      <div><div style="font-size:12px;margin-bottom:4px;">Resolved (${statusCounts.res})</div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:12px;width:${Math.round((statusCounts.res/maxStatus)*100)}%;background:#10b981;"></div></div></div>
+    </div>`;
+  const agentChartRows=rows.slice(0,10).map(r=>{const total=Math.max(1,r.total);const n=Math.round((r.new/total)*100);const i=Math.round((r.inp/total)*100);const rs=Math.max(0,100-n-i);return `<div style="margin-bottom:8px;"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="font-weight:700;">${esc(r.agent)}</span><span>${r.total}</span></div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;display:flex;"><div style="width:${n}%;background:#f59e0b;" title="New ${r.new}"></div><div style="width:${i}%;background:#3b82f6;" title="In Progress ${r.inp}"></div><div style="width:${rs}%;background:#10b981;" title="Resolved ${r.res}"></div></div></div>`;}).join('');
+  document.getElementById('kpi-agent-chart').innerHTML=agentChartRows||'<div style="font-size:12px;color:#666;">No data in this range.</div>';
+  const companyCounts={};
+  inRange.forEach(t=>{const c=companyForTicket(t)||'Unknown';companyCounts[c]=(companyCounts[c]||0)+1;});
+  const companyRows=Object.entries(companyCounts).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]));
+  document.getElementById('kpi-company-rows').innerHTML=companyRows.length?companyRows.map(([name,cnt])=>`<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:8px 10px;">${esc(name)}</td><td style="padding:8px 10px;">${cnt}</td></tr>`).join(''):'<tr><td colspan="2" style="padding:12px 10px;color:#666;">No tickets for this filter.</td></tr>';
+  const jiraRows=inRange.filter(t=>ticketJira[t.id]).map(t=>({t,company:companyForTicket(t)||'Unknown',agent:ticketAssignee[t.id]||'Unassigned',jira:ticketJira[t.id]})).sort((a,b)=>new Date((b.t.email?.receivedDateTime)||0)-new Date((a.t.email?.receivedDateTime)||0));
+  document.getElementById('kpi-jira-ticket-rows').innerHTML=jiraRows.length?jiraRows.slice(0,50).map(x=>`<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:8px 10px;">${esc(x.t.email?.subject||'(no subject)')}</td><td style="padding:8px 10px;">${esc(x.company)}</td><td style="padding:8px 10px;">${esc(x.agent)}</td><td style="padding:8px 10px;font-weight:700;">${esc(x.jira)}</td></tr>`).join(''):'<tr><td colspan="4" style="padding:12px 10px;color:#666;">No Jira-linked tickets for this filter.</td></tr>';
+  const body=document.getElementById('kpi-agent-rows');
+  body.innerHTML=rows.length?rows.map(r=>`<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:8px 10px;font-weight:700;">${esc(r.agent)}</td><td style="padding:8px 10px;">${r.total}</td><td style="padding:8px 10px;">${r.new}</td><td style="padding:8px 10px;">${r.inp}</td><td style="padding:8px 10px;">${r.res}</td></tr>`).join(''):'<tr><td colspan="5" style="padding:12px 10px;color:#666;">No tickets in this time range.</td></tr>';
+}
 function companyGroups(){
   const g=new Map();
   const ensureGroup=(companyId,companyName,companyUrl=null)=>{
@@ -1177,7 +1366,7 @@ function renderHygieneDashboard(grid){
   document.getElementById('refresh-hygiene')?.addEventListener('click',()=>fetchDataHygieneReport(true));
 }
 function renderCompaniesView(){const groups=companyGroups();ensureHubspotOwnerNames(groups);ensureCompanyNetworks(groups);upsertCompanyProfiles(groups);refreshCompaniesFilterOptions(groups);const filtered=applyCompanyFilters(groups);document.getElementById('companies-type-filter').value=companyFilters.type;document.getElementById('companies-search').value=companyFilters.q||'';document.getElementById('companies-viewtype-btn').textContent=companiesViewLabel(companiesViewType)+' ▾';document.getElementById('companies-stats').textContent=`${filtered.length} companies · ${filtered.reduce((s,x)=>s+x.tickets.length,0)} tickets`;const grid=document.getElementById('companies-grid');if(companiesViewType==='report'){renderHygieneDashboard(grid);if(!dataHygieneReport&&!dataHygieneLoading)fetchDataHygieneReport(false);return;}if(companiesViewType==='calendar'){grid.style.display='block';grid.innerHTML='<div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:20px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Calendar view</div><div style="font-size:13px;color:#666;">Calendar view is still a placeholder and can be expanded next.</div></div>';return;}if(!filtered.length){grid.innerHTML='<div class="empty"><div class="empty-icon">🏢</div>No companies match current filters.</div>';return;}grid.style.display='grid';grid.style.gridTemplateColumns=companiesViewType==='table'?'1fr':'repeat(auto-fill,minmax(320px,1fr))';grid.innerHTML='';filtered.forEach(gr=>{const custom=companyCustomProps[gr.companyId]||{};const profile=companyProfiles[gr.companyId]||null;const labeled=(gr.associatedCompanies||[]).map(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());const label=l.find(x=>x.includes('specific hotel'))?'specific hotel':(l.find(x=>x.includes('group central'))?'group central':null);return label?{label,ref:c}:null;}).filter(Boolean);const parentChild=((gr.parentCompany?[{label:'group central',ref:gr.parentCompany}]:[]).concat((gr.childCompanies||[]).map(c=>({label:'specific hotel',ref:c}))));const unlabeledAssoc=(gr.associatedCompanies||[]).filter(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());return !(l.find(x=>x.includes('specific hotel'))||l.find(x=>x.includes('group central')));}).map(c=>({label:'group related',ref:c}));const related=[...labeled,...parentChild,...unlabeledAssoc];const relHtml=related.length?related.map(r=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">${esc(r.label)}: ${esc(r.ref?.name||r.ref?.id||'—')}</span>`).join(''):(gr.relationshipType==='group'?`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Group</span>`:`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Monhotel</span>`);const shownCS=displayCSOwner(gr.coOwner);const metaLine=[gr.country?`🌍 ${gr.country}`:null,shownCS?`CS: ${shownCS}`:null].filter(Boolean).join(' · ');const contactHtml=[...gr.contacts.values()].map(c=>`<a href="${c.contactUrl||'#'}" ${c.contactUrl?'target="_blank"':''} style="text-decoration:none;color:#333;border:1px solid #ddd;border-radius:999px;padding:2px 8px;font-size:11px;display:inline-flex;gap:4px;align-items:center;">👤 ${esc(c.contactName)}</a>`).join(' ');const ticketHtml=gr.tickets.slice(0,8).map(t=>{const p=ticketPriority[t.id]||t.priority||'Medium';const col=ticketState[t.id]||'new';const colLbl={new:'New',inp:'In Progress',res:'Resolved'}[col]||'New';return `<button data-open-company-ticket="${esc(t.id)}" style="width:100%;text-align:left;border:1px solid #ddd;border-radius:10px;padding:8px 10px;margin-top:6px;background:#fff;cursor:pointer;"><div style="font-weight:700;font-size:12px;margin-bottom:3px;">${esc(t.email.subject||'(no subject)')}</div><div style="display:flex;justify-content:space-between;font-size:11px;color:#666;"><span>${esc(colLbl)} · ${esc(p)}</span><span>${fmtDate(t.email.receivedDateTime)}</span></div></button>`;}).join('');const customHtml=Object.entries(custom).map(([k,v])=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 4px 2px 0;">${esc(k)}: ${esc(v)}</span>`).join('')||'<span style="font-size:11px;color:#777;">No custom properties yet</span>';const card=document.createElement('div');card.style.cssText='background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);';card.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div><div style="font-family:Caladea,serif;font-size:22px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;">${gr.tickets.length} ticket(s)${profile?.createdAt?` · profile: ${fmtDate(profile.createdAt)}`:''}</div>${metaLine?`<div style="font-size:11px;color:#777;margin-top:2px;">${esc(metaLine)}</div>`:''}</div><div style="display:flex;gap:6px;">${gr.companyUrl?`<a class="btn-out" href="${esc(gr.companyUrl)}" target="_blank" style="font-size:11px;padding:4px 8px;">Open HubSpot</a>`:''}<button class="btn-primary" data-cprop="${esc(gr.companyId)}" style="font-size:11px;padding:4px 8px;">Custom Properties</button></div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Hierarchy</div>${relHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:5px;">Contacts</div><div style="display:flex;flex-wrap:wrap;gap:4px;">${contactHtml||'<span style="font-size:11px;color:#777;">No contacts</span>'}</div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Properties</div>${customHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:2px;">Tickets</div>${ticketHtml}</div>`;if(companiesViewType==='table'){card.style.borderRadius='10px';card.style.padding='10px';card.style.display='grid';card.style.gridTemplateColumns='minmax(220px,1fr) minmax(260px,1fr) minmax(260px,1fr)';card.style.columnGap='12px';card.innerHTML=`<div><div style="font-family:Caladea,serif;font-size:20px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;margin-bottom:6px;">${gr.tickets.length} ticket(s)</div>${metaLine?`<div style=\"font-size:11px;color:#777;margin-bottom:6px;\">${esc(metaLine)}</div>`:''}${relHtml}${gr.companyUrl?`<a class=\"btn-out\" href=\"${esc(gr.companyUrl)}\" target=\"_blank\" style=\"font-size:11px;padding:4px 8px;display:inline-block;\">Open HubSpot</a>`:''}<button class=\"btn-primary\" data-cprop=\"${esc(gr.companyId)}\" style=\"font-size:11px;padding:4px 8px;margin-left:6px;\">Custom Properties</button></div><div><div style=\"font-size:11px;color:#666;margin-bottom:5px;\">Contacts</div><div style=\"display:flex;flex-wrap:wrap;gap:4px;\">${contactHtml||'<span style=\"font-size:11px;color:#777;\">No contacts</span>'}</div><div style=\"margin-top:8px;font-size:11px;color:#666;\">Properties</div><div>${customHtml}</div></div><div><div style=\"font-size:11px;color:#666;margin-bottom:2px;\">Tickets</div>${ticketHtml}</div>`;}card.querySelector('[data-cprop]')?.addEventListener('click',()=>openCompanyPropModal(gr));card.querySelectorAll('[data-open-company-ticket]').forEach(btn=>btn.addEventListener('click',()=>{const t=allTickets.find(x=>x.id===btn.dataset.openCompanyTicket);if(t)openEmailModal(t);}));grid.appendChild(card);});}
-function showCompaniesView(){viewMode='companies';document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('companies-view').style.display='block';setSideNavActive(companiesViewType==='report'?'dashboard':'companies');renderCompaniesView();}
+function showCompaniesView(){viewMode='companies';document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('kpi-view').style.display='none';document.getElementById('companies-view').style.display='block';setSideNavActive(companiesViewType==='report'?'dashboard':'companies');renderCompaniesView();}
 function renderSpamView(){const spamTickets=getSpamTickets();const listEl=document.getElementById('spam-list');document.getElementById('spam-view-count').textContent=`(${spamTickets.length} ticket${spamTickets.length!==1?'s':''})`;if(!spamTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;">✅</div><div style="font-size:16px;font-weight:700;color:#374151;margin-bottom:6px;">Inbox zero!</div><div style="font-size:13px;color:#94a3b8;">No spam tickets.</div></div>';return;}listEl.innerHTML='';spamTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'—';const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip">✉️ ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip">🏢 ${esc(hs.companyName)}</span>`:''}<span class="spam-date">${fmtDate(email.receivedDateTime)}</span></div></div><div class="spam-row-actions"><button class="btn-restore" data-restore="${id}">↩️ Restore</button></div>`;row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{ticketCategory[id]='Other';const te=clientEmail||email.sender?.toLowerCase();const otherSpam=allTickets.some(x=>x.id!==id&&(ticketClientEmail[x.id]||x.email.sender?.toLowerCase())===te&&ticketCategory[x.id]==='Spam');if(!otherSpam&&te)spamSenders.delete(te);saveState();renderSpamView();updateSpamBadge();showToast('Ticket restored to board','ok');});listEl.appendChild(row);});}
 document.getElementById('btn-clear-spam').addEventListener('click',()=>{const cnt=getSpamTickets().length;if(!cnt)return;if(!confirm(`Remove all ${cnt} spam ticket(s)?`))return;getSpamTickets().forEach(t=>{ticketState[t.id]='res';});saveState();renderSpamView();updateSpamBadge();showToast(`${cnt} spam ticket${cnt>1?'s':''} cleared`,'ok');});
 document.getElementById('btn-back-board').addEventListener('click',showBoardView);
@@ -1185,7 +1374,11 @@ document.getElementById('spam-view-btn').addEventListener('click',()=>{if(viewMo
 document.getElementById('companies-view-btn').addEventListener('click',()=>{if(viewMode==='companies'&&companiesViewType==='report'){companiesViewType='table';saveState('companies_view_type_change_sidebar');showCompaniesView();return;}if(viewMode==='companies')showBoardView();else showCompaniesView();});
 document.getElementById('board-view-btn').addEventListener('click',showBoardView);
 document.getElementById('dashboard-view-btn').addEventListener('click',()=>{if(viewMode==='companies'&&companiesViewType==='report')showBoardView();else showDashboardView();});
-document.getElementById('jira-filter-btn').addEventListener('click',()=>{activeJira=!activeJira;updateJiraBadge();renderBoard();});
+document.getElementById('ticket-kpi-view-btn').addEventListener('click',()=>{if(viewMode==='kpi')showBoardView();else showKpiView();});
+document.getElementById('kpi-time-filter').addEventListener('change',e=>{kpiTimeFilter=e.target.value||'today';if(viewMode==='kpi')renderKpiView();});
+document.getElementById('kpi-team-filter').addEventListener('change',e=>{kpiTeamFilter=e.target.value||'all';kpiAgentFilter='all';if(viewMode==='kpi')renderKpiView();});
+document.getElementById('kpi-agent-filter').addEventListener('change',e=>{kpiAgentFilter=e.target.value||'all';if(viewMode==='kpi')renderKpiView();});
+document.getElementById('jira-filter-btn').addEventListener('click',()=>{activeJira=!activeJira;updateJiraBadge();if(viewMode==='kpi')renderKpiView();else renderBoard();});
 
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function normalizeCoOwnerValue(v){return String(v||'').trim().toLowerCase().replace(/\s+/g,' ');}
@@ -1408,7 +1601,7 @@ document.getElementById('sort-desc').addEventListener('click',()=>{sortDesc=true
 document.getElementById('sort-asc').addEventListener('click',()=>{sortDesc=false;document.getElementById('sort-asc').classList.add('active');document.getElementById('sort-desc').classList.remove('active');renderBoard();});
 document.querySelectorAll('[data-pf]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-pf]').forEach(x=>x.classList.remove('active'));b.classList.add('active');activeP=b.dataset.pf;renderBoard();}));
 document.getElementById('agent-filter').addEventListener('change',e=>{activeA=e.target.value;renderBoard();});
-document.getElementById('company-filter').addEventListener('change',e=>{activeCompany=e.target.value;renderBoard();});
+document.getElementById('company-filter').addEventListener('change',e=>{activeCompany=e.target.value;if(viewMode==='kpi')renderKpiView();else renderBoard();});
 document.getElementById('current-user').addEventListener('change',()=>{renderBoard();updateMentionsBadge();});
 document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=ticketState[id]||'new';const newCol=col.dataset.col;if(prevCol===newCol)return;ticketState[id]=newCol;saveState();renderBoard();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);showToast('✓ Moved to '+COL_NAMES[newCol]+' — saved','move');});});
 document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
