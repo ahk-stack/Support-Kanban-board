@@ -1,8 +1,8 @@
-<!DOCTYPE html><script type="application/json" id="cowork-artifact-meta">
+﻿<!DOCTYPE html><script type="application/json" id="cowork-artifact-meta">
 {
   "name": "Outlook Support Kanban",
   "schemaVersion": 1,
-  "description": "Live Kanban board that pulls emails from Outlook, filters out no-reply/automated senders, and classifies each email as a support ticket with priority, category, sender, and date. Columns: New → In Progress → Resolved.",
+  "description": "Live Kanban board that pulls emails from Outlook, filters out no-reply/automated senders, and classifies each email as a support ticket with priority, category, sender, and date. Columns: New â†’ In Progress â†’ Resolved.",
   "mcpTools": [
     "mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__outlook_email_search",
     "mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__read_resource",
@@ -23,7 +23,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Support Kanban — Quinta</title>
+<title>Support Kanban â€” Quinta</title>
 <style>
 :root{color-scheme:light;}
 *{box-sizing:border-box;margin:0;padding:0;}
@@ -82,6 +82,8 @@ header{background:#fff;border-bottom:1px solid #e2e8f0;padding:11px 18px;display
 .col-new .col-header{background:#ede9fe;color:#5b21b6;}
 .col-inp .col-header{background:#fef3c7;color:#92400e;}
 .col-res .col-header{background:#d1fae5;color:#065f46;}
+.col-wus .col-header{background:#dbeafe;color:#1e3a8a;}
+.col-wct .col-header{background:#fee2e2;color:#9f1239;}
 .col-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:rgba(0,0,0,.12);}
 .col-body{background:#e4e6ed;border-radius:0 0 10px 10px;padding:8px;flex:1;display:flex;flex-direction:column;gap:7px;min-height:180px;transition:background .15s;}
 .col-body.drag-over{background:#c7d2fe;}
@@ -424,15 +426,15 @@ header{
 <body>
 <header>
   <div class="header-left">
-    <h1>📋 Support Kanban <small>support@quinta.im</small></h1>
-    <div class="meta"><span class="live-indicator"><span class="live-dot"></span>LIVE</span><span id="meta">Loading…</span><span class="poll-countdown" id="poll-cd"></span></div>
+    <h1>ðŸ“‹ Support Kanban <small>support@quinta.im</small></h1>
+    <div class="meta"><span class="live-indicator"><span class="live-dot"></span>LIVE</span><span id="meta">Loadingâ€¦</span><span class="poll-countdown" id="poll-cd"></span></div>
   </div>
   <div class="header-right">
-    <button class="create-ticket-btn" id="create-ticket-btn">＋ New Ticket</button>
-    <button class="mentions-btn" id="mentions-btn" title="My Mentions">🔔<span class="mentions-badge" id="mentions-badge" style="display:none">0</span></button>
-    <div class="user-sel"><label>🧑 You:</label><select id="current-user"></select></div>
+    <button class="create-ticket-btn" id="create-ticket-btn">ï¼‹ New Ticket</button>
+    <button class="mentions-btn" id="mentions-btn" title="My Mentions">ðŸ””<span class="mentions-badge" id="mentions-badge" style="display:none">0</span></button>
+    <div class="user-sel"><label>ðŸ§‘ You:</label><select id="current-user"></select></div>
     <div class="account-menu">
-      <button class="account-btn" id="account-btn">Account ▾</button>
+      <button class="account-btn" id="account-btn">Account â–¾</button>
       <div class="account-panel" id="account-panel">
         <a class="account-link" href="/login">Login Page</a>
         <button class="account-item" id="logout-btn">Logout</button>
@@ -445,22 +447,22 @@ header{
   <aside class="crm-sidebar">
     <div class="crm-side-title">Quinta CRM</div>
     <div class="crm-nav">
-      <button class="crm-nav-btn active" id="board-view-btn">📥 Support Board</button>
+      <button class="crm-nav-btn active" id="board-view-btn">ðŸ“¥ Support Board</button>
       <div id="support-subnav" style="padding-left:10px;margin-top:4px;margin-bottom:4px;">
-        <button class="crm-nav-btn" id="ticket-kpi-view-btn" style="font-size:14px;padding:7px 10px;border-radius:10px;">📈 Ticket KPIs</button>
+        <button class="crm-nav-btn" id="ticket-kpi-view-btn" style="font-size:14px;padding:7px 10px;border-radius:10px;">ðŸ“ˆ Ticket KPIs</button>
       </div>
-      <button class="crm-nav-btn" id="spam-view-btn">🚫 Spam Inbox <span class="spam-count-badge" id="spam-count" style="display:none">0</span></button>
-      <button class="crm-nav-btn" id="companies-view-btn">🏢 Companies</button>
-      <button class="crm-nav-btn" id="dashboard-view-btn">📊 Data Hygiene</button>
+      <button class="crm-nav-btn" id="spam-view-btn">ðŸš« Spam Inbox <span class="spam-count-badge" id="spam-count" style="display:none">0</span></button>
+      <button class="crm-nav-btn" id="companies-view-btn">ðŸ¢ Companies</button>
+      <button class="crm-nav-btn" id="dashboard-view-btn">ðŸ“Š Data Hygiene</button>
     </div>
   </aside>
   <main class="crm-main">
 <div class="filter-bar">
   <span class="filter-label">Priority:</span>
   <button class="chip active" data-pf="all">All</button>
-  <button class="chip" data-pf="High">🔴 High</button>
-  <button class="chip" data-pf="Medium">🟡 Med</button>
-  <button class="chip" data-pf="Low">🟢 Low</button>
+  <button class="chip" data-pf="High">ðŸ”´ High</button>
+  <button class="chip" data-pf="Medium">ðŸŸ¡ Med</button>
+  <button class="chip" data-pf="Low">ðŸŸ¢ Low</button>
   <div class="sep"></div>
   <span class="filter-label">Agent:</span>
   <select class="filter-sel" id="agent-filter"><option value="all">All agents</option></select>
@@ -468,35 +470,37 @@ header{
   <span class="filter-label">Company:</span>
   <select class="filter-sel" id="company-filter"><option value="all">All companies</option></select>
   <div class="sep"></div>
-  <button class="chip" id="tagged-filter" data-af="tagged" style="display:none">🔔 Tagged me</button>
+  <button class="chip" id="tagged-filter" data-af="tagged" style="display:none">ðŸ”” Tagged me</button>
   <div class="sep"></div>
-  <button class="jira-chip" id="jira-filter-btn">🔗 Jira <span class="jira-ct" id="jira-count" style="display:none">0</span></button>
+  <button class="jira-chip" id="jira-filter-btn">ðŸ”— Jira <span class="jira-ct" id="jira-count" style="display:none">0</span></button>
   <div class="sep"></div>
   <span class="filter-label">Sort:</span>
   <div class="sort-toggle">
-    <button class="sort-btn active" id="sort-desc">↓ Newest</button>
-    <button class="sort-btn" id="sort-asc">↑ Oldest</button>
+    <button class="sort-btn active" id="sort-desc">â†“ Newest</button>
+    <button class="sort-btn" id="sort-asc">â†‘ Oldest</button>
   </div>
 </div>
 <div class="fstats">
-  <span id="fstats">Fetching…</span>
-  <span id="hs-status" class="hs-enriching" style="display:none"><span class="spinner-sm"></span><span id="hs-progress">Enriching with HubSpot…</span></span>
+  <span id="fstats">Fetchingâ€¦</span>
+  <span id="hs-status" class="hs-enriching" style="display:none"><span class="spinner-sm"></span><span id="hs-progress">Enriching with HubSpotâ€¦</span></span>
   <div style="display:flex;align-items:center;gap:10px;">
-    <span id="save-indicator" class="save-indicator" style="opacity:0;">💾 Saved</span>
+    <span id="save-indicator" class="save-indicator" style="opacity:0;">ðŸ’¾ Saved</span>
     <span id="last-poll" style="font-size:10px;color:#94a3b8;"></span>
   </div>
 </div>
 <div class="board" id="main-board">
-  <div class="column col-new"><div class="col-header">📥 New <span class="col-badge" id="badge-new">0</span></div><div class="col-body" id="col-new" data-col="new"><div class="loading"><div class="spinner"></div><span>Fetching…</span></div></div></div>
-  <div class="column col-inp"><div class="col-header">⚙️ In Progress <span class="col-badge" id="badge-inp">0</span></div><div class="col-body" id="col-inp" data-col="inp"><div class="empty"><div class="empty-icon">🚧</div>Drag here</div></div></div>
-  <div class="column col-res"><div class="col-header">✅ Resolved <span class="col-badge" id="badge-res">0</span></div><div class="col-body" id="col-res" data-col="res"><div class="empty"><div class="empty-icon">🎉</div>Drag here</div></div></div>
+  <div class="column col-new"><div class="col-header">ðŸ“¥ New <span class="col-badge" id="badge-new">0</span></div><div class="col-body" id="col-new" data-col="new"><div class="loading"><div class="spinner"></div><span>Fetchingâ€¦</span></div></div></div>
+  <div class="column col-inp"><div class="col-header">âš™ï¸ In Progress <span class="col-badge" id="badge-inp">0</span></div><div class="col-body" id="col-inp" data-col="inp"><div class="empty"><div class="empty-icon">ðŸš§</div>Drag here</div></div></div>
+  <div class="column col-wus"><div class="col-header">ðŸ•’ Waiting On Us <span class="col-badge" id="badge-wus">0</span></div><div class="col-body" id="col-wus" data-col="wus"><div class="empty"><div class="empty-icon">â³</div>Drag here</div></div></div>
+  <div class="column col-wct"><div class="col-header">ðŸ“© Waiting On Contact <span class="col-badge" id="badge-wct">0</span></div><div class="col-body" id="col-wct" data-col="wct"><div class="empty"><div class="empty-icon">ðŸ§¾</div>Drag here</div></div></div>
+  <div class="column col-res"><div class="col-header">âœ… Resolved <span class="col-badge" id="badge-res">0</span></div><div class="col-body" id="col-res" data-col="res"><div class="empty"><div class="empty-icon">ðŸŽ‰</div>Drag here</div></div></div>
 </div>
 <div id="spam-view">
   <div class="spam-view-header">
-    <div class="spam-view-title">🚫 Spam Inbox <span id="spam-view-count" style="font-size:14px;font-weight:400;color:#94a3b8;"></span></div>
+    <div class="spam-view-title">ðŸš« Spam Inbox <span id="spam-view-count" style="font-size:14px;font-weight:400;color:#94a3b8;"></span></div>
     <div class="spam-view-actions">
-      <button class="btn-clear-spam" id="btn-clear-spam">🗑️ Clear all spam</button>
-      <button class="btn-back" id="btn-back-board">← Back to Board</button>
+      <button class="btn-clear-spam" id="btn-clear-spam">ðŸ—‘ï¸ Clear all spam</button>
+      <button class="btn-back" id="btn-back-board">â† Back to Board</button>
     </div>
   </div>
   <div class="spam-list" id="spam-list"></div>
@@ -519,18 +523,18 @@ header{
       <input id="companies-search" class="filter-sel" type="text" placeholder="Search companies..." style="max-width:220px;border-radius:8px;"/>
       <button class="btn-out" id="coowner-map-btn" style="font-size:12px;">Co-Owner Mapping</button>
       <div style="position:relative;">
-        <button class="btn-out" id="companies-viewtype-btn" style="font-size:12px;">▦ Table view ▾</button>
+        <button class="btn-out" id="companies-viewtype-btn" style="font-size:12px;">â–¦ Table view â–¾</button>
         <div id="companies-viewtype-menu" style="display:none;position:absolute;right:0;top:36px;min-width:260px;background:#fff;border:1px solid #d7d7d7;border-radius:12px;box-shadow:0 12px 28px rgba(0,0,0,.14);padding:10px;z-index:1200;">
           <div style="font-size:12px;font-weight:700;margin-bottom:8px;">View type</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
-            <button class="btn-out" data-comp-viewtype="table" style="font-size:11px;">▦ Table view</button>
-            <button class="btn-out" data-comp-viewtype="board" style="font-size:11px;">◫ Board view</button>
-            <button class="btn-out" data-comp-viewtype="report" style="font-size:11px;">▤ Report view</button>
-            <button class="btn-out" data-comp-viewtype="calendar" style="font-size:11px;">◷ Calendar view</button>
+            <button class="btn-out" data-comp-viewtype="table" style="font-size:11px;">â–¦ Table view</button>
+            <button class="btn-out" data-comp-viewtype="board" style="font-size:11px;">â—« Board view</button>
+            <button class="btn-out" data-comp-viewtype="report" style="font-size:11px;">â–¤ Report view</button>
+            <button class="btn-out" data-comp-viewtype="calendar" style="font-size:11px;">â—· Calendar view</button>
           </div>
         </div>
       </div>
-      <div id="companies-stats" style="font-size:12px;color:#555;">Loading…</div>
+      <div id="companies-stats" style="font-size:12px;color:#555;">Loadingâ€¦</div>
     </div>
   </div>
   <div id="companies-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;"></div>
@@ -560,8 +564,8 @@ header{
       </select>
     </div>
   </div>
-  <div id="kpi-range-label" style="font-size:12px;color:#666;margin-bottom:10px;">Loading…</div>
-  <div id="kpi-status-cards" style="display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:12px;margin-bottom:12px;"></div>
+  <div id="kpi-range-label" style="font-size:12px;color:#666;margin-bottom:10px;">Loadingâ€¦</div>
+  <div id="kpi-status-cards" style="display:grid;grid-template-columns:repeat(5,minmax(220px,1fr));gap:12px;margin-bottom:12px;"></div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);">
       <div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Tickets by Status</div>
@@ -614,6 +618,8 @@ header{
             <th style="padding:8px 10px;">Total</th>
             <th style="padding:8px 10px;">New</th>
             <th style="padding:8px 10px;">In Progress</th>
+            <th style="padding:8px 10px;">Waiting On Us</th>
+            <th style="padding:8px 10px;">Waiting On Contact</th>
             <th style="padding:8px 10px;">Resolved</th>
           </tr>
         </thead>
@@ -626,7 +632,7 @@ header{
 </div>
 <div class="modal-bg" id="coowner-map-modal">
   <div class="modal" style="max-width:720px;">
-    <div class="modal-head"><h2>Co-Owner to CS Mapping</h2><button class="modal-close-x" data-close="coowner-map-modal">✕</button></div>
+    <div class="modal-head"><h2>Co-Owner to CS Mapping</h2><button class="modal-close-x" data-close="coowner-map-modal">âœ•</button></div>
     <div style="padding:16px 18px;display:flex;flex-direction:column;gap:10px;">
       <div style="font-size:12px;color:#64748b;">Map HubSpot Co-Owner values to CS agents. These mappings are applied before default trigram matching.</div>
       <div id="coowner-map-list" style="max-height:360px;overflow:auto;border:1px solid #ddd;border-radius:10px;padding:10px;background:#fafafa;"></div>
@@ -641,15 +647,15 @@ header{
 <div id="toast"></div>
 
 <!-- Email modal -->
-<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal">✕</button></div><div class="modal-meta-bar" id="em-meta"></div><div class="modal-body-scroll" id="em-body"></div><div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-outlook">Open in Outlook ↗</button></div></div></div>
+<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal">âœ•</button></div><div class="modal-meta-bar" id="em-meta"></div><div class="modal-body-scroll" id="em-body"></div><div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-outlook">Open in Outlook â†—</button></div></div></div>
 <!-- Intern com modal -->
-<div class="modal-bg" id="com-modal"><div class="modal" style="max-width:560px;"><div class="modal-head"><div style="flex:1;min-width:0;"><h2 id="com-title"></h2><div style="font-size:11px;color:#94a3b8;margin-top:3px;" id="com-subtitle"></div></div><button class="modal-close-x" data-close="com-modal">✕</button></div><div class="com-thread" id="com-thread"></div><div class="compose-area"><div class="compose-label">Add internal comment</div><textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea><div class="compose-footer"><div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div><div style="display:flex;gap:8px;align-self:flex-end;"><button class="btn-out" id="com-debug-expert">Debug Expert</button><button class="btn-primary" id="com-post">Post</button></div></div></div></div></div>
+<div class="modal-bg" id="com-modal"><div class="modal" style="max-width:560px;"><div class="modal-head"><div style="flex:1;min-width:0;"><h2 id="com-title"></h2><div style="font-size:11px;color:#94a3b8;margin-top:3px;" id="com-subtitle"></div></div><button class="modal-close-x" data-close="com-modal">âœ•</button></div><div class="com-thread" id="com-thread"></div><div class="compose-area"><div class="compose-label">Add internal comment</div><textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea><div class="compose-footer"><div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div><div style="display:flex;gap:8px;align-self:flex-end;"><button class="btn-out" id="com-debug-expert">Debug Expert</button><button class="btn-primary" id="com-post">Post</button></div></div></div></div></div>
 <!-- Mentions modal -->
-<div class="modal-bg" id="mentions-modal"><div class="modal" style="max-width:600px;"><div class="modal-head"><h2 id="mentions-title">🔔 My Mentions</h2><div style="display:flex;align-items:center;gap:8px;"><button class="btn-out" id="mark-all-read" style="font-size:11px;padding:4px 10px;">Mark all read</button><button class="modal-close-x" data-close="mentions-modal">✕</button></div></div><div style="font-size:12px;color:#64748b;padding:8px 18px 0;" id="mentions-info"></div><div style="display:flex;flex-direction:column;padding:14px 18px;overflow-y:auto;flex:1;" id="mentions-list"></div></div></div>
+<div class="modal-bg" id="mentions-modal"><div class="modal" style="max-width:600px;"><div class="modal-head"><h2 id="mentions-title">ðŸ”” My Mentions</h2><div style="display:flex;align-items:center;gap:8px;"><button class="btn-out" id="mark-all-read" style="font-size:11px;padding:4px 10px;">Mark all read</button><button class="modal-close-x" data-close="mentions-modal">âœ•</button></div></div><div style="font-size:12px;color:#64748b;padding:8px 18px 0;" id="mentions-info"></div><div style="display:flex;flex-direction:column;padding:14px 18px;overflow-y:auto;flex:1;" id="mentions-list"></div></div></div>
 <!-- Company custom property modal -->
 <div class="modal-bg" id="company-prop-modal">
   <div class="modal" style="max-width:560px;">
-    <div class="modal-head"><h2 id="company-prop-title">Company Custom Properties</h2><button class="modal-close-x" data-close="company-prop-modal">✕</button></div>
+    <div class="modal-head"><h2 id="company-prop-title">Company Custom Properties</h2><button class="modal-close-x" data-close="company-prop-modal">âœ•</button></div>
     <div style="padding:16px 18px;display:flex;flex-direction:column;gap:10px;">
       <div id="company-prop-existing" style="font-size:12px;color:#444;background:#f8f8f8;border:1px solid #ddd;border-radius:8px;padding:10px;max-height:170px;overflow:auto;"></div>
       <div class="form-row">
@@ -667,10 +673,10 @@ header{
   </div>
 </div>
 
-<!-- ── Create Ticket modal ──────────────────────────────────────────────── -->
+<!-- â”€â”€ Create Ticket modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
 <div class="modal-bg" id="create-modal">
   <div class="modal" style="max-width:500px;">
-    <div class="modal-head"><h2>＋ New Manual Ticket</h2><button class="modal-close-x" data-close="create-modal">✕</button></div>
+    <div class="modal-head"><h2>ï¼‹ New Manual Ticket</h2><button class="modal-close-x" data-close="create-modal">âœ•</button></div>
     <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;overflow-y:auto;">
       <div class="form-field">
         <label>Subject *</label>
@@ -678,15 +684,15 @@ header{
       </div>
       <div class="form-field">
         <label>Description</label>
-        <textarea id="ct-desc" class="form-input" rows="3" placeholder="Describe the issue…" style="resize:vertical;font-family:inherit;"></textarea>
+        <textarea id="ct-desc" class="form-input" rows="3" placeholder="Describe the issueâ€¦" style="resize:vertical;font-family:inherit;"></textarea>
       </div>
       <div class="form-row">
         <div class="form-field">
           <label>Priority</label>
           <select id="ct-priority" class="form-input">
-            <option value="High">🔴 High</option>
-            <option value="Medium" selected>🟡 Medium</option>
-            <option value="Low">🟢 Low</option>
+            <option value="High">ðŸ”´ High</option>
+            <option value="Medium" selected>ðŸŸ¡ Medium</option>
+            <option value="Low">ðŸŸ¢ Low</option>
           </select>
         </div>
         <div class="form-field">
@@ -701,7 +707,7 @@ header{
         </div>
       </div>
       <div class="form-field">
-        <label>Client email <span style="color:#94a3b8;font-weight:400;">(optional — enables HubSpot enrichment)</span></label>
+        <label>Client email <span style="color:#94a3b8;font-weight:400;">(optional â€” enables HubSpot enrichment)</span></label>
         <input id="ct-email" class="form-input" type="email" placeholder="client@hotel.com"/>
       </div>
       <div class="form-field">
@@ -716,10 +722,10 @@ header{
   </div>
 </div>
 
-<!-- ── Jira link modal ─────────────────────────────────────────────────── -->
+<!-- â”€â”€ Jira link modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
 <div class="modal-bg" id="jira-modal">
   <div class="modal" style="max-width:380px;">
-    <div class="modal-head"><h2>🔗 Link to Jira</h2><button class="modal-close-x" data-close="jira-modal">✕</button></div>
+    <div class="modal-head"><h2>ðŸ”— Link to Jira</h2><button class="modal-close-x" data-close="jira-modal">âœ•</button></div>
     <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;">
       <div style="font-size:12px;color:#64748b;line-height:1.4;" id="jira-ticket-title"></div>
       <div class="form-field">
@@ -731,7 +737,7 @@ header{
     <div class="modal-actions">
       <button class="btn-out" id="jira-unlink" style="color:#dc2626;border-color:#fca5a5;display:none;">Remove link</button>
       <button class="btn-out" data-close="jira-modal">Cancel</button>
-      <button class="btn-primary" id="jira-save" style="background:#0052cc;">🔗 Link</button>
+      <button class="btn-primary" id="jira-save" style="background:#0052cc;">ðŸ”— Link</button>
     </div>
   </div>
 </div>
@@ -802,14 +808,14 @@ const TICKET_SUBTYPES=[
 {id:'5.4',type:'IT Escalation',label:'Infrastructure timeout',tier:'P1',priority:'High',responseHours:2}
 ];
 const SUBTYPE_BY_ID=Object.fromEntries(TICKET_SUBTYPES.map(x=>[x.id,x]));
-const COL_NAMES={new:'📥 New',inp:'⚙️ In Progress',res:'✅ Resolved'};
+const COL_NAMES={new:'ðŸ“¥ New',inp:'âš™ï¸ In Progress',res:'âœ… Resolved'};
 const POLL_SECS=60,POLL_WIN_MINS=5;
 const hasCowork=typeof window!=='undefined'&&window.cowork&&typeof window.cowork.callMcpTool==='function';
-// ── SLA ─────────────────────────────────────────────────────────────────────
+// â”€â”€ SLA â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const SLA_HOURS={High:4,Medium:24,Low:48};
-// ── Jira config — set your Jira base URL ────────────────────────────────────
+// â”€â”€ Jira config â€” set your Jira base URL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const JIRA_URL=''; // e.g. 'https://yourcompany.atlassian.net/browse/'
-// ── Blocked senders ──────────────────────────────────────────────────────────
+// â”€â”€ Blocked senders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const BLOCKED_EMAILS=new Set(['noreply@email.teams.microsoft.com','noreply@emeaemail.teams.microsoft.com','partnerships@hoteltechreport.com','no-reply@sharepointonline.com','nab@quicktext.im','alert@quicktext.im','lka@quicktext.im','oum@quicktext.im','hello@quicktext.im','mfe@quicktext.im','news@news.zafirohotels.com','newsletter@mail.hotelvor9.de','alicia@ainews.com','customermarketing@hubspot.com','events@send.zapier.com','learn@send.zapier.com','reminders@facebookmail.com','friendsuggestion@facebookmail.com','hello@news.onlyyouhotels.com','no-reply@accounts.google.com','jordan.hollander@hoteltechreport.com','jordan@hoteltechreport.com','hello@info.grammarly.com','newsletter@aquapalacehotel.com','portblue@email.portbluehotels.com','hello@scribehow.com','no-reply@scribehow.com','team@mail.perplexity.ai','canvadesignschool@engage.canva.com','strawberryjam@substack.com','recommendations@discover.pinterest.com','grandmagichotel@fabulous-hotels.com','dreamcastle@fabulous-hotels.com','support@e.read.ai','noreply@booking.com','email.campaign@sg.booking.com','notify@bayt.com','googlealerts-noreply@google.com','noreply@google.com','twilio-notifications@twilio.com','teamtwilio@team.twilio.com','comments-noreply@docs.google.com','quicktext@mail.sleekplan.com','inspire@emailing.hotelmousai.com','no-reply@360dialog.com','no-reply@teams.mail.microsoft','no-reply@outlook.mail.microsoft','hello@marketing.aircall.io','precheckin@pueblobonito.com','info@crownparadise.com','clients@mail2.blauhotels.com','clientes@mail2.blauhotels.com','comercial@emailing.hotelesdunas.com','notify@mail.trae.ai','no-reply@valentinhotels.com','trademarks@springbirdip.com','no-reply@euc1.monday.com','reservationita@clients.myway-hotels.com','reservas@alcossebrehotel.com','news@hesperiaconnection.com','hkiriakrem1984@gmail.com','info@hotelacapulcolloret.com','terrapinn@tp2.terrapinn.com','hello@ecommcapitals.com','contact-ile@roussillhotel.com','info@ghreymar.com','sas@quinta.im']);
 const BLOCKED_DOMAINS=new Set(['quicktext.im','colossalfactory.com','email.teams.microsoft.com','emeaemail.teams.microsoft.com','facebookmail.com','sg.booking.com','mail.sleekplan.com','teams.mail.microsoft','outlook.mail.microsoft']);
 const NO_REPLY_PATTERNS=['noreply','no-reply','donotreply','do-not-reply','mailer-daemon','postmaster','bounce@','bounces@','notifications@','alerts@','googlealerts','linkedin.com','twitter.com','@mailchimp','@sendgrid','@klaviyo','@constantcontact','executiveassistant@','@e.read.ai','atlassian@','jira@'];
@@ -819,14 +825,14 @@ function isQuintaSender(s){if(!s)return false;const d=(s.split('@')[1]||'').toLo
 function getClientEmail(emailObj){const sender=emailObj?.sender||'';if(!isQuintaSender(sender))return sender.toLowerCase()||null;const recipients=Array.isArray(emailObj?.recipients)?emailObj.recipients:[];const client=recipients.find(r=>{if(!r||typeof r!=='string')return false;const rl=r.toLowerCase();if(rl===SUPPORT_BOX)return false;if(isQuintaSender(r))return false;if(NO_REPLY_PATTERNS.some(p=>rl.includes(p)))return false;return true;});return client?client.toLowerCase():null;}
 function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(NO_REPLY_SUBJECTS.some(p=>tl.includes(p)))return true;if(/\b(newsletter|webinar|digest|event reminder)\b/.test(tl))return true;if(/(microsoft teams meeting|join microsoft teams meeting|meeting invitation|accepted:|declined:|tentative:)/.test(tl))return true;return false;}
 
-// ── State ──────────────────────────────────────────────────────────────────
+// â”€â”€ State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const seen={};
 let ticketState={},ticketPriority={},ticketCategory={},ticketSubtype={},ticketAssignee={},ticketComments={},ticketClientEmail={};
 let ticketAssignmentMode={};
 let manualSupportOverride={};
 let ticketCSOwner={};
 let ticketCreatedAt={};
-let ticketJira={};   // ticketId → Jira key (e.g. 'QT-1234') | null
+let ticketJira={};   // ticketId â†’ Jira key (e.g. 'QT-1234') | null
 let ticketHubspotId={}; // ticketId -> HubSpot ticket ID
 let spamSenders=new Set();
 let hsCache={},domainCompanyCache={},readMentions=new Set();
@@ -915,6 +921,7 @@ function saveState(reason){
   const ind=document.getElementById('save-indicator');
   if(ind){ind.style.opacity='1';clearTimeout(_saveTimer);_saveTimer=setTimeout(()=>{ind.style.opacity='0';},2500);}
 }
+function normalizeTicketStage(v){const s=String(v||'').trim().toLowerCase();if(STAGES.includes(s))return s;if(s==='in_progress'||s==='in-progress')return'inp';if(s==='waiting_on_us'||s==='waiting-on-us')return'wus';if(s==='waiting_on_contact'||s==='waiting-on-contact')return'wct';if(s==='resolved'||s==='closed')return'res';return'new';}
 async function loadState(){
   const s=await apiGetState();
   if(!s)return;
@@ -926,7 +933,7 @@ async function loadState(){
   }else{
     allTickets.forEach(t=>{seen[t.id]=true;});
   }
-  if(s.ticketState)Object.assign(ticketState,s.ticketState);
+  if(s.ticketState){Object.entries(s.ticketState).forEach(([k,v])=>{ticketState[k]=normalizeTicketStage(v);});}
   if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
   if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
   if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);
@@ -955,12 +962,13 @@ function saveHsCache(){saveState();}
 window.addEventListener('pagehide',flushStateWithBeacon);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')flushStateWithBeacon();});
 
-// ── SLA ──────────────────────────────────────────────────────────────────────
+// â”€â”€ SLA â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function fmtDuration(ms){const h=Math.floor(ms/3600000);const m=Math.floor((ms%3600000)/60000);if(h>=24){const d=Math.floor(h/24);const rh=h%24;return rh?`${d}d ${rh}h`:`${d}d`;}if(h>0)return m?`${h}h ${m}m`:`${h}h`;return Math.max(0,m)+'m';}
 function getSLAStatus(id){const createdAt=ticketCreatedAt[id];if(!createdAt)return null;const col=ticketState[id]||'new';if(col==='res')return null;const st=SUBTYPE_BY_ID[ticketSubtype[id]||''];if(st?.tier==='Paused')return{text:'Paused (awaiting hotel)',cls:'sla-warn',overdue:false};const pr=ticketPriority[id]||st?.priority||'Medium';const hrs=(SLA_HOURS[pr]||st?.responseHours||24);const slaMs=hrs*3600000;const elapsed=Date.now()-new Date(createdAt).getTime();const remaining=slaMs-elapsed;if(remaining<=0){return{text:fmtDuration(Math.abs(remaining))+' overdue',cls:'sla-breach',overdue:true};}const pct=remaining/slaMs;const cls=pct>0.5?'sla-ok':pct>0.25?'sla-warn':'sla-urgent';return{text:fmtDuration(remaining)+' left',cls,overdue:false};}
-function refreshSLABadges(){document.querySelectorAll('[data-sla-id]').forEach(el=>{const id=el.dataset.slaId;const status=getSLAStatus(id);if(!status){el.style.display='none';return;}el.style.display='';el.textContent='⏱ '+status.text;el.className='sla-badge '+status.cls;});}
+function refreshSLABadges(){document.querySelectorAll('[data-sla-id]').forEach(el=>{const id=el.dataset.slaId;const status=getSLAStatus(id);if(!status){el.style.display='none';return;}el.style.display='';el.textContent='â± '+status.text;el.className='sla-badge '+status.cls;});}
+async function syncTicketStatusToHubspot(ticketId,newCol){const hsId=ticketHubspotId[ticketId];if(!hsId)return{ok:false,reason:'missing_hubspot_ticket_id'};try{const res=await fetch(`/api/hubspot/tickets/${encodeURIComponent(hsId)}/status`,{method:'PATCH',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({kanbanStatus:HUBSPOT_STATUS_BY_STAGE[newCol]||'new'})});const out=await res.json().catch(()=>({}));if(!res.ok)return{ok:false,reason:'api_error',error:String(out?.error||res.status)};return{ok:true};}catch(e){return{ok:false,reason:'network_error',error:String(e?.message||e)};}}
 
-// ── Spam ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Spam â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function recordSpamSender(spamEmail){if(!spamEmail||isQuintaSender(spamEmail)||spamSenders.has(spamEmail))return 0;spamSenders.add(spamEmail);let count=0;allTickets.forEach(t=>{const te=ticketClientEmail[t.id]||t.email.sender?.toLowerCase();if(te===spamEmail){ticketCategory[t.id]='Spam';count++;}});return count;}
 function getSpamTickets(){return allTickets.filter(t=>ticketCategory[t.id]==='Spam').sort((a,b)=>new Date(b.email.receivedDateTime||0)-new Date(a.email.receivedDateTime||0));}
 function updateSpamBadge(){const cnt=getSpamTickets().length;const badge=document.getElementById('spam-count');const btn=document.getElementById('spam-view-btn');if(cnt>0){badge.textContent=cnt>99?'99+':cnt;badge.style.display='inline-flex';}else{badge.style.display='none';}(cnt>0&&!btn.classList.contains('active'))&&(btn.style.fontWeight='700');}
@@ -972,7 +980,7 @@ function setSideNavActive(mode){
   document.getElementById('ticket-kpi-view-btn')?.classList.toggle('active',mode==='kpi');
 }
 
-// ── Jira badge count ─────────────────────────────────────────────────────────
+// â”€â”€ Jira badge count â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function updateJiraBadge(){
   const cnt=allTickets.filter(t=>ticketJira[t.id]).length;
   const badge=document.getElementById('jira-count');
@@ -982,7 +990,7 @@ function updateJiraBadge(){
   btn.classList.toggle('active',activeJira);
 }
 
-// ── Jira modal ───────────────────────────────────────────────────────────────
+// â”€â”€ Jira modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function openJiraModal(id){
   jiraTicketId=id;
   const ticket=allTickets.find(t=>t.id===id);
@@ -1002,7 +1010,7 @@ document.getElementById('jira-save').addEventListener('click',()=>{
   ticketJira[jiraTicketId]=raw;
   saveState();renderBoard();updateJiraBadge();
   document.getElementById('jira-modal').classList.remove('open');
-  showToast('🔗 Linked to '+raw,'ok');
+  showToast('ðŸ”— Linked to '+raw,'ok');
 });
 document.getElementById('jira-unlink').addEventListener('click',()=>{
   if(!jiraTicketId)return;
@@ -1013,7 +1021,7 @@ document.getElementById('jira-unlink').addEventListener('click',()=>{
 });
 document.getElementById('jira-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('jira-save').click();});
 
-// ── Create ticket modal ───────────────────────────────────────────────────────
+// â”€â”€ Create ticket modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function openCreateModal(){
   document.getElementById('ct-subject').value='';
   document.getElementById('ct-desc').value='';
@@ -1046,7 +1054,7 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   await syncTicketToHubspot(ticket);
 });
 
-// ── View switching ────────────────────────────────────────────────────────────
+// â”€â”€ View switching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function showBoardView(){viewMode='board';document.getElementById('main-board').style.display='flex';document.getElementById('spam-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';setSideNavActive('board');renderBoard();}
 function showSpamView(){viewMode='spam';document.getElementById('main-board').style.display='none';document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');renderSpamView();}
 function showDashboardView(){companiesViewType='report';viewMode='companies';document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('kpi-view').style.display='none';document.getElementById('companies-view').style.display='block';setSideNavActive('dashboard');renderCompaniesView();}
@@ -1077,7 +1085,7 @@ function getKpiBounds(key){
 function fmtKpiRangeLabel(key,b){
   const fmt=ms=>new Date(ms).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
   const labels={today:'Today',last_week:'Last week',last_30_days:'Last 30 days',this_quarter:'This quarter',last_quarter:'Last quarter',this_year:'This year'};
-  return`${labels[key]||'Range'} · ${fmt(b.start)} to ${fmt(b.end)}`;
+  return`${labels[key]||'Range'} Â· ${fmt(b.start)} to ${fmt(b.end)}`;
 }
 function renderKpiView(){
   const bounds=getKpiBounds(kpiTimeFilter);
@@ -1099,14 +1107,14 @@ function renderKpiView(){
     .filter(t=>!activeJira||!!ticketJira[t.id])
     .filter(ticketMatchesTeam)
     .filter(t=>kpiAgentFilter==='all'||(ticketAssignee[t.id]||'Unassigned')===kpiAgentFilter);
-  const statusCounts={new:0,inp:0,res:0};
+  const statusCounts={new:0,inp:0,wus:0,wct:0,res:0};
   const agentRows={};
   inRange.forEach(t=>{
     const id=t.id;
-    const st=ticketState[id]||'new';
+    const st=normalizeTicketStage(ticketState[id]||'new');
     if(st in statusCounts)statusCounts[st]++;
     const ag=ticketAssignee[id]||'Unassigned';
-    if(!agentRows[ag])agentRows[ag]={agent:ag,total:0,new:0,inp:0,res:0};
+    if(!agentRows[ag])agentRows[ag]={agent:ag,total:0,new:0,inp:0,wus:0,wct:0,res:0};
     agentRows[ag].total++;
     if(st in statusCounts)agentRows[ag][st]++;
   });
@@ -1122,20 +1130,24 @@ function renderKpiView(){
   document.getElementById('kpi-team-filter').value=kpiTeamFilter;
   const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All agents');
   const agentLabel=kpiAgentFilter==='all'?'All agents':kpiAgentFilter;
-  document.getElementById('kpi-range-label').textContent=`Tickets considered: ${inRange.length} (non-spam) · ${fmtKpiRangeLabel(kpiTimeFilter,bounds)} · ${teamLabel} · ${agentLabel}`;
+  document.getElementById('kpi-range-label').textContent=`Tickets considered: ${inRange.length} (non-spam) Â· ${fmtKpiRangeLabel(kpiTimeFilter,bounds)} Â· ${teamLabel} Â· ${agentLabel}`;
   document.getElementById('kpi-status-cards').innerHTML=`
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">New</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.new}</div></div>
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">In Progress</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.inp}</div></div>
+    <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">Waiting On Us</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.wus}</div></div>
+    <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">Waiting On Contact</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.wct}</div></div>
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:12px;color:#666;">Resolved</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.res}</div></div>`;
   const rows=Object.values(agentRows).sort((a,b)=>b.total-a.total||a.agent.localeCompare(b.agent));
-  const maxStatus=Math.max(1,statusCounts.new,statusCounts.inp,statusCounts.res);
+  const maxStatus=Math.max(1,statusCounts.new,statusCounts.inp,statusCounts.wus,statusCounts.wct,statusCounts.res);
   document.getElementById('kpi-status-chart').innerHTML=`
     <div style="display:flex;flex-direction:column;gap:8px;">
       <div><div style="font-size:12px;margin-bottom:4px;">New (${statusCounts.new})</div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:12px;width:${Math.round((statusCounts.new/maxStatus)*100)}%;background:#f59e0b;"></div></div></div>
       <div><div style="font-size:12px;margin-bottom:4px;">In Progress (${statusCounts.inp})</div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:12px;width:${Math.round((statusCounts.inp/maxStatus)*100)}%;background:#3b82f6;"></div></div></div>
+      <div><div style="font-size:12px;margin-bottom:4px;">Waiting On Us (${statusCounts.wus})</div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:12px;width:${Math.round((statusCounts.wus/maxStatus)*100)}%;background:#2563eb;"></div></div></div>
+      <div><div style="font-size:12px;margin-bottom:4px;">Waiting On Contact (${statusCounts.wct})</div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:12px;width:${Math.round((statusCounts.wct/maxStatus)*100)}%;background:#e11d48;"></div></div></div>
       <div><div style="font-size:12px;margin-bottom:4px;">Resolved (${statusCounts.res})</div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:12px;width:${Math.round((statusCounts.res/maxStatus)*100)}%;background:#10b981;"></div></div></div>
     </div>`;
-  const agentChartRows=rows.slice(0,10).map(r=>{const total=Math.max(1,r.total);const n=Math.round((r.new/total)*100);const i=Math.round((r.inp/total)*100);const rs=Math.max(0,100-n-i);return `<div style="margin-bottom:8px;"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="font-weight:700;">${esc(r.agent)}</span><span>${r.total}</span></div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;display:flex;"><div style="width:${n}%;background:#f59e0b;" title="New ${r.new}"></div><div style="width:${i}%;background:#3b82f6;" title="In Progress ${r.inp}"></div><div style="width:${rs}%;background:#10b981;" title="Resolved ${r.res}"></div></div></div>`;}).join('');
+  const agentChartRows=rows.slice(0,10).map(r=>{const total=Math.max(1,r.total);const n=Math.round((r.new/total)*100);const i=Math.round((r.inp/total)*100);const wu=Math.round(((r.wus||0)/total)*100);const wc=Math.round(((r.wct||0)/total)*100);const rs=Math.max(0,100-n-i-wu-wc);return `<div style="margin-bottom:8px;"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="font-weight:700;">${esc(r.agent)}</span><span>${r.total}</span></div><div style="height:12px;background:#f1f5f9;border-radius:999px;overflow:hidden;display:flex;"><div style="width:${n}%;background:#f59e0b;" title="New ${r.new}"></div><div style="width:${i}%;background:#3b82f6;" title="In Progress ${r.inp}"></div><div style="width:${wu}%;background:#2563eb;" title="Waiting On Us ${r.wus||0}"></div><div style="width:${wc}%;background:#e11d48;" title="Waiting On Contact ${r.wct||0}"></div><div style="width:${rs}%;background:#10b981;" title="Resolved ${r.res}"></div></div></div>`;}).join('');
   document.getElementById('kpi-agent-chart').innerHTML=agentChartRows||'<div style="font-size:12px;color:#666;">No data in this range.</div>';
   const companyCounts={};
   inRange.forEach(t=>{const c=companyForTicket(t)||'Unknown';companyCounts[c]=(companyCounts[c]||0)+1;});
@@ -1144,7 +1156,7 @@ function renderKpiView(){
   const jiraRows=inRange.filter(t=>ticketJira[t.id]).map(t=>({t,company:companyForTicket(t)||'Unknown',agent:ticketAssignee[t.id]||'Unassigned',jira:ticketJira[t.id]})).sort((a,b)=>new Date((b.t.email?.receivedDateTime)||0)-new Date((a.t.email?.receivedDateTime)||0));
   document.getElementById('kpi-jira-ticket-rows').innerHTML=jiraRows.length?jiraRows.slice(0,50).map(x=>`<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:8px 10px;">${esc(x.t.email?.subject||'(no subject)')}</td><td style="padding:8px 10px;">${esc(x.company)}</td><td style="padding:8px 10px;">${esc(x.agent)}</td><td style="padding:8px 10px;font-weight:700;">${esc(x.jira)}</td></tr>`).join(''):'<tr><td colspan="4" style="padding:12px 10px;color:#666;">No Jira-linked tickets for this filter.</td></tr>';
   const body=document.getElementById('kpi-agent-rows');
-  body.innerHTML=rows.length?rows.map(r=>`<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:8px 10px;font-weight:700;">${esc(r.agent)}</td><td style="padding:8px 10px;">${r.total}</td><td style="padding:8px 10px;">${r.new}</td><td style="padding:8px 10px;">${r.inp}</td><td style="padding:8px 10px;">${r.res}</td></tr>`).join(''):'<tr><td colspan="5" style="padding:12px 10px;color:#666;">No tickets in this time range.</td></tr>';
+  body.innerHTML=rows.length?rows.map(r=>`<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:8px 10px;font-weight:700;">${esc(r.agent)}</td><td style="padding:8px 10px;">${r.total}</td><td style="padding:8px 10px;">${r.new}</td><td style="padding:8px 10px;">${r.inp}</td><td style="padding:8px 10px;">${r.wus||0}</td><td style="padding:8px 10px;">${r.wct||0}</td><td style="padding:8px 10px;">${r.res}</td></tr>`).join(''):'<tr><td colspan="7" style="padding:12px 10px;color:#666;">No tickets in this time range.</td></tr>';
 }
 function companyGroups(){
   const g=new Map();
@@ -1313,7 +1325,7 @@ function refreshCompaniesFilterOptions(groups){
   companyFilters.country=countrySel.value;
   companyFilters.cs=csSel.value;
 }
-function companiesViewLabel(vt){return vt==='table'?'▦ Table view':vt==='board'?'◫ Board view':vt==='report'?'▤ Report view':'◷ Calendar view';}
+function companiesViewLabel(vt){return vt==='table'?'â–¦ Table view':vt==='board'?'â—« Board view':vt==='report'?'â–¤ Report view':'â—· Calendar view';}
 async function fetchDataHygieneReport(force){
   if(dataHygieneLoading)return;
   if(!force&&dataHygieneReport)return;
@@ -1339,12 +1351,12 @@ async function fetchDataHygieneReport(force){
 }
 function hygieneTableRows(rows){
   if(!rows?.length)return '<tr><td colspan="8" style="padding:8px 10px;color:#777;">No companies found in this category.</td></tr>';
-  return rows.slice(0,200).map(r=>`<tr><td style="padding:8px 10px;"><a href="${esc(r.url||'#')}" target="_blank">${esc(r.name||'(No name)')}</a></td><td style="padding:8px 10px;">${esc(r.domain||'—')}</td><td style="padding:8px 10px;">${esc(r.amOwner||'—')}</td><td style="padding:8px 10px;">${esc(r.csOwner||'—')}</td><td style="padding:8px 10px;">${esc(r.contractValue||'—')}</td><td style="padding:8px 10px;">${Number(r.dealCount||0)}</td><td style="padding:8px 10px;">${esc(r.companyType||'—')}</td><td style="padding:8px 10px;">${esc(r.duplicateReason||'—')}</td></tr>`).join('');
+  return rows.slice(0,200).map(r=>`<tr><td style="padding:8px 10px;"><a href="${esc(r.url||'#')}" target="_blank">${esc(r.name||'(No name)')}</a></td><td style="padding:8px 10px;">${esc(r.domain||'â€”')}</td><td style="padding:8px 10px;">${esc(r.amOwner||'â€”')}</td><td style="padding:8px 10px;">${esc(r.csOwner||'â€”')}</td><td style="padding:8px 10px;">${esc(r.contractValue||'â€”')}</td><td style="padding:8px 10px;">${Number(r.dealCount||0)}</td><td style="padding:8px 10px;">${esc(r.companyType||'â€”')}</td><td style="padding:8px 10px;">${esc(r.duplicateReason||'â€”')}</td></tr>`).join('');
 }
 function renderHygieneDashboard(grid){
   grid.style.display='block';
   if(dataHygieneLoading){
-    grid.innerHTML='<div class="loading"><div class="spinner"></div><div>Loading HubSpot data hygiene report…</div></div>';
+    grid.innerHTML='<div class="loading"><div class="spinner"></div><div>Loading HubSpot data hygiene reportâ€¦</div></div>';
     return;
   }
   if(dataHygieneError){
@@ -1354,11 +1366,11 @@ function renderHygieneDashboard(grid){
   }
   const t=dataHygieneReport?.totals||{};
   const rows=dataHygieneReport?.rows||{};
-  const generatedAt=dataHygieneReport?.generatedAt?fmtDate(dataHygieneReport.generatedAt):'—';
+  const generatedAt=dataHygieneReport?.generatedAt?fmtDate(dataHygieneReport.generatedAt):'â€”';
   const scanned=Number(t.companiesScanned||0);
   const total=Math.max(1,Number(t.companiesScanned||0));
   const pct=n=>((Number(n||0)/total)*100).toFixed(1);
-  grid.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-size:12px;color:#555;">Client-linked companies only (${esc(dataHygieneReport?.constraints?.clientLinkedDefinition||'num_associated_contacts > 0')}) · Scanned ${scanned} companies · Updated ${generatedAt}${dataHygieneReport?.meta?.partial?' · Partial snapshot':''}</div><button class="btn-out" id="refresh-hygiene">Refresh report</button></div>
+  grid.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-size:12px;color:#555;">Client-linked companies only (${esc(dataHygieneReport?.constraints?.clientLinkedDefinition||'num_associated_contacts > 0')}) Â· Scanned ${scanned} companies Â· Updated ${generatedAt}${dataHygieneReport?.meta?.partial?' Â· Partial snapshot':''}</div><button class="btn-out" id="refresh-hygiene">Refresh report</button></div>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:12px;">
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:11px;color:#666;">Duplicates</div><div style="font-family:Caladea,serif;font-size:30px;">${Number(t.duplicates||0)}</div><div style="height:7px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:7px;width:${pct(t.duplicates)}%;background:#111;"></div></div></div>
     <div style="background:#fff;border:1px solid #d7d7d7;border-radius:12px;padding:12px;"><div style="font-size:11px;color:#666;">AM/CS Mismatch</div><div style="font-family:Caladea,serif;font-size:30px;">${Number(t.ownerMismatch||0)}</div><div style="height:7px;background:#f1f5f9;border-radius:999px;overflow:hidden;"><div style="height:7px;width:${pct(t.ownerMismatch)}%;background:#111;"></div></div></div>
@@ -1371,9 +1383,9 @@ function renderHygieneDashboard(grid){
   <div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Parent/Monohotel Without Deal</div><div style="overflow:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr style="text-align:left;border-bottom:1px solid #ddd;"><th style="padding:8px 10px;">Company</th><th style="padding:8px 10px;">Domain</th><th style="padding:8px 10px;">AM Owner</th><th style="padding:8px 10px;">CS Co-owner</th><th style="padding:8px 10px;">Contract Date</th><th style="padding:8px 10px;">Deals</th><th style="padding:8px 10px;">Type</th><th style="padding:8px 10px;">Duplicate Rule</th></tr></thead><tbody>${hygieneTableRows(rows.noDealParentOrMonohotel)}</tbody></table></div></div>`;
   document.getElementById('refresh-hygiene')?.addEventListener('click',()=>fetchDataHygieneReport(true));
 }
-function renderCompaniesView(){const groups=companyGroups();ensureHubspotOwnerNames(groups);ensureCompanyNetworks(groups);upsertCompanyProfiles(groups);refreshCompaniesFilterOptions(groups);const filtered=applyCompanyFilters(groups);document.getElementById('companies-type-filter').value=companyFilters.type;document.getElementById('companies-search').value=companyFilters.q||'';document.getElementById('companies-viewtype-btn').textContent=companiesViewLabel(companiesViewType)+' ▾';document.getElementById('companies-stats').textContent=`${filtered.length} companies · ${filtered.reduce((s,x)=>s+x.tickets.length,0)} tickets`;const grid=document.getElementById('companies-grid');if(companiesViewType==='report'){renderHygieneDashboard(grid);if(!dataHygieneReport&&!dataHygieneLoading)fetchDataHygieneReport(false);return;}if(companiesViewType==='calendar'){grid.style.display='block';grid.innerHTML='<div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:20px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Calendar view</div><div style="font-size:13px;color:#666;">Calendar view is still a placeholder and can be expanded next.</div></div>';return;}if(!filtered.length){grid.innerHTML='<div class="empty"><div class="empty-icon">🏢</div>No companies match current filters.</div>';return;}grid.style.display='grid';grid.style.gridTemplateColumns=companiesViewType==='table'?'1fr':'repeat(auto-fill,minmax(320px,1fr))';grid.innerHTML='';filtered.forEach(gr=>{const custom=companyCustomProps[gr.companyId]||{};const profile=companyProfiles[gr.companyId]||null;const labeled=(gr.associatedCompanies||[]).map(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());const label=l.find(x=>x.includes('specific hotel'))?'specific hotel':(l.find(x=>x.includes('group central'))?'group central':null);return label?{label,ref:c}:null;}).filter(Boolean);const parentChild=((gr.parentCompany?[{label:'group central',ref:gr.parentCompany}]:[]).concat((gr.childCompanies||[]).map(c=>({label:'specific hotel',ref:c}))));const unlabeledAssoc=(gr.associatedCompanies||[]).filter(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());return !(l.find(x=>x.includes('specific hotel'))||l.find(x=>x.includes('group central')));}).map(c=>({label:'group related',ref:c}));const related=[...labeled,...parentChild,...unlabeledAssoc];const relHtml=related.length?related.map(r=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">${esc(r.label)}: ${esc(r.ref?.name||r.ref?.id||'—')}</span>`).join(''):(gr.relationshipType==='group'?`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Group</span>`:`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Monhotel</span>`);const shownCS=displayCSOwner(gr.coOwner);const metaLine=[gr.country?`🌍 ${gr.country}`:null,shownCS?`CS: ${shownCS}`:null].filter(Boolean).join(' · ');const contactHtml=[...gr.contacts.values()].map(c=>`<a href="${c.contactUrl||'#'}" ${c.contactUrl?'target="_blank"':''} style="text-decoration:none;color:#333;border:1px solid #ddd;border-radius:999px;padding:2px 8px;font-size:11px;display:inline-flex;gap:4px;align-items:center;">👤 ${esc(c.contactName)}</a>`).join(' ');const ticketHtml=gr.tickets.slice(0,8).map(t=>{const p=ticketPriority[t.id]||t.priority||'Medium';const col=ticketState[t.id]||'new';const colLbl={new:'New',inp:'In Progress',res:'Resolved'}[col]||'New';return `<button data-open-company-ticket="${esc(t.id)}" style="width:100%;text-align:left;border:1px solid #ddd;border-radius:10px;padding:8px 10px;margin-top:6px;background:#fff;cursor:pointer;"><div style="font-weight:700;font-size:12px;margin-bottom:3px;">${esc(t.email.subject||'(no subject)')}</div><div style="display:flex;justify-content:space-between;font-size:11px;color:#666;"><span>${esc(colLbl)} · ${esc(p)}</span><span>${fmtDate(t.email.receivedDateTime)}</span></div></button>`;}).join('');const customHtml=Object.entries(custom).map(([k,v])=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 4px 2px 0;">${esc(k)}: ${esc(v)}</span>`).join('')||'<span style="font-size:11px;color:#777;">No custom properties yet</span>';const card=document.createElement('div');card.style.cssText='background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);';card.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div><div style="font-family:Caladea,serif;font-size:22px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;">${gr.tickets.length} ticket(s)${profile?.createdAt?` · profile: ${fmtDate(profile.createdAt)}`:''}</div>${metaLine?`<div style="font-size:11px;color:#777;margin-top:2px;">${esc(metaLine)}</div>`:''}</div><div style="display:flex;gap:6px;">${gr.companyUrl?`<a class="btn-out" href="${esc(gr.companyUrl)}" target="_blank" style="font-size:11px;padding:4px 8px;">Open HubSpot</a>`:''}<button class="btn-primary" data-cprop="${esc(gr.companyId)}" style="font-size:11px;padding:4px 8px;">Custom Properties</button></div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Hierarchy</div>${relHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:5px;">Contacts</div><div style="display:flex;flex-wrap:wrap;gap:4px;">${contactHtml||'<span style="font-size:11px;color:#777;">No contacts</span>'}</div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Properties</div>${customHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:2px;">Tickets</div>${ticketHtml}</div>`;if(companiesViewType==='table'){card.style.borderRadius='10px';card.style.padding='10px';card.style.display='grid';card.style.gridTemplateColumns='minmax(220px,1fr) minmax(260px,1fr) minmax(260px,1fr)';card.style.columnGap='12px';card.innerHTML=`<div><div style="font-family:Caladea,serif;font-size:20px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;margin-bottom:6px;">${gr.tickets.length} ticket(s)</div>${metaLine?`<div style=\"font-size:11px;color:#777;margin-bottom:6px;\">${esc(metaLine)}</div>`:''}${relHtml}${gr.companyUrl?`<a class=\"btn-out\" href=\"${esc(gr.companyUrl)}\" target=\"_blank\" style=\"font-size:11px;padding:4px 8px;display:inline-block;\">Open HubSpot</a>`:''}<button class=\"btn-primary\" data-cprop=\"${esc(gr.companyId)}\" style=\"font-size:11px;padding:4px 8px;margin-left:6px;\">Custom Properties</button></div><div><div style=\"font-size:11px;color:#666;margin-bottom:5px;\">Contacts</div><div style=\"display:flex;flex-wrap:wrap;gap:4px;\">${contactHtml||'<span style=\"font-size:11px;color:#777;\">No contacts</span>'}</div><div style=\"margin-top:8px;font-size:11px;color:#666;\">Properties</div><div>${customHtml}</div></div><div><div style=\"font-size:11px;color:#666;margin-bottom:2px;\">Tickets</div>${ticketHtml}</div>`;}card.querySelector('[data-cprop]')?.addEventListener('click',()=>openCompanyPropModal(gr));card.querySelectorAll('[data-open-company-ticket]').forEach(btn=>btn.addEventListener('click',()=>{const t=allTickets.find(x=>x.id===btn.dataset.openCompanyTicket);if(t)openEmailModal(t);}));grid.appendChild(card);});}
+function renderCompaniesView(){const groups=companyGroups();ensureHubspotOwnerNames(groups);ensureCompanyNetworks(groups);upsertCompanyProfiles(groups);refreshCompaniesFilterOptions(groups);const filtered=applyCompanyFilters(groups);document.getElementById('companies-type-filter').value=companyFilters.type;document.getElementById('companies-search').value=companyFilters.q||'';document.getElementById('companies-viewtype-btn').textContent=companiesViewLabel(companiesViewType)+' â–¾';document.getElementById('companies-stats').textContent=`${filtered.length} companies Â· ${filtered.reduce((s,x)=>s+x.tickets.length,0)} tickets`;const grid=document.getElementById('companies-grid');if(companiesViewType==='report'){renderHygieneDashboard(grid);if(!dataHygieneReport&&!dataHygieneLoading)fetchDataHygieneReport(false);return;}if(companiesViewType==='calendar'){grid.style.display='block';grid.innerHTML='<div style="background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:20px;box-shadow:0 6px 16px rgba(0,0,0,.06);"><div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Calendar view</div><div style="font-size:13px;color:#666;">Calendar view is still a placeholder and can be expanded next.</div></div>';return;}if(!filtered.length){grid.innerHTML='<div class="empty"><div class="empty-icon">ðŸ¢</div>No companies match current filters.</div>';return;}grid.style.display='grid';grid.style.gridTemplateColumns=companiesViewType==='table'?'1fr':'repeat(auto-fill,minmax(320px,1fr))';grid.innerHTML='';filtered.forEach(gr=>{const custom=companyCustomProps[gr.companyId]||{};const profile=companyProfiles[gr.companyId]||null;const labeled=(gr.associatedCompanies||[]).map(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());const label=l.find(x=>x.includes('specific hotel'))?'specific hotel':(l.find(x=>x.includes('group central'))?'group central':null);return label?{label,ref:c}:null;}).filter(Boolean);const parentChild=((gr.parentCompany?[{label:'group central',ref:gr.parentCompany}]:[]).concat((gr.childCompanies||[]).map(c=>({label:'specific hotel',ref:c}))));const unlabeledAssoc=(gr.associatedCompanies||[]).filter(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());return !(l.find(x=>x.includes('specific hotel'))||l.find(x=>x.includes('group central')));}).map(c=>({label:'group related',ref:c}));const related=[...labeled,...parentChild,...unlabeledAssoc];const relHtml=related.length?related.map(r=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">${esc(r.label)}: ${esc(r.ref?.name||r.ref?.id||'â€”')}</span>`).join(''):(gr.relationshipType==='group'?`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Group</span>`:`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:#f8fafc;">Monhotel</span>`);const shownCS=displayCSOwner(gr.coOwner);const metaLine=[gr.country?`ðŸŒ ${gr.country}`:null,shownCS?`CS: ${shownCS}`:null].filter(Boolean).join(' Â· ');const contactHtml=[...gr.contacts.values()].map(c=>`<a href="${c.contactUrl||'#'}" ${c.contactUrl?'target="_blank"':''} style="text-decoration:none;color:#333;border:1px solid #ddd;border-radius:999px;padding:2px 8px;font-size:11px;display:inline-flex;gap:4px;align-items:center;">ðŸ‘¤ ${esc(c.contactName)}</a>`).join(' ');const ticketHtml=gr.tickets.slice(0,8).map(t=>{const p=ticketPriority[t.id]||t.priority||'Medium';const col=ticketState[t.id]||'new';const colLbl={new:'New',inp:'In Progress',res:'Resolved'}[col]||'New';return `<button data-open-company-ticket="${esc(t.id)}" style="width:100%;text-align:left;border:1px solid #ddd;border-radius:10px;padding:8px 10px;margin-top:6px;background:#fff;cursor:pointer;"><div style="font-weight:700;font-size:12px;margin-bottom:3px;">${esc(t.email.subject||'(no subject)')}</div><div style="display:flex;justify-content:space-between;font-size:11px;color:#666;"><span>${esc(colLbl)} Â· ${esc(p)}</span><span>${fmtDate(t.email.receivedDateTime)}</span></div></button>`;}).join('');const customHtml=Object.entries(custom).map(([k,v])=>`<span style="font-size:11px;border:1px solid #ddd;border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 4px 2px 0;">${esc(k)}: ${esc(v)}</span>`).join('')||'<span style="font-size:11px;color:#777;">No custom properties yet</span>';const card=document.createElement('div');card.style.cssText='background:#fff;border:1px solid #d7d7d7;border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(0,0,0,.06);';card.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div><div style="font-family:Caladea,serif;font-size:22px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;">${gr.tickets.length} ticket(s)${profile?.createdAt?` Â· profile: ${fmtDate(profile.createdAt)}`:''}</div>${metaLine?`<div style="font-size:11px;color:#777;margin-top:2px;">${esc(metaLine)}</div>`:''}</div><div style="display:flex;gap:6px;">${gr.companyUrl?`<a class="btn-out" href="${esc(gr.companyUrl)}" target="_blank" style="font-size:11px;padding:4px 8px;">Open HubSpot</a>`:''}<button class="btn-primary" data-cprop="${esc(gr.companyId)}" style="font-size:11px;padding:4px 8px;">Custom Properties</button></div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Hierarchy</div>${relHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:5px;">Contacts</div><div style="display:flex;flex-wrap:wrap;gap:4px;">${contactHtml||'<span style="font-size:11px;color:#777;">No contacts</span>'}</div></div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:3px;">Properties</div>${customHtml}</div><div style="margin-top:8px;"><div style="font-size:11px;color:#666;margin-bottom:2px;">Tickets</div>${ticketHtml}</div>`;if(companiesViewType==='table'){card.style.borderRadius='10px';card.style.padding='10px';card.style.display='grid';card.style.gridTemplateColumns='minmax(220px,1fr) minmax(260px,1fr) minmax(260px,1fr)';card.style.columnGap='12px';card.innerHTML=`<div><div style="font-family:Caladea,serif;font-size:20px;">${esc(gr.companyName)}</div><div style="font-size:11px;color:#666;margin-bottom:6px;">${gr.tickets.length} ticket(s)</div>${metaLine?`<div style=\"font-size:11px;color:#777;margin-bottom:6px;\">${esc(metaLine)}</div>`:''}${relHtml}${gr.companyUrl?`<a class=\"btn-out\" href=\"${esc(gr.companyUrl)}\" target=\"_blank\" style=\"font-size:11px;padding:4px 8px;display:inline-block;\">Open HubSpot</a>`:''}<button class=\"btn-primary\" data-cprop=\"${esc(gr.companyId)}\" style=\"font-size:11px;padding:4px 8px;margin-left:6px;\">Custom Properties</button></div><div><div style=\"font-size:11px;color:#666;margin-bottom:5px;\">Contacts</div><div style=\"display:flex;flex-wrap:wrap;gap:4px;\">${contactHtml||'<span style=\"font-size:11px;color:#777;\">No contacts</span>'}</div><div style=\"margin-top:8px;font-size:11px;color:#666;\">Properties</div><div>${customHtml}</div></div><div><div style=\"font-size:11px;color:#666;margin-bottom:2px;\">Tickets</div>${ticketHtml}</div>`;}card.querySelector('[data-cprop]')?.addEventListener('click',()=>openCompanyPropModal(gr));card.querySelectorAll('[data-open-company-ticket]').forEach(btn=>btn.addEventListener('click',()=>{const t=allTickets.find(x=>x.id===btn.dataset.openCompanyTicket);if(t)openEmailModal(t);}));grid.appendChild(card);});}
 function showCompaniesView(){viewMode='companies';document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('kpi-view').style.display='none';document.getElementById('companies-view').style.display='block';setSideNavActive(companiesViewType==='report'?'dashboard':'companies');renderCompaniesView();}
-function renderSpamView(){const spamTickets=getSpamTickets();const listEl=document.getElementById('spam-list');document.getElementById('spam-view-count').textContent=`(${spamTickets.length} ticket${spamTickets.length!==1?'s':''})`;if(!spamTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;">✅</div><div style="font-size:16px;font-weight:700;color:#374151;margin-bottom:6px;">Inbox zero!</div><div style="font-size:13px;color:#94a3b8;">No spam tickets.</div></div>';return;}listEl.innerHTML='';spamTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'—';const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip">✉️ ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip">🏢 ${esc(hs.companyName)}</span>`:''}<span class="spam-date">${fmtDate(email.receivedDateTime)}</span></div></div><div class="spam-row-actions"><button class="btn-restore" data-restore="${id}">↩️ Restore</button></div>`;row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{ticketCategory[id]='Other';const te=clientEmail||email.sender?.toLowerCase();const otherSpam=allTickets.some(x=>x.id!==id&&(ticketClientEmail[x.id]||x.email.sender?.toLowerCase())===te&&ticketCategory[x.id]==='Spam');if(!otherSpam&&te)spamSenders.delete(te);saveState();renderSpamView();updateSpamBadge();showToast('Ticket restored to board','ok');});listEl.appendChild(row);});}
+function renderSpamView(){const spamTickets=getSpamTickets();const listEl=document.getElementById('spam-list');document.getElementById('spam-view-count').textContent=`(${spamTickets.length} ticket${spamTickets.length!==1?'s':''})`;if(!spamTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;">âœ…</div><div style="font-size:16px;font-weight:700;color:#374151;margin-bottom:6px;">Inbox zero!</div><div style="font-size:13px;color:#94a3b8;">No spam tickets.</div></div>';return;}listEl.innerHTML='';spamTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'â€”';const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip">âœ‰ï¸ ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip">ðŸ¢ ${esc(hs.companyName)}</span>`:''}<span class="spam-date">${fmtDate(email.receivedDateTime)}</span></div></div><div class="spam-row-actions"><button class="btn-restore" data-restore="${id}">â†©ï¸ Restore</button></div>`;row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{ticketCategory[id]='Other';const te=clientEmail||email.sender?.toLowerCase();const otherSpam=allTickets.some(x=>x.id!==id&&(ticketClientEmail[x.id]||x.email.sender?.toLowerCase())===te&&ticketCategory[x.id]==='Spam');if(!otherSpam&&te)spamSenders.delete(te);saveState();renderSpamView();updateSpamBadge();showToast('Ticket restored to board','ok');});listEl.appendChild(row);});}
 document.getElementById('btn-clear-spam').addEventListener('click',()=>{const cnt=getSpamTickets().length;if(!cnt)return;if(!confirm(`Remove all ${cnt} spam ticket(s)?`))return;getSpamTickets().forEach(t=>{ticketState[t.id]='res';});saveState();renderSpamView();updateSpamBadge();showToast(`${cnt} spam ticket${cnt>1?'s':''} cleared`,'ok');});
 document.getElementById('btn-back-board').addEventListener('click',showBoardView);
 document.getElementById('spam-view-btn').addEventListener('click',()=>{if(viewMode==='spam')showBoardView();else showSpamView();});
@@ -1509,7 +1521,7 @@ async function syncTicketToHubspot(ticket,opts={}){
   hubspotTicketSyncInFlight.add(id);
   hubspotTicketSyncStartedAt[id]=Date.now();
   try{
-    const payload={kanbanTicketId:id,companyId:String(hs.companyId),subject:ticket.email?.subject||'(no subject)',description:ticket.email?.summary||'',priority:ticketPriority[id]||ticket.priority||'Medium',category:ticketCategory[id]||'Other',receivedAt:ticket.email?.receivedDateTime||ticketCreatedAt[id]||new Date().toISOString(),assignee:ticketAssignee[id]||null};
+    const payload={kanbanTicketId:id,companyId:String(hs.companyId),subject:ticket.email?.subject||'(no subject)',description:ticket.email?.summary||'',priority:ticketPriority[id]||ticket.priority||'Medium',category:ticketCategory[id]||'Other',receivedAt:ticket.email?.receivedDateTime||ticketCreatedAt[id]||new Date().toISOString(),assignee:ticketAssignee[id]||null,kanbanStatus:HUBSPOT_STATUS_BY_STAGE[normalizeTicketStage(ticketState[id]||'new')]||'new'};
     const ctrl=new AbortController();
     const timer=setTimeout(()=>ctrl.abort(),15000);
     const res=await fetch('/api/hubspot/tickets/sync',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(payload),signal:ctrl.signal});
@@ -1567,11 +1579,11 @@ function classifySubtype(e){const t=((e.subject||'')+' '+(e.summary||'')).toLowe
 function autoAssignNew(tickets){tickets.forEach(t=>{if(ticketAssignee[t.id]||ticketCategory[t.id]==='Spam')return;const cs=resolveDefaultCSForTicket(t.id,t.email);ticketAssignee[t.id]=cs;ticketCSOwner[t.id]=cs;ticketAssignmentMode[t.id]='cs';});}
 function updateWorkload(){const load=Object.fromEntries(SUPPORT_AGENTS.map(a=>[a,0]));allTickets.filter(t=>ticketCategory[t.id]!=='Spam').forEach(t=>{const a=ticketAssignee[t.id];if(a in load)load[a]++;});const sorted=SUPPORT_AGENTS.map(a=>({a,n:load[a]})).sort((x,y)=>y.n-x.n).slice(0,5);document.getElementById('workload-bar').innerHTML=sorted.map(({a,n})=>`<div class="agent-pill" style="background:${agentColor(a)}20;color:${agentColor(a)}">${a} <span class="cnt">${n}</span></div>`).join('');}
 function showToast(msg,cls=''){const t=document.getElementById('toast');t.textContent=msg;t.className='show'+(cls?' '+cls:'');clearTimeout(t._timer);t._timer=setTimeout(()=>{t.className='';},4500);}
-function startCountdown(){pollSecsLeft=POLL_SECS;const cd=document.getElementById('poll-cd');const tick=setInterval(()=>{pollSecsLeft--;cd.textContent=pollSecsLeft>0?'· '+pollSecsLeft+'s':'· checking…';if(pollSecsLeft<=0)clearInterval(tick);},1000);}
+function startCountdown(){pollSecsLeft=POLL_SECS;const cd=document.getElementById('poll-cd');const tick=setInterval(()=>{pollSecsLeft--;cd.textContent=pollSecsLeft>0?'Â· '+pollSecsLeft+'s':'Â· checkingâ€¦';if(pollSecsLeft<=0)clearInterval(tick);},1000);}
 function rebuildTagged(){taggedTickets.clear();const me=currentUser();Object.entries(ticketComments).forEach(([id,cs])=>{if(cs.some(c=>c.tags&&c.tags.includes(me)))taggedTickets.add(id);});document.getElementById('tagged-filter').style.display=taggedTickets.size?'':'none';updateMentionsBadge();}
 function buildAgentUI(){
   const sel=document.getElementById('current-user');sel.innerHTML='<optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup>';
-  const af=document.getElementById('agent-filter');af.innerHTML='<option value="all">All agents</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><option value="tagged">🔔 Tagged me</option>';
+  const af=document.getElementById('agent-filter');af.innerHTML='<option value="all">All agents</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><option value="tagged">ðŸ”” Tagged me</option>';
   // Populate create-ticket agent dropdown
   const ctAgent=document.getElementById('ct-agent');if(ctAgent)ctAgent.innerHTML='<optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option value="${a}">${a}</option>`).join('')+'</optgroup>';
   const grid=document.getElementById('tag-grid');grid.innerHTML=[...SUPPORT_AGENTS,...CS_AGENTS,CLIENT_TAG].map(t=>{const bg=t===CLIENT_TAG?'#475569':agentColor(t);return`<span class="tag-chip" data-tag="${t}" style="background:${bg}">${t}${CS_AGENTS.includes(t)?' CS':''}</span>`;}).join('');grid.querySelectorAll('.tag-chip').forEach(chip=>{chip.addEventListener('click',()=>{const tag=chip.dataset.tag;if(selectedTags.has(tag)){selectedTags.delete(tag);chip.classList.remove('selected');}else{selectedTags.add(tag);chip.classList.add('selected');}});});
@@ -1596,23 +1608,23 @@ function makeCard(ticket,isNew=false){
 
   // SLA badge
   const slaStatus=getSLAStatus(id);
-  const slaBadgeHtml=slaStatus?`<div class="sla-row"><span class="sla-badge ${slaStatus.cls}" data-sla-id="${id}" data-sla-priority="${esc(priority)}" title="SLA target">⏱ ${slaStatus.text}</span></div>`:'';
+  const slaBadgeHtml=slaStatus?`<div class="sla-row"><span class="sla-badge ${slaStatus.cls}" data-sla-id="${id}" data-sla-priority="${esc(priority)}" title="SLA target">â± ${slaStatus.text}</span></div>`:'';
 
   // HubSpot row
   let hsHtml='';
   if(clientEmail===null)hsHtml='';
-  else if(hs===undefined)hsHtml='<div class="hs-row"><span class="hs-pending">🔍 Looking up HubSpot…</span></div>';
-  else if(hs!==null){let inner='';if(hs.companyName){const ic=hs.inferredVia?' inferred':'';const it=hs.inferredVia?` — inferred from @${(clientEmail||'').split('@')[1]}`:'';inner+=`<span class="hs-company${ic}" title="${esc((hs.allCompanies?.join(' · ')||hs.companyName)+it)}">🏢 <span class="hs-company-name">${esc(hs.companyName)}</span>`;if(hs.inferredVia)inner+=`<span class="hs-inferred-tag">~</span>`;if(hs.companyUrl)inner+=` <a class="hs-link" href="${esc(hs.companyUrl)}" target="_blank">⟶</a>`;inner+=`</span>`;}if(hs.contactName&&hs.contactName.toLowerCase()!==clientEmail){inner+=`<span class="hs-contact">`;if(hs.contactUrl)inner+=`<a href="${esc(hs.contactUrl)}" target="_blank">`;inner+=esc(hs.contactName);if(hs.contactUrl)inner+=`</a>`;inner+=`</span>`;}if(inner)hsHtml=`<div class="hs-row">${inner}</div>`;}
+  else if(hs===undefined)hsHtml='<div class="hs-row"><span class="hs-pending">ðŸ” Looking up HubSpotâ€¦</span></div>';
+  else if(hs!==null){let inner='';if(hs.companyName){const ic=hs.inferredVia?' inferred':'';const it=hs.inferredVia?` â€” inferred from @${(clientEmail||'').split('@')[1]}`:'';inner+=`<span class="hs-company${ic}" title="${esc((hs.allCompanies?.join(' Â· ')||hs.companyName)+it)}">ðŸ¢ <span class="hs-company-name">${esc(hs.companyName)}</span>`;if(hs.inferredVia)inner+=`<span class="hs-inferred-tag">~</span>`;if(hs.companyUrl)inner+=` <a class="hs-link" href="${esc(hs.companyUrl)}" target="_blank">âŸ¶</a>`;inner+=`</span>`;}if(hs.contactName&&hs.contactName.toLowerCase()!==clientEmail){inner+=`<span class="hs-contact">`;if(hs.contactUrl)inner+=`<a href="${esc(hs.contactUrl)}" target="_blank">`;inner+=esc(hs.contactName);if(hs.contactUrl)inner+=`</a>`;inner+=`</span>`;}if(inner)hsHtml=`<div class="hs-row">${inner}</div>`;}
 
   // Sender display
   let senderHtml='';
-  if(isInternalReply){senderHtml=`<div class="card-sender-reply"><span style="color:#4f46e5;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px;" title="${esc(clientEmail)}">👤 ${esc(senderName(clientEmail))}</span><span style="color:#94a3b8;">↩️ ${esc(senderName(email.sender))}</span></div>`;}
-  else{senderHtml=`<span class="card-sender" title="${esc(email.sender)}">👤 ${esc(senderName(email.sender))}</span>`;}
+  if(isInternalReply){senderHtml=`<div class="card-sender-reply"><span style="color:#4f46e5;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px;" title="${esc(clientEmail)}">ðŸ‘¤ ${esc(senderName(clientEmail))}</span><span style="color:#94a3b8;">â†©ï¸ ${esc(senderName(email.sender))}</span></div>`;}
+  else{senderHtml=`<span class="card-sender" title="${esc(email.sender)}">ðŸ‘¤ ${esc(senderName(email.sender))}</span>`;}
 
   // Jira button
   const jiraBtn=jiraKey
-    ?`<a class="jira-badge-card" data-jira-open="${id}" href="${JIRA_URL?esc(JIRA_URL+jiraKey):'#'}" ${JIRA_URL?'target="_blank"':''} title="Jira: ${esc(jiraKey)}">🔗 ${esc(jiraKey)}</a>`
-    :`<button class="jira-link-btn" data-jira-open="${id}" title="Link to Jira ticket">🔗</button>`;
+    ?`<a class="jira-badge-card" data-jira-open="${id}" href="${JIRA_URL?esc(JIRA_URL+jiraKey):'#'}" ${JIRA_URL?'target="_blank"':''} title="Jira: ${esc(jiraKey)}">ðŸ”— ${esc(jiraKey)}</a>`
+    :`<button class="jira-link-btn" data-jira-open="${id}" title="Link to Jira ticket">ðŸ”—</button>`;
   const hsTicketId=ticketHubspotId[id]||'';
   const inFlight=hubspotTicketSyncInFlight.has(id);
   if(inFlight){
@@ -1651,11 +1663,11 @@ function makeCard(ticket,isNew=false){
         <span class="card-date">${fmtDate(email.receivedDateTime)}</span>
         ${jiraBtn}
         ${hsTicketBtn}
-        <button class="open-email-btn" data-oe="${id}">📧 Open</button>
+        <button class="open-email-btn" data-oe="${id}">ðŸ“§ Open</button>
         <button class="agent-badge-card" data-ag="${id}" style="background:${ac}">${agent}</button>
         ${ticketAssignmentMode[id]==='support'&&csOwner?`<span class="agent-badge-card" style="background:${agentColor(csOwner)};opacity:.75;cursor:default;" title="CS owner">${csOwner} CS</span>`:''}
         <button class="btn-out" data-as="${id}" style="font-size:10px;padding:2px 7px;">Assign to support</button>
-        <button class="com-btn${comments.length?' has-comments':''}" data-oc="${id}">💬${comments.length?` <span class="com-badge">${comments.length}</span>`:''}</button>
+        <button class="com-btn${comments.length?' has-comments':''}" data-oc="${id}">ðŸ’¬${comments.length?` <span class="com-badge">${comments.length}</span>`:''}</button>
       </div>
     </div>`;
   div.addEventListener('dragstart',e=>{e.dataTransfer.setData('ticketId',id);setTimeout(()=>div.classList.add('dragging'),0);});
@@ -1663,7 +1675,7 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-pr]').addEventListener('click',e=>{e.stopPropagation();ticketPriority[id]=nextPriority(priority);saveState();renderBoard();});
   div.querySelector('[data-ag]').addEventListener('click',e=>{e.stopPropagation();if(!ticketCSOwner[id]&&CS_AGENTS.includes(agent))ticketCSOwner[id]=agent;ticketAssignee[id]=nextAgent(agent);ticketAssignmentMode[id]='support';manualSupportOverride[id]=true;saveState('manual_support_cycle');updateWorkload();renderBoard();});
   div.querySelector('[data-as]').addEventListener('click',e=>{e.stopPropagation();if(!ticketCSOwner[id]&&CS_AGENTS.includes(agent))ticketCSOwner[id]=agent;const target=leastLoadedSupportAgent();ticketAssignee[id]=target;ticketAssignmentMode[id]='support';manualSupportOverride[id]=true;saveState('assign_to_support_click');updateWorkload();renderBoard();showToast(`Assigned to support: ${target}`,'ok');});
-  div.querySelector('[data-cat]').addEventListener('change',e=>{const newCat=e.target.value;ticketCategory[id]=newCat;if(newCat==='Spam'){const spamEmail=ticketClientEmail[id]||email.sender?.toLowerCase();if(spamEmail&&!isQuintaSender(spamEmail)){const rc=recordSpamSender(spamEmail);showToast(rc>1?`🚫 Spam recorded — ${rc} tickets marked`:'🚫 Spam sender recorded','spam-t');}}saveState();renderBoard();updateSpamBadge();});
+  div.querySelector('[data-cat]').addEventListener('change',e=>{const newCat=e.target.value;ticketCategory[id]=newCat;if(newCat==='Spam'){const spamEmail=ticketClientEmail[id]||email.sender?.toLowerCase();if(spamEmail&&!isQuintaSender(spamEmail)){const rc=recordSpamSender(spamEmail);showToast(rc>1?`ðŸš« Spam recorded â€” ${rc} tickets marked`:'ðŸš« Spam sender recorded','spam-t');}}saveState();renderBoard();updateSpamBadge();});
   div.querySelector('[data-jira-open]').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(jiraKey&&JIRA_URL){window.open(JIRA_URL+jiraKey,'_blank');return;}openJiraModal(id);});
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
   div.querySelector('[data-hs-retry]')?.addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const rs=await syncTicketToHubspot(ticket);if(rs?.ok&&ticketHubspotId[id]){window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(ticketHubspotId[id])}`,'_blank');showToast('Ticket synced to HubSpot','ok');}else{const reason=rs?.reason||'unknown';if(reason==='missing_company_mapping')showToast('Cannot sync yet: this ticket has no mapped HubSpot company.');else if(reason==='missing_client_email')showToast('Cannot sync yet: no client email found for this ticket.');else if(reason==='api_error')showToast(`HubSpot sync failed: ${rs?.error||'api error'}`);else if(reason==='network_error')showToast(`HubSpot sync network error: ${rs?.error||'unknown'}`);else showToast('Unable to sync this ticket yet.');}renderBoard();});
@@ -1675,7 +1687,7 @@ function makeCard(ticket,isNew=false){
 function renderBoard(){
   allTickets.sort((a,b)=>{const ta=new Date(a.email.receivedDateTime||0).getTime(),tb=new Date(b.email.receivedDateTime||0).getTime();return sortDesc?tb-ta:ta-tb;});
   rebuildTagged();
-  ['new','inp','res'].forEach(col=>{
+  STAGES.forEach(col=>{
     const tickets=allTickets.filter(t=>{
       if(ticketCategory[t.id]==='Spam')return false;
       const p=ticketPriority[t.id]||t.priority;
@@ -1684,9 +1696,9 @@ function renderBoard(){
       if(activeA!=='all'&&ticketAssignee[t.id]!==activeA)return false;
       if(activeCompany!=='all'){const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(!hs||hs.companyName!==activeCompany)return false;}
       if(activeJira&&!ticketJira[t.id])return false; // Jira filter
-      return(ticketState[t.id]||'new')===col;
+      return normalizeTicketStage(ticketState[t.id]||'new')===col;
     });
-    const el=document.getElementById('col-'+col);const icons={new:'📭',inp:'🚧',res:'🎉'};
+    const el=document.getElementById('col-'+col);const icons={new:'ðŸ“­',inp:'ðŸš§',res:'ðŸŽ‰'};
     el.innerHTML='';
     if(!tickets.length)el.innerHTML=`<div class="empty"><div class="empty-icon">${icons[col]}</div>No tickets</div>`;
     else tickets.forEach(t=>el.appendChild(makeCard(t)));
@@ -1701,7 +1713,7 @@ document.querySelectorAll('[data-pf]').forEach(b=>b.addEventListener('click',()=
 document.getElementById('agent-filter').addEventListener('change',e=>{activeA=e.target.value;renderBoard();});
 document.getElementById('company-filter').addEventListener('change',e=>{activeCompany=e.target.value;if(viewMode==='kpi')renderKpiView();else renderBoard();});
 document.getElementById('current-user').addEventListener('change',()=>{renderBoard();updateMentionsBadge();});
-document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=ticketState[id]||'new';const newCol=col.dataset.col;if(prevCol===newCol)return;ticketState[id]=newCol;saveState();renderBoard();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);showToast('✓ Moved to '+COL_NAMES[newCol]+' — saved','move');});});
+document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',async e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=normalizeTicketStage(ticketState[id]||'new');const newCol=normalizeTicketStage(col.dataset.col);if(prevCol===newCol)return;ticketState[id]=newCol;saveState('ticket_stage_move');renderActiveView();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);showToast('âœ“ Moved to '+COL_NAMES[newCol]+' â€” saved','move');const rs=await syncTicketStatusToHubspot(id,newCol);if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id'){showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);}});});
 document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
 document.querySelectorAll('.modal-bg').forEach(bg=>{bg.addEventListener('click',e=>{if(e.target===bg)bg.classList.remove('open');});});
 
@@ -1709,14 +1721,14 @@ async function openEmailModal(ticket){
   const{email,id}=ticket;const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
   document.getElementById('em-title').textContent=email.subject||'(no subject)';
   const csOwner=ticketCSOwner[id]||null;
-  const csMeta=(ticketAssignmentMode[id]==='support'&&csOwner)?` · CS: ${esc(csOwner)}`:'';
-  let metaHtml=isReply?`<span><strong>Client:</strong> ${esc(clientEmail)}</span><span><strong>Replied by:</strong> ${esc(email.sender)}</span>`:`<span><strong>From:</strong> ${esc(email.sender||'—')}</span>`;
-  metaHtml+=`<span><strong>Received:</strong> ${fmtDate(email.receivedDateTime)}</span><span><strong>Agent:</strong> ${ticketAssignee[id]||'—'}${csMeta}</span>`;
+  const csMeta=(ticketAssignmentMode[id]==='support'&&csOwner)?` Â· CS: ${esc(csOwner)}`:'';
+  let metaHtml=isReply?`<span><strong>Client:</strong> ${esc(clientEmail)}</span><span><strong>Replied by:</strong> ${esc(email.sender)}</span>`:`<span><strong>From:</strong> ${esc(email.sender||'â€”')}</span>`;
+  metaHtml+=`<span><strong>Received:</strong> ${fmtDate(email.receivedDateTime)}</span><span><strong>Agent:</strong> ${ticketAssignee[id]||'â€”'}${csMeta}</span>`;
   const sla=getSLAStatus(id,ticketPriority[id]||ticket.priority);
-  if(sla)metaHtml+=`<span><strong>SLA:</strong> <span style="font-weight:600;color:${sla.overdue?'#dc2626':'#d97706'}">⏱ ${sla.text}</span></span>`;
-  if(ticketJira[id])metaHtml+=`<span><strong>Jira:</strong> <span style="color:#0052cc;font-weight:700;">🔗 ${esc(ticketJira[id])}</span></span>`;
-  if(ticketHubspotId[id])metaHtml+=`<span><strong>HubSpot Ticket:</strong> <a href="https://app.hubspot.com/contacts/25445053/record/0-5/${esc(ticketHubspotId[id])}" target="_blank" style="color:#0f766e;font-weight:700;text-decoration:none;">🎫 ${esc(ticketHubspotId[id])}</a></span>`;
-  if(hs?.companyName)metaHtml+=`<span><strong>Company:</strong> ${esc(hs.companyName)}${hs.inferredVia?'<span style="font-size:10px;color:#94a3b8;font-style:italic;"> ~inferred</span>':''}${hs.companyUrl?` <a href="${esc(hs.companyUrl)}" target="_blank" style="color:#f59e0b;font-size:11px;">↗ HubSpot</a>`:''}</span>`;
+  if(sla)metaHtml+=`<span><strong>SLA:</strong> <span style="font-weight:600;color:${sla.overdue?'#dc2626':'#d97706'}">â± ${sla.text}</span></span>`;
+  if(ticketJira[id])metaHtml+=`<span><strong>Jira:</strong> <span style="color:#0052cc;font-weight:700;">ðŸ”— ${esc(ticketJira[id])}</span></span>`;
+  if(ticketHubspotId[id])metaHtml+=`<span><strong>HubSpot Ticket:</strong> <a href="https://app.hubspot.com/contacts/25445053/record/0-5/${esc(ticketHubspotId[id])}" target="_blank" style="color:#0f766e;font-weight:700;text-decoration:none;">ðŸŽ« ${esc(ticketHubspotId[id])}</a></span>`;
+  if(hs?.companyName)metaHtml+=`<span><strong>Company:</strong> ${esc(hs.companyName)}${hs.inferredVia?'<span style="font-size:10px;color:#94a3b8;font-style:italic;"> ~inferred</span>':''}${hs.companyUrl?` <a href="${esc(hs.companyUrl)}" target="_blank" style="color:#f59e0b;font-size:11px;">â†— HubSpot</a>`:''}</span>`;
   document.getElementById('em-meta').innerHTML=metaHtml;
   // Manual tickets show description instead of fetching from Outlook
   if(email.isManual){
@@ -1737,15 +1749,15 @@ async function openEmailModal(ticket){
   document.getElementById('em-body').innerHTML=`<div style="overflow-wrap:break-word">${body}</div>`;
 }
 
-function renderThread(id){const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments">💬 No comments yet.</div>';return;}el.innerHTML=cs.map(c=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'#475569':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'#475569';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text">${esc(c.text)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
-function openComModal(ticket){const{email,id}=ticket;comTicketId=id;const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?' · 🏢 '+hs.companyName+' ~':' · 🏢 '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'—';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'—';const agInfo=(ticketAssignmentMode[id]==='support'&&csOwner)?`${assignee} · CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr} · ${agInfo} · ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
+function renderThread(id){const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments">ðŸ’¬ No comments yet.</div>';return;}el.innerHTML=cs.map(c=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'#475569':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'#475569';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text">${esc(c.text)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
+function openComModal(ticket){const{email,id}=ticket;comTicketId=id;const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?' Â· ðŸ¢ '+hs.companyName+' ~':' Â· ðŸ¢ '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'â€”';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'â€”';const agInfo=(ticketAssignmentMode[id]==='support'&&csOwner)?`${assignee} Â· CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr} Â· ${agInfo} Â· ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
 function addInternalComment(ticketId,text,tags){if(!text||!ticketId)return;if(!ticketComments[ticketId])ticketComments[ticketId]=[];const author=currentUser();ticketComments[ticketId].push({author,text,tags:Array.isArray(tags)?tags:[],ts:Date.now()});saveState();renderThread(ticketId);renderBoard();}
-document.getElementById('com-post').addEventListener('click',()=>{const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;if(!ticketComments[comTicketId])ticketComments[comTicketId]=[];const tags=[...selectedTags];const author=currentUser();ticketComments[comTicketId].push({author,text,tags,ts:Date.now()});document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));saveState();renderThread(comTicketId);renderBoard();const at=tags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast('Comment posted · Tagged: '+at.join(', '));else showToast('Comment posted');});
-document.getElementById('com-debug-expert').addEventListener('click',async()=>{if(!comTicketId)return;const btn=document.getElementById('com-debug-expert');const ticket=allTickets.find(t=>t.id===comTicketId);if(!ticket)return;const assignee=ticketAssignee[comTicketId]||null;btn.disabled=true;btn.textContent='Analyzing…';try{const ce=ticketClientEmail[comTicketId]||getClientEmail(ticket.email)||null;const hs=ce?hsCache[ce]:null;const resp=await fetch('/api/debug-expert',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({ticketId:comTicketId,email:ticket.email,assignee,companyName:hs?.companyName||null})});const out=await resp.json().catch(()=>({}));if(!resp.ok){showToast(`Debug Expert failed: ${out?.error||resp.status}`);return;}const parts=[];parts.push('Debug Expert proposed solution');if(out?.summary)parts.push(out.summary);if(Array.isArray(out?.steps)&&out.steps.length){parts.push('Recommended steps:');out.steps.slice(0,6).forEach((s,i)=>parts.push(`${i+1}. ${s}`));}if(Array.isArray(out?.articles)&&out.articles.length){parts.push('Relevant HubSpot KB articles:');out.articles.slice(0,5).forEach(a=>parts.push(`- ${a.title}${a.url?` (${a.url})`:''}`));}if(Array.isArray(out?.attachmentFindings)&&out.attachmentFindings.length){parts.push('Attachment findings:');out.attachmentFindings.slice(0,5).forEach(a=>parts.push(`- ${a}`));}const tags=assignee?[assignee]:[];addInternalComment(comTicketId,parts.join('\n'),tags);showToast(assignee?`Debug proposal posted and tagged ${assignee}`:'Debug proposal posted','ok');}catch(e){showToast(`Debug Expert error: ${String(e?.message||e)}`);}finally{btn.disabled=false;btn.textContent='Debug Expert';}});
+document.getElementById('com-post').addEventListener('click',()=>{const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;if(!ticketComments[comTicketId])ticketComments[comTicketId]=[];const tags=[...selectedTags];const author=currentUser();ticketComments[comTicketId].push({author,text,tags,ts:Date.now()});document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));saveState();renderThread(comTicketId);renderBoard();const at=tags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast('Comment posted Â· Tagged: '+at.join(', '));else showToast('Comment posted');});
+document.getElementById('com-debug-expert').addEventListener('click',async()=>{if(!comTicketId)return;const btn=document.getElementById('com-debug-expert');const ticket=allTickets.find(t=>t.id===comTicketId);if(!ticket)return;const assignee=ticketAssignee[comTicketId]||null;btn.disabled=true;btn.textContent='Analyzingâ€¦';try{const ce=ticketClientEmail[comTicketId]||getClientEmail(ticket.email)||null;const hs=ce?hsCache[ce]:null;const resp=await fetch('/api/debug-expert',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({ticketId:comTicketId,email:ticket.email,assignee,companyName:hs?.companyName||null})});const out=await resp.json().catch(()=>({}));if(!resp.ok){showToast(`Debug Expert failed: ${out?.error||resp.status}`);return;}const parts=[];parts.push('Debug Expert proposed solution');if(out?.summary)parts.push(out.summary);if(Array.isArray(out?.steps)&&out.steps.length){parts.push('Recommended steps:');out.steps.slice(0,6).forEach((s,i)=>parts.push(`${i+1}. ${s}`));}if(Array.isArray(out?.articles)&&out.articles.length){parts.push('Relevant HubSpot KB articles:');out.articles.slice(0,5).forEach(a=>parts.push(`- ${a.title}${a.url?` (${a.url})`:''}`));}if(Array.isArray(out?.attachmentFindings)&&out.attachmentFindings.length){parts.push('Attachment findings:');out.attachmentFindings.slice(0,5).forEach(a=>parts.push(`- ${a}`));}const tags=assignee?[assignee]:[];addInternalComment(comTicketId,parts.join('\n'),tags);showToast(assignee?`Debug proposal posted and tagged ${assignee}`:'Debug proposal posted','ok');}catch(e){showToast(`Debug Expert error: ${String(e?.message||e)}`);}finally{btn.disabled=false;btn.textContent='Debug Expert';}});
 
 function getMentions(user){const r=[];Object.entries(ticketComments).forEach(([tid,cs])=>{const t=allTickets.find(x=>x.id===tid);cs.forEach((c,ci)=>{if(c.tags&&c.tags.includes(user))r.push({ticketId:tid,ci,comment:c,ticket:t,key:`${tid}:${ci}`});});});return r.sort((a,b)=>(b.comment.ts||0)-(a.comment.ts||0));}
 function updateMentionsBadge(){const me=currentUser();const u=getMentions(me).filter(m=>!readMentions.has(m.key)).length;const badge=document.getElementById('mentions-badge');const btn=document.getElementById('mentions-btn');if(u>0){badge.textContent=u>99?'99+':u;badge.style.display='flex';btn.classList.add('has-mentions');}else{badge.style.display='none';btn.classList.remove('has-mentions');}}
-function renderMentions(){const me=currentUser();const mentions=getMentions(me);const unread=mentions.filter(m=>!readMentions.has(m.key)).length;document.getElementById('mentions-title').textContent='🔔 My Mentions — '+me;document.getElementById('mentions-info').textContent=mentions.length+' mention'+(mentions.length!==1?'s':'')+' · '+(unread>0?unread+' unread':'all read');const list=document.getElementById('mentions-list');if(!mentions.length){list.innerHTML='<div class="mentions-empty" style="text-align:center;padding:40px 20px;color:#94a3b8;"><div style="font-size:36px;margin-bottom:10px;">🔕</div><div>No mentions yet</div></div>';return;}list.innerHTML='';mentions.forEach(({ticketId,ci,comment,ticket,key})=>{const isUnread=!readMentions.has(key);const card=document.createElement('div');card.className='mention-card'+(isUnread?' unread':'');const tagHtml=(comment.tags||[]).filter(t=>t!==CLIENT_TAG).map(t=>`<span class="mention-tag" style="background:${agentColor(t)}">@${t}</span>`).join('');const bg=ALL_AGENTS.includes(comment.author)?agentColor(comment.author):'#64748b';const ttl=ticket?.email?.subject||'(deleted)';const ce=ticket?ticketClientEmail[ticket.id]:null;const hs=ce?hsCache[ce]:null;const coInfo=hs?.companyName?' · 🏢 '+hs.companyName+(hs.inferredVia?' ~':''):'';const col=ticketState[ticketId]||'new';const colLabel={new:'📥 New',inp:'⚙️ In Progress',res:'✅ Resolved'}[col]||'📥 New';card.innerHTML=`<div class="mention-card-top"><div><div class="mention-ticket">${esc(ttl)}</div><div style="font-size:10px;color:#94a3b8;">${colLabel}${coInfo}</div></div><span class="mention-time">${fmtTime(comment.ts)}</span></div><div class="mention-from"><span class="mention-from-avatar" style="background:${bg}">${esc(comment.author)}</span><strong>${esc(comment.author)}</strong> tagged you</div>${tagHtml?`<div class="mention-tags">${tagHtml}</div>`:''}<div class="mention-comment">${esc(comment.text)}</div><div class="mention-footer">${isUnread?`<button class="btn-mention-mark" data-key="${esc(key)}">Mark read</button>`:''} ${ticket?`<button class="btn-mention-view">View thread ↗</button>`:''}</div>`;card.querySelector('.btn-mention-mark')?.addEventListener('click',()=>{readMentions.add(key);saveReads();renderMentions();updateMentionsBadge();});card.querySelector('.btn-mention-view')?.addEventListener('click',()=>{readMentions.add(key);saveReads();document.getElementById('mentions-modal').classList.remove('open');if(ticket)openComModal(ticket);updateMentionsBadge();});card.addEventListener('click',()=>{if(isUnread){readMentions.add(key);saveReads();card.classList.remove('unread');updateMentionsBadge();}});list.appendChild(card);});}
+function renderMentions(){const me=currentUser();const mentions=getMentions(me);const unread=mentions.filter(m=>!readMentions.has(m.key)).length;document.getElementById('mentions-title').textContent='ðŸ”” My Mentions â€” '+me;document.getElementById('mentions-info').textContent=mentions.length+' mention'+(mentions.length!==1?'s':'')+' Â· '+(unread>0?unread+' unread':'all read');const list=document.getElementById('mentions-list');if(!mentions.length){list.innerHTML='<div class="mentions-empty" style="text-align:center;padding:40px 20px;color:#94a3b8;"><div style="font-size:36px;margin-bottom:10px;">ðŸ”•</div><div>No mentions yet</div></div>';return;}list.innerHTML='';mentions.forEach(({ticketId,ci,comment,ticket,key})=>{const isUnread=!readMentions.has(key);const card=document.createElement('div');card.className='mention-card'+(isUnread?' unread':'');const tagHtml=(comment.tags||[]).filter(t=>t!==CLIENT_TAG).map(t=>`<span class="mention-tag" style="background:${agentColor(t)}">@${t}</span>`).join('');const bg=ALL_AGENTS.includes(comment.author)?agentColor(comment.author):'#64748b';const ttl=ticket?.email?.subject||'(deleted)';const ce=ticket?ticketClientEmail[ticket.id]:null;const hs=ce?hsCache[ce]:null;const coInfo=hs?.companyName?' Â· ðŸ¢ '+hs.companyName+(hs.inferredVia?' ~':''):'';const col=normalizeTicketStage(ticketState[ticketId]||'new');const colLabel={new:'ðŸ“¥ New',inp:'âš™ï¸ In Progress',wus:'ðŸ•’ Waiting On Us',wct:'ðŸ“© Waiting On Contact',res:'âœ… Resolved'}[col]||'ðŸ“¥ New';card.innerHTML=`<div class="mention-card-top"><div><div class="mention-ticket">${esc(ttl)}</div><div style="font-size:10px;color:#94a3b8;">${colLabel}${coInfo}</div></div><span class="mention-time">${fmtTime(comment.ts)}</span></div><div class="mention-from"><span class="mention-from-avatar" style="background:${bg}">${esc(comment.author)}</span><strong>${esc(comment.author)}</strong> tagged you</div>${tagHtml?`<div class="mention-tags">${tagHtml}</div>`:''}<div class="mention-comment">${esc(comment.text)}</div><div class="mention-footer">${isUnread?`<button class="btn-mention-mark" data-key="${esc(key)}">Mark read</button>`:''} ${ticket?`<button class="btn-mention-view">View thread â†—</button>`:''}</div>`;card.querySelector('.btn-mention-mark')?.addEventListener('click',()=>{readMentions.add(key);saveReads();renderMentions();updateMentionsBadge();});card.querySelector('.btn-mention-view')?.addEventListener('click',()=>{readMentions.add(key);saveReads();document.getElementById('mentions-modal').classList.remove('open');if(ticket)openComModal(ticket);updateMentionsBadge();});card.addEventListener('click',()=>{if(isUnread){readMentions.add(key);saveReads();card.classList.remove('unread');updateMentionsBadge();}});list.appendChild(card);});}
 document.getElementById('mentions-btn').addEventListener('click',()=>{renderMentions();document.getElementById('mentions-modal').classList.add('open');setTimeout(()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});saveReads();updateMentionsBadge();},2000);});
 document.getElementById('mark-all-read').addEventListener('click',()=>{getMentions(currentUser()).forEach(m=>{readMentions.add(m.key);});saveReads();renderMentions();updateMentionsBadge();});
 document.getElementById('account-btn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('account-panel').classList.toggle('open');});
@@ -1843,10 +1855,10 @@ document.getElementById('coowner-map-apply').addEventListener('click',()=>{
   document.getElementById('coowner-map-msg').textContent='Mapping saved and CS assignments refreshed.';
 });
 let selectedCompanyCtx=null;
-function openCompanyPropModal(gr){selectedCompanyCtx=gr;document.getElementById('company-prop-title').textContent=`${gr.companyName} · Custom Properties`;const existing=companyCustomProps[gr.companyId]||{};document.getElementById('company-prop-existing').innerHTML=Object.keys(existing).length?Object.entries(existing).map(([k,v])=>`<div style="padding:4px 0;border-bottom:1px dashed #ddd;"><strong>${esc(k)}</strong>: ${esc(v)}</div>`).join(''):'<em>No custom properties saved yet.</em>';document.getElementById('cp-name').value='';document.getElementById('cp-label').value='';document.getElementById('cp-value').value='';document.getElementById('cp-create-def').checked=false;document.getElementById('cp-msg').textContent='';document.getElementById('company-prop-modal').classList.add('open');}
-document.getElementById('cp-save-btn').addEventListener('click',async()=>{if(!selectedCompanyCtx)return;const name=document.getElementById('cp-name').value.trim();const label=document.getElementById('cp-label').value.trim()||name;const value=document.getElementById('cp-value').value.trim();const createDefinition=document.getElementById('cp-create-def').checked;if(!name||!value){document.getElementById('cp-msg').textContent='Name and value are required.';return;}if(!companyCustomProps[selectedCompanyCtx.companyId])companyCustomProps[selectedCompanyCtx.companyId]={};companyCustomProps[selectedCompanyCtx.companyId][name]=value;saveState('company_custom_property_local');renderCompaniesView();document.getElementById('cp-msg').textContent='Saved locally. Syncing to HubSpot…';try{const res=await fetch(`/api/hubspot/companies/${encodeURIComponent(selectedCompanyCtx.companyId)}/custom-property`,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name,label,value,createDefinition})});const out=await res.json().catch(()=>({}));if(!res.ok){document.getElementById('cp-msg').textContent=out?.error?`HubSpot sync failed: ${out.error}`:'HubSpot sync failed (read-only scopes or permission).';return;}document.getElementById('cp-msg').textContent='Saved in HubSpot and locally.';showToast('Company custom property saved','ok');}catch(_){document.getElementById('cp-msg').textContent='HubSpot sync failed (network/error). Saved locally.';}});
+function openCompanyPropModal(gr){selectedCompanyCtx=gr;document.getElementById('company-prop-title').textContent=`${gr.companyName} Â· Custom Properties`;const existing=companyCustomProps[gr.companyId]||{};document.getElementById('company-prop-existing').innerHTML=Object.keys(existing).length?Object.entries(existing).map(([k,v])=>`<div style="padding:4px 0;border-bottom:1px dashed #ddd;"><strong>${esc(k)}</strong>: ${esc(v)}</div>`).join(''):'<em>No custom properties saved yet.</em>';document.getElementById('cp-name').value='';document.getElementById('cp-label').value='';document.getElementById('cp-value').value='';document.getElementById('cp-create-def').checked=false;document.getElementById('cp-msg').textContent='';document.getElementById('company-prop-modal').classList.add('open');}
+document.getElementById('cp-save-btn').addEventListener('click',async()=>{if(!selectedCompanyCtx)return;const name=document.getElementById('cp-name').value.trim();const label=document.getElementById('cp-label').value.trim()||name;const value=document.getElementById('cp-value').value.trim();const createDefinition=document.getElementById('cp-create-def').checked;if(!name||!value){document.getElementById('cp-msg').textContent='Name and value are required.';return;}if(!companyCustomProps[selectedCompanyCtx.companyId])companyCustomProps[selectedCompanyCtx.companyId]={};companyCustomProps[selectedCompanyCtx.companyId][name]=value;saveState('company_custom_property_local');renderCompaniesView();document.getElementById('cp-msg').textContent='Saved locally. Syncing to HubSpotâ€¦';try{const res=await fetch(`/api/hubspot/companies/${encodeURIComponent(selectedCompanyCtx.companyId)}/custom-property`,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name,label,value,createDefinition})});const out=await res.json().catch(()=>({}));if(!res.ok){document.getElementById('cp-msg').textContent=out?.error?`HubSpot sync failed: ${out.error}`:'HubSpot sync failed (read-only scopes or permission).';return;}document.getElementById('cp-msg').textContent='Saved in HubSpot and locally.';showToast('Company custom property saved','ok');}catch(_){document.getElementById('cp-msg').textContent='HubSpot sync failed (network/error). Saved locally.';}});
 
-function addTickets(emails){let n=0;emails.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;const subtype=classifySubtype(e);const st=SUBTYPE_BY_ID[subtype]||null;const t={id:e.id,email:e,priority:st?.priority||classifyPriority(e)};const ce=getClientEmail(e);if(ce)ticketClientEmail[e.id]=ce;if(!ticketCreatedAt[e.id])ticketCreatedAt[e.id]=e.receivedDateTime||new Date().toISOString();const effectiveEmail=ce||e.sender?.toLowerCase();if(effectiveEmail&&spamSenders.has(effectiveEmail)){ticketCategory[e.id]='Spam';}else if(!ticketCategory[e.id]){ticketCategory[e.id]=st?.type||classifyCategory(e);}if(!ticketSubtype[e.id]&&st)ticketSubtype[e.id]=st.id;if(st)ticketPriority[e.id]=st.priority;if(!ticketAssignee[e.id]&&ticketCategory[e.id]!=='Spam'){const cs=resolveDefaultCSForTicket(e.id,e);ticketAssignee[e.id]=cs;ticketCSOwner[e.id]=cs;ticketAssignmentMode[e.id]='cs';}allTickets.push(t);n++;});if(n>0){applyCompanyCSAssignments();syncUnsyncedTicketsToHubspot();}return n;}
+function addTickets(emails){let n=0;emails.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;const subtype=classifySubtype(e);const st=SUBTYPE_BY_ID[subtype]||null;const t={id:e.id,email:e,priority:st?.priority||classifyPriority(e)};const ce=getClientEmail(e);if(ce)ticketClientEmail[e.id]=ce;if(!ticketCreatedAt[e.id])ticketCreatedAt[e.id]=e.receivedDateTime||new Date().toISOString();if(!ticketState[e.id])ticketState[e.id]='new';else ticketState[e.id]=normalizeTicketStage(ticketState[e.id]);const effectiveEmail=ce||e.sender?.toLowerCase();if(effectiveEmail&&spamSenders.has(effectiveEmail)){ticketCategory[e.id]='Spam';}else if(!ticketCategory[e.id]){ticketCategory[e.id]=st?.type||classifyCategory(e);}if(!ticketSubtype[e.id]&&st)ticketSubtype[e.id]=st.id;if(st)ticketPriority[e.id]=st.priority;if(!ticketAssignee[e.id]&&ticketCategory[e.id]!=='Spam'){const cs=resolveDefaultCSForTicket(e.id,e);ticketAssignee[e.id]=cs;ticketCSOwner[e.id]=cs;ticketAssignmentMode[e.id]='cs';}allTickets.push(t);n++;});if(n>0){applyCompanyCSAssignments();syncUnsyncedTicketsToHubspot();}return n;}
 async function poll(){if(!hasCowork){startCountdown();return;}const after=isoMinsAgo(POLL_WIN_MINS);const res=await window.cowork.callMcpTool(SEARCH_TOOL,{limit:20,afterDateTime:after,mailboxOwnerEmail:SUPPORT_BOX});const n=addTickets(extractEmails(res));document.getElementById('last-poll').textContent='Checked: '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(n>0){saveState();showToast(n+' new ticket'+(n>1?'s':'')+' arrived!');renderActiveView();enrichWithHubSpot();}startCountdown();}
 
 (async()=>{
@@ -1858,7 +1870,7 @@ async function poll(){if(!hasCowork){startCountdown();return;}const after=isoMin
     renderActiveView();updateCompanyFilter();updateSpamBadge();updateJiraBadge();
     syncUnsyncedTicketsToHubspot();
   }
-  document.getElementById('fstats').textContent='Fetching latest emails…';
+  document.getElementById('fstats').textContent='Fetching latest emailsâ€¦';
   const[recentRes,weekRes]=await Promise.all([window.cowork.callMcpTool(SEARCH_TOOL,{limit:50,mailboxOwnerEmail:SUPPORT_BOX}),window.cowork.callMcpTool(SEARCH_TOOL,{limit:50,afterDateTime:isoDaysAgo(7),mailboxOwnerEmail:SUPPORT_BOX})]);
   if(recentRes?.isError||weekRes?.isError){
     const err=(recentRes?.error||weekRes?.error||'').toLowerCase();
@@ -1881,8 +1893,8 @@ async function poll(){if(!hasCowork){startCountdown();return;}const after=isoMin
   saveState();
   const nonSpam=allTickets.filter(t=>ticketCategory[t.id]!=='Spam');
   const newest=nonSpam[0]?.email?.receivedDateTime;
-  document.getElementById('fstats').textContent=`${nonSpam.length} tickets · most recent: ${newest?fmtDate(newest):'—'}`;
-  document.getElementById('meta').textContent=`${allTickets.length} tickets · polling every ${POLL_SECS}s`;
+  document.getElementById('fstats').textContent=`${nonSpam.length} tickets Â· most recent: ${newest?fmtDate(newest):'â€”'}`;
+  document.getElementById('meta').textContent=`${allTickets.length} tickets Â· polling every ${POLL_SECS}s`;
   renderBoard();updateCompanyFilter();updateSpamBadge();updateJiraBadge();startCountdown();
   enrichWithHubSpot();
   scheduleCompanyNetworkSync([...collectCompanyIdsFromHsCache()]);
@@ -1894,6 +1906,9 @@ async function poll(){if(!hasCowork){startCountdown();return;}const after=isoMin
 </script>
 </body>
 </html>
+
+
+
 
 
 

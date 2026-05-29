@@ -20,6 +20,29 @@
 - OAuth flow guidance:
   - re-auth must start from logged-in app session
 
+## Latest Functional Upgrade (May 29, 2026 - Evening)
+
+Implemented:
+1. Two new Kanban stages:
+   - `Waiting On Us`
+   - `Waiting On Contact`
+2. KPI dashboard upgraded to include all 5 statuses:
+   - New, In Progress, Waiting On Us, Waiting On Contact, Resolved
+3. HubSpot status sync on stage change:
+   - Drag/drop in Kanban now triggers backend HubSpot ticket status update
+   - `Resolved` in Kanban maps to HubSpot closed/resolved stage via env mapping
+4. Status persistence hardening:
+   - Stage values are normalized on load/render
+   - Save reason for stage moves is explicit (`ticket_stage_move`)
+   - Helps prevent tickets reverting to older stage after updates/polls
+
+New env mapping keys:
+- `HUBSPOT_TICKET_STAGE_NEW`
+- `HUBSPOT_TICKET_STAGE_IN_PROGRESS`
+- `HUBSPOT_TICKET_STAGE_WAITING_ON_US`
+- `HUBSPOT_TICKET_STAGE_WAITING_ON_CONTACT`
+- `HUBSPOT_TICKET_STAGE_RESOLVED`
+
 ### New mandatory operating procedure
 1. Every significant change must update:
    - codebase

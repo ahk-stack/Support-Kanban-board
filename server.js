@@ -36,6 +36,11 @@ const HUBSPOT_PKCE_CODE_CHALLENGE = process.env.HUBSPOT_PKCE_CODE_CHALLENGE || '
 const HUBSPOT_AUTHORIZE_BASE = process.env.HUBSPOT_AUTHORIZE_BASE || 'https://app.hubspot.com/oauth/authorize';
 const HUBSPOT_TICKET_PIPELINE = String(process.env.HUBSPOT_TICKET_PIPELINE || '').trim();
 const HUBSPOT_TICKET_STAGE = String(process.env.HUBSPOT_TICKET_STAGE || '').trim();
+const HUBSPOT_TICKET_STAGE_NEW = String(process.env.HUBSPOT_TICKET_STAGE_NEW || HUBSPOT_TICKET_STAGE || '').trim();
+const HUBSPOT_TICKET_STAGE_IN_PROGRESS = String(process.env.HUBSPOT_TICKET_STAGE_IN_PROGRESS || HUBSPOT_TICKET_STAGE || '').trim();
+const HUBSPOT_TICKET_STAGE_WAITING_ON_US = String(process.env.HUBSPOT_TICKET_STAGE_WAITING_ON_US || HUBSPOT_TICKET_STAGE_IN_PROGRESS || HUBSPOT_TICKET_STAGE || '').trim();
+const HUBSPOT_TICKET_STAGE_WAITING_ON_CONTACT = String(process.env.HUBSPOT_TICKET_STAGE_WAITING_ON_CONTACT || HUBSPOT_TICKET_STAGE_IN_PROGRESS || HUBSPOT_TICKET_STAGE || '').trim();
+const HUBSPOT_TICKET_STAGE_RESOLVED = String(process.env.HUBSPOT_TICKET_STAGE_RESOLVED || process.env.HUBSPOT_TICKET_STAGE_CLOSED || '').trim();
 const HUBSPOT_READ_SCOPE_SET = new Set(
   HUBSPOT_SCOPES
     .split(/\s+/)
@@ -325,6 +330,14 @@ function pickDefaultTicketStage(pipeline) {
     return da - db;
   });
   return sorted[0] || null;
+}
+function resolveHubspotStageByKanbanStatus(status) {
+  const key = String(status || '').toLowerCase();
+  if (key === 'resolved') return HUBSPOT_TICKET_STAGE_RESOLVED || HUBSPOT_TICKET_STAGE || '';
+  if (key === 'waiting_on_contact') return HUBSPOT_TICKET_STAGE_WAITING_ON_CONTACT || HUBSPOT_TICKET_STAGE_IN_PROGRESS || HUBSPOT_TICKET_STAGE || '';
+  if (key === 'waiting_on_us') return HUBSPOT_TICKET_STAGE_WAITING_ON_US || HUBSPOT_TICKET_STAGE_IN_PROGRESS || HUBSPOT_TICKET_STAGE || '';
+  if (key === 'in_progress') return HUBSPOT_TICKET_STAGE_IN_PROGRESS || HUBSPOT_TICKET_STAGE || '';
+  return HUBSPOT_TICKET_STAGE_NEW || HUBSPOT_TICKET_STAGE || '';
 }
 
 async function hubspotGetCompanyById(token, companyId, properties = []) {
@@ -1149,7 +1162,8 @@ app.post('/api/hubspot/tickets/sync', requireAuth, async (req, res) => {
       priority,
       category,
       receivedAt,
-      assignee
+      assignee,
+      kanbanStatus
     } = req.body || {};
     if (!kanbanTicketId) return res.status(400).json({ error: 'missing_kanban_ticket_id' });
     if (!companyId) return res.status(400).json({ error: 'missing_company_id' });
@@ -1162,7 +1176,7 @@ app.post('/api/hubspot/tickets/sync', requireAuth, async (req, res) => {
     })();
     // Prefer explicit env values first so user-level OAuth tokens don't need pipeline discovery permission.
     let pipelineId = HUBSPOT_TICKET_PIPELINE || '';
-    let stageId = HUBSPOT_TICKET_STAGE || '';
+    let stageId = resolveHubspotStageByKanbanStatus(kanbanStatus) || '';
     if (!pipelineId || !stageId) {
       try {
         const pipelines = await hubspotListTicketPipelines(token);
@@ -1288,6 +1302,39 @@ app.post('/api/hubspot/tickets/sync', requireAuth, async (req, res) => {
       hubspotTicketId: String(created.id),
       hubspotTicketUrl: `https://app.hubspot.com/contacts/25445053/record/0-5/${created.id}`
     });
+  } catch (err) {
+    return res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+app.patch('/api/hubspot/tickets/:ticketId/status', requireAuth, async (req, res) => {
+  try {
+    const token = await getHubspotAccessToken(req);
+    const ticketId = String(req.params.ticketId || '').trim();
+    const kanbanStatus = String(req.body?.kanbanStatus || '').trim().toLowerCase();
+    if (!ticketId) return res.status(400).json({ error: 'missing_ticket_id' });
+    if (!kanbanStatus) return res.status(400).json({ error: 'missing_kanban_status' });
+
+    const stageId = resolveHubspotStageByKanbanStatus(kanbanStatus);
+    if (!stageId) return res.status(400).json({ error: 'missing_hubspot_stage_mapping_for_status' });
+
+    const updateRes = await fetch(`https://api.hubapi.com/crm/v3/objects/tickets/${encodeURIComponent(ticketId)}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        properties: {
+          hs_pipeline_stage: stageId
+        }
+      })
+    });
+    if (!updateRes.ok) {
+      const txt = await updateRes.text();
+      return res.status(updateRes.status).json({ error: `hubspot_ticket_status_update_failed:${txt.slice(0, 280)}` });
+    }
+    return res.json({ ok: true, ticketId, kanbanStatus, stageId });
   } catch (err) {
     return res.status(500).json({ error: String(err.message || err) });
   }
