@@ -25,6 +25,7 @@ const M365_TENANT_ID = process.env.M365_TENANT_ID || '';
 const M365_CLIENT_ID = process.env.M365_CLIENT_ID || '';
 const M365_CLIENT_SECRET = process.env.M365_CLIENT_SECRET || '';
 const M365_REDIRECT_URI = process.env.M365_REDIRECT_URI || `http://localhost:${PORT}/auth/microsoft/callback`;
+const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
 const HUBSPOT_TOKEN = process.env.HUBSPOT_PRIVATE_APP_TOKEN || process.env.HUBSPOT_ACCESS_TOKEN || '';
 const HAS_STATIC_HUBSPOT_TOKEN = !!HUBSPOT_TOKEN && HUBSPOT_TOKEN.startsWith('pat-');
 const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID || '';
@@ -1092,7 +1093,7 @@ app.post('/api/debug-expert', requireAuth, async (req, res) => {
     const msgId = idMatch?.[1];
     if (!msgId) return res.status(400).json({ error: 'missing_message_id' });
 
-    const mailbox = 'support@quinta.im';
+    const mailbox = SUPPORT_MAILBOX;
     const graphToken = await graphDelegatedToken(req);
     const detailed = await graphGetMessageWithAttachments(graphToken, mailbox, msgId);
 
@@ -1347,7 +1348,7 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
 
     if (tool.includes('outlook_email_search')) {
       const token = await graphDelegatedToken(req);
-      const mailbox = args?.mailboxOwnerEmail || 'support@quinta.im';
+      const mailbox = args?.mailboxOwnerEmail || SUPPORT_MAILBOX;
       const top = Math.min(Number(args?.limit || 20), 50);
       const select = '$select=id,subject,bodyPreview,from,toRecipients,receivedDateTime,webLink';
       const orderBy = '$orderby=receivedDateTime desc';
@@ -1362,7 +1363,7 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       const idMatch = rawUri.match(/mail:\/\/\/messages\/([^?]+)/);
       const msgId = idMatch?.[1];
       const ownerMatch = rawUri.match(/[?&]owner=([^&]+)/);
-      const mailbox = ownerMatch?.[1] ? decodeURIComponent(ownerMatch[1]) : 'support@quinta.im';
+      const mailbox = ownerMatch?.[1] ? decodeURIComponent(ownerMatch[1]) : SUPPORT_MAILBOX;
       if (!msgId) return res.status(400).json({ isError: true, error: 'missing_message_id' });
       const msg = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=body,bodyPreview`, token);
       return res.json({ isError: false, structuredContent: { body: { content: msg?.body?.content || '', contentType: msg?.body?.contentType || 'text' }, bodyPreview: msg?.bodyPreview || '' } });

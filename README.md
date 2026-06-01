@@ -4,7 +4,7 @@ A live support ticketing Kanban board built with Claude Cowork, powered by Micro
 
 ## Features
 
-- **Live email feed** — pulls emails in real-time from `support@quinta.im` via Microsoft 365 (polls every 60 seconds)
+- **Live email feed** — pulls emails in real-time from `helpdesk@quinta.im` via Microsoft 365 (polls every 60 seconds)
 - **Smart spam filter** — pattern-based exclusion of automated/newsletter senders
 - **Auto-classification** — priority (High / Medium / Low) and category assigned on arrival
 - **Categories** — Technical failure · Bug Velma · RYA · Connectivity request · Other · Spam
@@ -18,7 +18,7 @@ A live support ticketing Kanban board built with Claude Cowork, powered by Micro
 
 ## Requirements
 
-Runs as a **Claude Cowork artifact** with the **Microsoft 365 MCP connector** authenticated to `support@quinta.im`.
+Runs as a **Claude Cowork artifact** with the **Microsoft 365 MCP connector** authenticated to `helpdesk@quinta.im`.
 
 ## Stack
 
