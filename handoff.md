@@ -283,3 +283,19 @@ Behavior:
 - `.env` remains git-ignored.
 - `data/*.json` and `versions/*.json` remain git-ignored.
 - Rotate secrets if exposed.
+
+## Update - 2026-06-01
+
+### Kanban cleanup
+- Reset persisted board state file (`data/board-state.json`) to a clean baseline.
+- This removes legacy/historical tickets so the board starts fresh from current mailbox polling.
+
+### Ticket stage persistence hardening
+- Added `ticketStageTouchedAt` (per-ticket stage change timestamp) in frontend state.
+- On drag/drop stage move, we now update `ticketStageTouchedAt[ticketId] = Date.now()` before saving.
+- Server-side `safeWriteState()` now merges `ticketState` using `ticketStageTouchedAt`:
+  - newest stage change wins per ticket
+  - older snapshots can no longer overwrite a newer moved stage.
+
+### Operational
+- Restarted Node server after patch so changes are live.

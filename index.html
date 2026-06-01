@@ -836,6 +836,7 @@ let ticketCSOwner={};
 let ticketCreatedAt={};
 let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
 let ticketHubspotId={}; // ticketId -> HubSpot ticket ID
+let ticketStageTouchedAt={}; // ticketId -> last stage-change timestamp (ms)
 let spamSenders=new Set();
 let hsCache={},domainCompanyCache={},readMentions=new Set();
 let companyCustomProps={};
@@ -902,7 +903,7 @@ function buildStatePayload(reason){
   const snapshot={
     allTickets,
     seenIds:Object.keys(seen),
-    ticketState,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketJira,ticketHubspotId,
+    ticketState,ticketStageTouchedAt,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketJira,ticketHubspotId,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion}
   };
@@ -936,6 +937,7 @@ async function loadState(){
     allTickets.forEach(t=>{seen[t.id]=true;});
   }
   if(s.ticketState){Object.entries(s.ticketState).forEach(([k,v])=>{ticketState[k]=normalizeTicketStage(v);});}
+  if(s.ticketStageTouchedAt&&typeof s.ticketStageTouchedAt==='object')Object.assign(ticketStageTouchedAt,s.ticketStageTouchedAt);
   if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
   if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
   if(s.ticketAssignee)Object.assign(ticketAssignee,s.ticketAssignee);
@@ -1715,7 +1717,7 @@ document.querySelectorAll('[data-pf]').forEach(b=>b.addEventListener('click',()=
 document.getElementById('agent-filter').addEventListener('change',e=>{activeA=e.target.value;renderBoard();});
 document.getElementById('company-filter').addEventListener('change',e=>{activeCompany=e.target.value;if(viewMode==='kpi')renderKpiView();else renderBoard();});
 document.getElementById('current-user').addEventListener('change',()=>{renderBoard();updateMentionsBadge();});
-document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',async e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=normalizeTicketStage(ticketState[id]||'new');const newCol=normalizeTicketStage(col.dataset.col);if(prevCol===newCol)return;ticketState[id]=newCol;saveState('ticket_stage_move');renderActiveView();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);showToast(' Moved to '+COL_NAMES[newCol]+'  saved','move');const rs=await syncTicketStatusToHubspot(id,newCol);if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id'){showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);}});});
+document.querySelectorAll('.col-body').forEach(col=>{col.addEventListener('dragover',e=>{e.preventDefault();col.classList.add('drag-over');});col.addEventListener('dragleave',()=>col.classList.remove('drag-over'));col.addEventListener('drop',async e=>{e.preventDefault();col.classList.remove('drag-over');const id=e.dataTransfer.getData('ticketId');if(!id)return;const prevCol=normalizeTicketStage(ticketState[id]||'new');const newCol=normalizeTicketStage(col.dataset.col);if(prevCol===newCol)return;ticketState[id]=newCol;ticketStageTouchedAt[id]=Date.now();saveState('ticket_stage_move');renderActiveView();col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);showToast(' Moved to '+COL_NAMES[newCol]+'  saved','move');const rs=await syncTicketStatusToHubspot(id,newCol);if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id'){showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);}});});
 document.querySelectorAll('[data-close]').forEach(b=>{b.addEventListener('click',()=>document.getElementById(b.dataset.close).classList.remove('open'));});
 document.querySelectorAll('.modal-bg').forEach(bg=>{bg.addEventListener('click',e=>{if(e.target===bg)bg.classList.remove('open');});});
 

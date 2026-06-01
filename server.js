@@ -167,6 +167,29 @@ function safeWriteState(state) {
   if (incomingVersion < currentVersion) return { saved: false, reason: 'stale_version' };
   if (incomingVersion === currentVersion && incomingSavedAt < currentSavedAt) return { saved: false, reason: 'stale_timestamp' };
 
+  // Merge ticket stages with per-ticket timestamps so stale snapshots cannot roll
+  // back a stage that was moved more recently.
+  const currentStages = (currentState.ticketState && typeof currentState.ticketState === 'object') ? currentState.ticketState : {};
+  const incomingStages = (nextState.ticketState && typeof nextState.ticketState === 'object') ? nextState.ticketState : {};
+  const currentTouched = (currentState.ticketStageTouchedAt && typeof currentState.ticketStageTouchedAt === 'object') ? currentState.ticketStageTouchedAt : {};
+  const incomingTouched = (nextState.ticketStageTouchedAt && typeof nextState.ticketStageTouchedAt === 'object') ? nextState.ticketStageTouchedAt : {};
+  const mergedStages = { ...currentStages };
+  const mergedTouched = { ...currentTouched };
+  const stageIds = new Set([...Object.keys(currentStages), ...Object.keys(incomingStages)]);
+  stageIds.forEach((ticketId) => {
+    const curTs = Number(currentTouched[ticketId] || 0);
+    const inTs = Number(incomingTouched[ticketId] || 0);
+    if (inTs >= curTs) {
+      if (Object.prototype.hasOwnProperty.call(incomingStages, ticketId)) mergedStages[ticketId] = incomingStages[ticketId];
+      mergedTouched[ticketId] = inTs || curTs || Date.now();
+      return;
+    }
+    mergedStages[ticketId] = currentStages[ticketId];
+    mergedTouched[ticketId] = curTs;
+  });
+  nextState.ticketState = mergedStages;
+  nextState.ticketStageTouchedAt = mergedTouched;
+
   const now = Date.now();
   const enrichedMeta = {
     ...incomingMeta,
