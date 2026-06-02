@@ -299,3 +299,19 @@ Behavior:
 
 ### Operational
 - Restarted Node server after patch so changes are live.
+
+## Update - 2026-06-02
+
+### Spam inbox behavior fix
+- `Clear spam` now truly clears the spam inbox UI by hiding spam tickets once they are archived to `Resolved`.
+- Restoring a cleared spam ticket now moves it back to `New` so it visibly returns to the active board instead of staying hidden in `Resolved`.
+- Spam clear/restore actions now also update `ticketStageTouchedAt`, so server-side stale-write protection preserves those stage changes correctly.
+
+### Mailbox ingestion + reply dedupe fix
+- Outlook message proxy now returns `conversationId` and `internetMessageId` so the frontend can thread emails more reliably.
+- Polling now checks the latest 50 mailbox messages each cycle instead of only a narrow 5-minute / 20-message slice, which reduces missed-ticket cases when several emails arrive close together.
+- Ticket creation now merges replies back into the existing card by conversation first, with a client-email + normalized-subject fallback for older messages that did not yet carry conversation metadata.
+- Internal-recipient detection now treats both `quinta.im` and `quicktext.im` as internal domains and excludes support mailbox aliases like `helpdesk@quicktext.im` when identifying the client on reply loops.
+
+### Test sender unblock
+- Removed `hkiriakrem1984@gmail.com` from the hardcoded blocked sender list after confirming it was preventing manual mailbox tests from creating tickets.

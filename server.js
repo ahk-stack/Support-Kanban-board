@@ -254,6 +254,8 @@ function mapMessage(msg) {
     summary: msg.bodyPreview || '',
     sender: msg.from?.emailAddress?.address?.toLowerCase() || '',
     recipients: (msg.toRecipients || []).map(r => r.emailAddress?.address?.toLowerCase()).filter(Boolean),
+    conversationId: msg.conversationId || '',
+    internetMessageId: msg.internetMessageId || '',
     receivedDateTime: msg.receivedDateTime,
     webLink: msg.webLink,
     uri: `mail:///messages/${msg.id}`
@@ -1373,7 +1375,7 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       const token = await graphDelegatedToken(req);
       const mailbox = args?.mailboxOwnerEmail || SUPPORT_MAILBOX;
       const top = Math.min(Number(args?.limit || 20), 50);
-      const select = '$select=id,subject,bodyPreview,from,toRecipients,receivedDateTime,webLink';
+      const select = '$select=id,subject,bodyPreview,from,toRecipients,receivedDateTime,webLink,conversationId,internetMessageId';
       const orderBy = '$orderby=receivedDateTime desc';
       const filter = args?.afterDateTime ? `&$filter=receivedDateTime ge ${new Date(args.afterDateTime).toISOString()}` : '';
       const data = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages?$top=${top}&${select}&${orderBy}${filter}`, token);
