@@ -10,6 +10,7 @@ const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -19,6 +20,7 @@ const VERSIONS_DIR = path.join(__dirname, 'versions');
 const AVATAR_UPLOAD_DIR = path.join(__dirname, 'public', 'uploads', 'avatars');
 const MAX_BACKUPS = Number(process.env.STATE_BACKUP_KEEP || 50);
 const BACKUP_MIN_INTERVAL_MS = Number(process.env.STATE_BACKUP_MIN_INTERVAL_MS || 60_000);
+const RESOLVED_RETENTION_MS = Number(process.env.RESOLVED_RETENTION_MS || 72 * 60 * 60 * 1000);
 
 //const USERNAME = process.env.KANBAN_USER || 'admin';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-this-session-secret';
@@ -31,14 +33,38 @@ const M365_TENANT_ID = process.env.M365_TENANT_ID || '';
 const M365_CLIENT_ID = process.env.M365_CLIENT_ID || '';
 const M365_CLIENT_SECRET = process.env.M365_CLIENT_SECRET || '';
 const M365_REDIRECT_URI = process.env.M365_REDIRECT_URI || `http://localhost:${PORT}/auth/microsoft/callback`;
-const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read User.ReadBasic.All Mail.Read Mail.Read.Shared Chat.Create Chat.ReadWrite').trim();
+// Chat.Create/Chat.ReadWrite/User.ReadBasic.All intentionally excluded:
+// they're only needed by graphSendTeamsDirectMessage() (via
+// graphFindUserByEmail(), which looks up other users), and nothing currently
+// calls that function - Resolved notifications go through the Power Automate
+// webhook instead. Requesting them anyway forced an admin-consent prompt for
+// permissions the app never actually uses.
+const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared').trim();
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
+const CONFIGURED_APP_BASE_URL = String(process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
+const APP_BASE_URL = String(CONFIGURED_APP_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
+// Teams "Resolved" alerts always link to prod, regardless of which
+// environment actually triggered the resolve - preprod is a test
+// environment, so a real DM's "View ticket" link should still point
+// somewhere real rather than a preprod/localhost URL nobody outside testing
+// can use.
+const RESOLVED_ALERT_APP_URL = String(process.env.RESOLVED_ALERT_APP_URL || 'https://support-dash.quinta.im').replace(/\/+$/, '');
+const PASSWORD_RESET_TTL_MS = Number(process.env.PASSWORD_RESET_TTL_MS || 60 * 60 * 1000);
 const HUBSPOT_TOKEN = process.env.HUBSPOT_PRIVATE_APP_TOKEN || process.env.HUBSPOT_ACCESS_TOKEN || '';
 const HAS_STATIC_HUBSPOT_TOKEN = !!HUBSPOT_TOKEN && HUBSPOT_TOKEN.startsWith('pat-');
 const HUBSPOT_CLIENT_ID = process.env.HUBSPOT_CLIENT_ID || '';
 const HUBSPOT_CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET || '';
 const HUBSPOT_REDIRECT_URI = process.env.HUBSPOT_REDIRECT_URI || `http://localhost:${PORT}/auth/hubspot/callback`;
-const HUBSPOT_SCOPES = process.env.HUBSPOT_SCOPES || 'crm.objects.contacts.read crm.objects.companies.read crm.objects.deals.read crm.objects.tickets.read crm.objects.owners.read cms.site_search.read';
+// Must match exactly what's configured as "Required scopes" on the HubSpot
+// app (developer dashboard > Auth tab) - HubSpot rejects the OAuth request
+// outright if it includes a scope the app isn't configured for. Hardcoded
+// on purpose, ignoring any HUBSPOT_SCOPES env var: this is tied to a single
+// fixed HubSpot app registration (same client ID across environments), not
+// something that should vary by deploy target, and a stale env var value in
+// one environment's config (cms.site_search.read isn't a real scope on this
+// app, and its tickets-read scope is just called "tickets") previously broke
+// the preprod HubSpot connection despite this file already having the fix.
+const HUBSPOT_SCOPES = 'crm.objects.companies.read crm.objects.contacts.read crm.objects.custom.read crm.objects.deals.read crm.objects.leads.read crm.objects.line_items.read crm.objects.owners.read crm.objects.products.read crm.objects.quotes.read crm.objects.users.read crm.schemas.companies.read crm.schemas.contacts.read crm.schemas.custom.read crm.schemas.deals.read oauth settings.users.read tickets';
 const HUBSPOT_PKCE_CODE_VERIFIER = process.env.HUBSPOT_PKCE_CODE_VERIFIER || '';
 const HUBSPOT_PKCE_CODE_CHALLENGE = process.env.HUBSPOT_PKCE_CODE_CHALLENGE || '';
 const HUBSPOT_AUTHORIZE_BASE = process.env.HUBSPOT_AUTHORIZE_BASE || 'https://app.hubspot.com/oauth/authorize';
@@ -89,6 +115,8 @@ const CS_TEAMS_EMAIL_OVERRIDES = (() => {
     return {};
   }
 })();
+const SUPPORT_AGENT_CODES = new Set(['SGU','ZIO','SFA','MEZ','SHE','JBA','RMD']);
+const CS_AGENT_CODES = new Set(['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC']);
 
 const APP_BUILD_VERSION = (
   process.env.RENDER_GIT_COMMIT ||
@@ -107,8 +135,40 @@ if (IS_PRODUCTION && SESSION_SECRET === 'change-this-session-secret') {
   throw new Error('Refusing to start in production with the default SESSION_SECRET.');
 }
 
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json({ limit: '4mb' }));
+// script-src/style-src keep 'unsafe-inline' - this app relies on inline
+// <script> blocks across many server-rendered pages (login, profile,
+// reset-password, admin/users, index.html itself), and removing that would
+// need a much larger nonce-based refactor that isn't safe to attempt
+// untested right before a prod deploy. The other directives (object-src,
+// base-uri, frame-ancestors) are free wins with zero behavior change.
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+      imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+      connectSrc: ["'self'", 'https:'],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      frameAncestors: ["'self'"],
+      // Helmet's default 'form-action' self would otherwise block the
+      // OAuth consent form's redirect back to the client's redirect_uri
+      // (e.g. claude.ai) - form-action applies to the whole redirect chain
+      // a submission triggers, not just the form's own declared action.
+      // That redirect is already strictly validated server-side (exact
+      // match against what the client registered), so this is safe to
+      // leave unrestricted rather than trying to allowlist arbitrary
+      // per-client hosts here.
+      formAction: null
+    }
+  }
+}));
+app.use(express.json({ limit: '25mb' }));
+// Needed for the OAuth consent form POST and the token endpoint, which per
+// RFC 6749 is submitted as application/x-www-form-urlencoded.
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 fs.mkdirSync(AVATAR_UPLOAD_DIR, { recursive: true });
 // The default express-session MemoryStore keeps every session in the Node
 // process's own memory for as long as the process runs and never survives a
@@ -125,6 +185,7 @@ app.use(session({
 }));
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+const passwordResetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false });
 
 function isAuthed(req) { return req.session && req.session.authenticated === true; }
 function requireAuth(req, res, next) { return isAuthed(req) ? next() : res.status(401).json({ error: 'unauthorized' }); }
@@ -134,6 +195,30 @@ function requireAdmin(req, res, next) {
   if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
   if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
   return next();
+}
+function hashApiToken(rawToken) {
+  return crypto.createHash('sha256').update(String(rawToken || '')).digest('hex');
+}
+// Bearer-token auth for the MCP connector, independent of the cookie session
+// used by the browser app - each token maps 1:1 to an existing Kanban user,
+// so a tool call can never do more than that person could already do in the UI.
+async function requireApiToken(req, res, next) {
+  const header = String(req.headers.authorization || '');
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  if (!match) return res.status(401).json({ error: 'missing_token' });
+  const tokenHash = hashApiToken(match[1].trim());
+  try {
+    const token = await prisma.apiToken.findUnique({ where: { tokenHash }, include: { user: true } });
+    if (!token || token.revokedAt || !token.user || token.user.isActive === false) {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+    req.apiUser = { id: token.user.id, username: token.user.username, role: token.user.role, displayName: token.user.displayName };
+    prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } }).catch(() => null);
+    return next();
+  } catch (error) {
+    console.error('API token auth failed:', error.message || error);
+    return res.status(500).json({ error: 'auth_failed' });
+  }
 }
 function avatarFilenameForUserId(id) {
   if (!id) return null;
@@ -239,8 +324,9 @@ async function auditTicketChanges({
   }
 }
 function normalizeRole(role) {
-  const value = String(role || 'agent').trim().toLowerCase();
-  return ['owner', 'admin', 'agent', 'viewer'].includes(value) ? value : null;
+  const value = String(role || 'support').trim().toLowerCase();
+  if (value === 'agent' || value === 'viewer') return 'support';
+  return ['owner', 'admin', 'cs', 'support'].includes(value) ? value : null;
 }
 async function ownerAccountExists() {
   const count = await prisma.user.count({ where: { role: 'owner' } });
@@ -265,6 +351,52 @@ function normalizeDbStatusForBoard(status) {
   if (value === 'resolved' || value === 'closed') return 'res';
   return 'new';
 }
+function startOfLocalDay(date = new Date()) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+function kpiDateBounds(range) {
+  const now = new Date();
+  const dayStart = startOfLocalDay(now);
+  const dayMs = 24 * 60 * 60 * 1000;
+  const key = String(range || 'today').trim().toLowerCase();
+  if (key === 'today' || key === 'day') return { start: dayStart, end: now, label: 'Today' };
+  if (key === 'this_week' || key === 'week') {
+    const dow = (dayStart.getDay() + 6) % 7;
+    return { start: new Date(dayStart.getTime() - dow * dayMs), end: now, label: 'This week' };
+  }
+  if (key === 'last_week') {
+    const dow = (dayStart.getDay() + 6) % 7;
+    const thisWeekStart = dayStart.getTime() - dow * dayMs;
+    return { start: new Date(thisWeekStart - 7 * dayMs), end: new Date(thisWeekStart - 1), label: 'Last week' };
+  }
+  if (key === 'this_month' || key === 'month') return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now, label: 'This month' };
+  if (key === 'last_30_days') return { start: new Date(dayStart.getTime() - 29 * dayMs), end: now, label: 'Last 30 days' };
+  if (key === 'this_year') return { start: new Date(now.getFullYear(), 0, 1), end: now, label: 'This year' };
+  return { start: dayStart, end: now, label: 'Today' };
+}
+function isDateInBounds(value, bounds) {
+  if (!value || !bounds?.start || !bounds?.end) return false;
+  const date = value instanceof Date ? value : new Date(value);
+  return !Number.isNaN(date.getTime()) && date >= bounds.start && date <= bounds.end;
+}
+function kpiTicketInRange(ticket, bounds) {
+  const statusKey = normalizeDbStatusForBoard(ticket?.status);
+  if (statusKey === 'res') return isDateInBounds(ticket?.resolvedAt, bounds);
+  return isDateInBounds(ticket?.createdAt, bounds) || isDateInBounds(ticket?.updatedAt, bounds);
+}
+function resolvedAtFromState(state, ticketId) {
+  const touched = Number(state?.ticketStageTouchedAt?.[ticketId] || 0);
+  if (touched > 0) return touched;
+  const created = Date.parse(state?.ticketCreatedAt?.[ticketId] || '');
+  return Number.isFinite(created) ? created : 0;
+}
+function isResolvedHiddenInState(state, ticketId, now = Date.now()) {
+  if (normalizeBoardStatusForDb(state?.ticketState?.[ticketId] || 'new') !== 'Resolved') return false;
+  const meta = (state?.ticketResolutionMeta && typeof state.ticketResolutionMeta === 'object') ? state.ticketResolutionMeta[ticketId] : null;
+  if (meta?.confirmedAt) return true;
+  const resolvedAt = resolvedAtFromState(state, ticketId);
+  return !!resolvedAt && now - resolvedAt >= RESOLVED_RETENTION_MS;
+}
 function safeDateForDb(value) {
   if (!value) return null;
   const date = new Date(value);
@@ -273,6 +405,32 @@ function safeDateForDb(value) {
 function normalizeEmailForDb(value) {
   return String(value || '').trim().toLowerCase();
 }
+function passwordResetTokenHash(token) {
+  return crypto.createHash('sha256').update(String(token || '')).digest('hex');
+}
+function passwordResetExpiresAt() {
+  return new Date(Date.now() + PASSWORD_RESET_TTL_MS);
+}
+function publicBaseUrlForRequest(req) {
+  if (CONFIGURED_APP_BASE_URL) return APP_BASE_URL;
+  const host = String(req.get('host') || '').trim();
+  if (!host) return APP_BASE_URL;
+  return `${req.protocol}://${host}`.replace(/\/+$/, '');
+}
+async function ensurePasswordResetTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "PasswordResetToken" (
+      "id" SERIAL PRIMARY KEY,
+      "userId" INTEGER NOT NULL REFERENCES "User"("id") ON DELETE CASCADE,
+      "tokenHash" TEXT NOT NULL UNIQUE,
+      "expiresAt" TIMESTAMP(3) NOT NULL,
+      "usedAt" TIMESTAMP(3),
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "PasswordResetToken_userId_idx" ON "PasswordResetToken"("userId")`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "PasswordResetToken_expiresAt_idx" ON "PasswordResetToken"("expiresAt")`;
+}
 function extractCompanyNameFromEmail(email) {
   const domain = normalizeEmailForDb(email).split('@').pop() || '';
   const first = domain.split('.')[0] || '';
@@ -280,6 +438,9 @@ function extractCompanyNameFromEmail(email) {
   return first.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
+ensurePasswordResetTable().catch(error => {
+  console.warn('Password reset table setup failed:', error.message || error);
+});
 
 function safeReadState() {
   try {
@@ -696,62 +857,52 @@ async function safeWriteState(state) {
   (Array.isArray(nextState.seenIds) ? nextState.seenIds : []).forEach(id => seenIdSet.add(id));
   nextState.seenIds = [...seenIdSet];
 
-  // Whether a ticket has already had its "Resolved" Teams DM sent - a plain
-  // boolean, reset only when the ticket leaves Resolved. Using the ticket's
-  // touched-at timestamp as an idempotency key (as this used to) was fragile:
-  // that timestamp can legitimately drift for reasons unrelated to the
-  // resolve event itself (e.g. a later comment bumping the DB row), which
-  // made an already-notified ticket look "not yet notified" again and
-  // re-sent the DM for a ticket that had been sitting in Resolved for a while.
-  const previousTeamsMeta = (currentMeta.teamsResolvedNotified && typeof currentMeta.teamsResolvedNotified === 'object') ? currentMeta.teamsResolvedNotified : {};
-  const teamsResolvedNotified = { ...previousTeamsMeta };
-  const ticketsById = new Map(
-    (Array.isArray(nextState.allTickets) ? nextState.allTickets : [])
-      .filter(ticket => ticket && ticket.id)
-      .map(ticket => [String(ticket.id), ticket])
-  );
-  const pendingResolvedTeamsAlerts = [];
-  stageIds.forEach((ticketId) => {
-    const nextStage = normalizeBoardStatusForDb(mergedStages[ticketId] || 'new');
-    const prevStage = normalizeBoardStatusForDb(currentStages[ticketId] || 'new');
-    const category = String((nextState.ticketCategory && nextState.ticketCategory[ticketId]) || '').trim().toLowerCase();
-    if (nextStage !== 'Resolved' || category === 'spam') {
-      delete teamsResolvedNotified[ticketId];
-      return;
-    }
-    if (prevStage === 'Resolved' || teamsResolvedNotified[ticketId]) return; // already resolved and/or already notified - nothing new happened
-    const csOwner = String((nextState.ticketCSOwner && nextState.ticketCSOwner[ticketId]) || '').trim().toUpperCase();
-    if (!csOwner) return;
-    const ticket = ticketsById.get(ticketId) || null;
-    pendingResolvedTeamsAlerts.push({
-      ticketId,
-      csOwner,
-      ticketNumber: nextState.ticketNumbers && nextState.ticketNumbers[ticketId] ? String(nextState.ticketNumbers[ticketId]) : null,
-      subject: String(ticket?.email?.subject || '(no subject)').trim(),
-      companyName: String((nextState.hsCache && nextState.ticketClientEmail && nextState.ticketClientEmail[ticketId] && nextState.hsCache[nextState.ticketClientEmail[ticketId]]?.companyName) || '').trim() || null,
-      jiraKey: String((nextState.ticketJira && nextState.ticketJira[ticketId]) || '').trim() || null,
-      assignee: String((nextState.ticketAssignee && nextState.ticketAssignee[ticketId]) || '').trim() || null
-    });
-    // Mark as notified synchronously, before the webhook even fires. Any save
-    // that lands while the webhook call is still in flight (very likely -
-    // every drag/comment/poll triggers a save) would otherwise re-read this
-    // same "not yet notified" state from disk and queue a second send.
-    teamsResolvedNotified[ticketId] = true;
+  const mergeTicketMap = (field) => ({
+    ...((currentState[field] && typeof currentState[field] === 'object') ? currentState[field] : {}),
+    ...((nextState[field] && typeof nextState[field] === 'object') ? nextState[field] : {})
   });
+  nextState.ticketAssignee = mergeTicketMap('ticketAssignee');
+  nextState.ticketCSOwner = mergeTicketMap('ticketCSOwner');
+  nextState.ticketAssignmentMode = mergeTicketMap('ticketAssignmentMode');
+  nextState.manualSupportOverride = mergeTicketMap('manualSupportOverride');
+  nextState.manualCSOverride = mergeTicketMap('manualCSOverride');
+  nextState.ticketCreatedBy = mergeTicketMap('ticketCreatedBy');
+  nextState.ticketResolutionMeta = mergeTicketMap('ticketResolutionMeta');
+  nextState.ticketArchived = mergeTicketMap('ticketArchived');
 
+  const pruneResolvedHiddenTickets = (stateToPrune) => {
+    const nowForPrune = Date.now();
+    const hiddenIds = new Set(
+      (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : [])
+        .filter(t => t && t.id && isResolvedHiddenInState(stateToPrune, String(t.id), nowForPrune))
+        .map(t => String(t.id))
+    );
+    if (!hiddenIds.size) return stateToPrune;
+    stateToPrune.allTickets = (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : []).filter(t => !hiddenIds.has(String(t?.id || '')));
+    return stateToPrune;
+  };
+  pruneResolvedHiddenTickets(nextState);
+
+  // The "Resolved" Teams DM is no longer tracked here at all - it moved to
+  // an atomic, DB-level claim in upsertBoardTicketsToDatabase (a dedicated
+  // Ticket.resolvedTeamsNotifiedAt column, checked-and-set in one UPDATE).
+  // Tracking it in this JSON file via read-then-write raced under concurrent
+  // saves (multiple agents' tabs, or a poll cycle overlapping a user action):
+  // each one could read "not yet notified" before any of them had written it
+  // back, so the same resolve event fired the DM repeatedly.
   const now = Date.now();
   const enrichedMeta = {
     ...(isStale ? currentMeta : incomingMeta),
-    serverSavedAt: now,
-    teamsResolvedNotified
+    serverSavedAt: now
   };
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketCreatedBy'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
+  pruneResolvedHiddenTickets(finalState);
 
   fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
   fs.writeFileSync(DATA_PATH, JSON.stringify(finalState, null, 2), 'utf8');
@@ -765,13 +916,7 @@ async function safeWriteState(state) {
     backupCreated = true;
   }
 
-  if (pendingResolvedTeamsAlerts.length) {
-    void sendResolvedTeamsNotifications(pendingResolvedTeamsAlerts).catch((error) => {
-      console.warn('Resolved Teams notifications failed:', error?.message || error);
-    });
-  }
-
-  return { saved: true, partial: isStale, backupCreated, resolvedTeamsAlertsQueued: pendingResolvedTeamsAlerts.length, state: finalState };
+  return { saved: true, partial: isStale, backupCreated, state: finalState };
 }
 async function hydrateStateFromDatabase(baseState = {}) {
   const state = (baseState && typeof baseState === 'object') ? JSON.parse(JSON.stringify(baseState)) : {};
@@ -799,11 +944,20 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketCategory = (state.ticketCategory && typeof state.ticketCategory === 'object') ? state.ticketCategory : {};
   state.ticketSubtype = (state.ticketSubtype && typeof state.ticketSubtype === 'object') ? state.ticketSubtype : {};
   state.ticketAssignee = (state.ticketAssignee && typeof state.ticketAssignee === 'object') ? state.ticketAssignee : {};
+  state.ticketCSOwner = (state.ticketCSOwner && typeof state.ticketCSOwner === 'object') ? state.ticketCSOwner : {};
+  state.ticketAssignmentMode = (state.ticketAssignmentMode && typeof state.ticketAssignmentMode === 'object') ? state.ticketAssignmentMode : {};
   state.ticketComments = (state.ticketComments && typeof state.ticketComments === 'object') ? state.ticketComments : {};
   state.ticketClientEmail = (state.ticketClientEmail && typeof state.ticketClientEmail === 'object') ? state.ticketClientEmail : {};
   state.ticketCreatedAt = (state.ticketCreatedAt && typeof state.ticketCreatedAt === 'object') ? state.ticketCreatedAt : {};
   state.ticketJira = (state.ticketJira && typeof state.ticketJira === 'object') ? state.ticketJira : {};
   state.ticketHubspotId = (state.ticketHubspotId && typeof state.ticketHubspotId === 'object') ? state.ticketHubspotId : {};
+  state.ticketArchived = (state.ticketArchived && typeof state.ticketArchived === 'object') ? state.ticketArchived : {};
+  state.manualCSOverride = (state.manualCSOverride && typeof state.manualCSOverride === 'object') ? state.manualCSOverride : {};
+  state.ticketCreatedBy = (state.ticketCreatedBy && typeof state.ticketCreatedBy === 'object') ? state.ticketCreatedBy : {};
+  // Postgres (Ticket.displayNumber) is the source of truth for this, not
+  // whatever the client last sent - always overwritten below so the board
+  // and MCP tools can never drift apart on what a ticket's number is.
+  state.ticketNumbers = (state.ticketNumbers && typeof state.ticketNumbers === 'object') ? state.ticketNumbers : {};
 
   for (const ticket of tickets) {
     const externalId = String(ticket.externalId || ticket.emailMessageId || ticket.id);
@@ -843,17 +997,21 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.priority) state.ticketPriority[externalId] = ticket.priority;
     if (ticket.category) state.ticketCategory[externalId] = ticket.category;
     if (ticket.assignedAgent) state.ticketAssignee[externalId] = ticket.assignedAgent;
+    if (ticket.csAgent) state.ticketCSOwner[externalId] = ticket.csAgent;
+    if (ticket.assignedAgent || ticket.csAgent) state.ticketAssignmentMode[externalId] = 'support';
     if (ticket.senderEmail) state.ticketClientEmail[externalId] = ticket.senderEmail;
     if (ticket.createdAt) state.ticketCreatedAt[externalId] = ticket.createdAt.toISOString();
     if (ticket.jiraTicketKey) state.ticketJira[externalId] = ticket.jiraTicketKey;
     if (ticket.hubspotTicketId) state.ticketHubspotId[externalId] = ticket.hubspotTicketId;
+    if (ticket.displayNumber) state.ticketNumbers[externalId] = ticket.displayNumber;
     if (Array.isArray(ticket.comments) && ticket.comments.length) {
       state.ticketComments[externalId] = ticket.comments.map(comment => ({
         text: comment.comment,
         comment: comment.comment,
         ts: comment.createdAt?.toISOString?.() || new Date().toISOString(),
         createdAt: comment.createdAt?.toISOString?.() || new Date().toISOString(),
-        isInternal: comment.isInternal !== false
+        isInternal: comment.isInternal !== false,
+        tags: Array.isArray(comment.tags) ? comment.tags : []
       }));
     }
   }
@@ -926,6 +1084,30 @@ async function graphRequest(pathname, token, init = {}) {
 
 async function graphGet(pathname, token) {
   return graphRequest(pathname, token);
+}
+
+async function graphSendPasswordResetEmail(recipientEmail, resetUrl) {
+  const token = await graphDelegatedTokenFromStore();
+  const html = [
+    '<div style="font-family:Segoe UI,Arial,sans-serif;color:#0f172a;line-height:1.5;">',
+    '<h2 style="margin:0 0 12px;">Reset your Support Kanban password</h2>',
+    '<p>We received a request to reset your password.</p>',
+    `<p><a href="${escapeHtml(resetUrl)}" style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;padding:10px 14px;border-radius:8px;font-weight:700;">Change password</a></p>`,
+    '<p>This link expires in 1 hour. If you did not request it, you can ignore this email.</p>',
+    '</div>'
+  ].join('');
+  await graphRequest('/me/sendMail', token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: {
+        subject: 'Reset your Support Kanban password',
+        body: { contentType: 'HTML', content: html },
+        toRecipients: [{ emailAddress: { address: recipientEmail } }]
+      },
+      saveToSentItems: true
+    })
+  });
 }
 
 async function postJson(url, payload) {
@@ -1036,13 +1218,21 @@ function buildResolvedPowerAutomatePayload(item) {
   // a real email/UPN to resolve the recipient in Graph - the CS trigram alone
   // (e.g. "MBH") is not one, so send the resolved address alongside it.
   const recipientEmail = csTeamsEmails(csOwner)[0] || '';
+  // This "message" field ends up inside an Adaptive Card TextBlock (per the
+  // flow's existing structured "Ticket:/Status:/Subject:/..." card layout) -
+  // those render Markdown, not raw HTML and not auto-linked bare URLs, which
+  // is why a plain "View ticket: https://..." line showed as inert text.
+  // Markdown link syntax renders as an actual clickable link instead of
+  // showing the raw ugly Outlook message-id URL.
+  const ticketUrl = item.ticketId ? `${RESOLVED_ALERT_APP_URL}/?ticket=${encodeURIComponent(item.ticketId)}` : '';
   const messageParts = [
     `Ticket #${ticketNumber} moved to Resolved.`,
     `Subject: ${subject}`,
     `Company: ${companyName}`,
     csOwner ? `CS: ${csOwner}` : '',
     supportAgent ? `Support: ${supportAgent}` : '',
-    jiraKey ? `Jira: ${jiraKey}` : ''
+    jiraKey ? `Jira: ${jiraKey}` : '',
+    ticketUrl ? `[View ticket](${ticketUrl})` : ''
   ].filter(Boolean);
   return {
     ticketId: String(item.ticketId || '').trim(),
@@ -1054,6 +1244,7 @@ function buildResolvedPowerAutomatePayload(item) {
     supportAgent,
     jiraKey,
     jiraUrl,
+    ticketUrl,
     status: 'Resolved',
     message: messageParts.join('\n'),
     copyEmail: RESOLVED_ALERT_COPY_EMAIL
@@ -1074,6 +1265,20 @@ async function sendResolvedWebhookNotifications(items) {
 async function sendResolvedTeamsNotifications(items) {
   if (!Array.isArray(items) || !items.length) return;
   await sendResolvedWebhookNotifications(items);
+}
+
+// Atomic, DB-level claim for the Resolved Teams DM: a dedicated column
+// checked-and-set in a single UPDATE, not a JSON-file read-then-write (which
+// raced under concurrent saves and fired the same DM repeatedly). Shared by
+// the board-state sync path and the MCP ticket-update endpoint so both go
+// through the exact same claim.
+async function claimResolvedTeamsAlert({ ticketDbId, externalId, csAgent, category, subject, companyName, jiraTicketKey, assignedAgent, ticketNumber = null }) {
+  if (category === 'spam') return null;
+  const csOwnerForAlert = String(csAgent || '').trim().toUpperCase();
+  if (!csOwnerForAlert) return null;
+  const claimedRows = await prisma.$executeRaw`UPDATE "Ticket" SET "resolvedTeamsNotifiedAt" = NOW() WHERE id = ${ticketDbId} AND "resolvedTeamsNotifiedAt" IS NULL`;
+  if (claimedRows <= 0) return null;
+  return { ticketId: externalId, csOwner: csOwnerForAlert, ticketNumber, subject, companyName, jiraKey: jiraTicketKey, assignee: assignedAgent };
 }
 
 function mapMessage(msg) {
@@ -1631,6 +1836,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const ticketCategory = state.ticketCategory || {};
   const ticketSubtype = state.ticketSubtype || {};
   const ticketAssignee = state.ticketAssignee || {};
+  const ticketCSOwner = state.ticketCSOwner || {};
   const ticketClientEmail = state.ticketClientEmail || {};
   const ticketCreatedAt = state.ticketCreatedAt || {};
   const ticketJira = state.ticketJira || {};
@@ -1648,6 +1854,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const existingByExternalId = new Map(existingTickets.map(t => [t.externalId, t]));
 
   let count = 0;
+  const pendingResolvedTeamsAlerts = [];
 
   for (const item of allTickets) {
     if (!item || !item.id) continue;
@@ -1660,7 +1867,10 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const status = normalizeBoardStatusForDb(ticketState[externalId] || 'new');
     const priority = String(ticketPriority[externalId] || item.priority || 'Normal').trim() || 'Normal';
     const category = String(ticketCategory[externalId] || ticketSubtype[externalId] || '').trim() || null;
-    const assignedAgent = String(ticketAssignee[externalId] || '').trim() || null;
+    const rawAssignedAgent = String(ticketAssignee[externalId] || '').trim().toUpperCase();
+    const rawCsAgent = String(ticketCSOwner[externalId] || '').trim().toUpperCase();
+    const assignedAgent = SUPPORT_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null;
+    const csAgent = CS_AGENT_CODES.has(rawCsAgent) ? rawCsAgent : (CS_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null);
     const createdAt = safeDateForDb(email.receivedDateTime || ticketCreatedAt[externalId]) || new Date();
     const body = String(email.bodyPreview || email.preview || email.summary || email.body || email.text || '').trim() || null;
     const companyName = extractCompanyNameFromEmail(senderEmail);
@@ -1671,8 +1881,14 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const comments = Array.isArray(ticketComments[externalId]) ? ticketComments[externalId] : [];
     const existingCommentTexts = new Set((existingTicket?.comments || []).map(c => c.comment));
     const newComments = comments
-      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt }))
+      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt, tags: Array.isArray(c?.tags) ? c.tags.map(t => String(t)).filter(Boolean) : [] }))
       .filter(c => c.text && !existingCommentTexts.has(c.text));
+
+    const previousStatus = existingTicket?.status || null;
+    const wasResolved = previousStatus === 'Resolved';
+    const resolvedAtForDb = status === 'Resolved'
+      ? (wasResolved ? existingTicket?.resolvedAt || new Date() : new Date())
+      : null;
 
     const fieldsUnchanged = existingTicket
       && existingTicket.subject === subject
@@ -1682,6 +1898,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
       && existingTicket.priority === priority
       && existingTicket.category === category
       && existingTicket.assignedAgent === assignedAgent
+      && existingTicket.csAgent === csAgent
       && existingTicket.hubspotTicketId === hubspotTicketId
       && existingTicket.jiraTicketKey === jiraTicketKey
       && existingTicket.body === body;
@@ -1702,6 +1919,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         priority,
         category,
         assignedAgent,
+        csAgent,
         source: 'outlook',
         emailMessageId: externalId,
         hubspotTicketId,
@@ -1709,7 +1927,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         body,
         emailRaw: email,
         createdAt,
-        resolvedAt: status === 'Resolved' ? new Date() : null
+        resolvedAt: resolvedAtForDb
       },
       update: {
         subject,
@@ -1720,15 +1938,36 @@ async function upsertBoardTicketsToDatabase(state, req) {
         priority,
         category,
         assignedAgent,
+        csAgent,
         source: 'outlook',
         emailMessageId: externalId,
         hubspotTicketId,
         jiraTicketKey,
         body,
         emailRaw: email,
-        resolvedAt: status === 'Resolved' ? new Date() : null
+        resolvedAt: resolvedAtForDb,
+        // Leave untouched (undefined) while staying Resolved - the atomic
+        // claim above owns setting it. Reset to null on leaving Resolved so
+        // a genuine future re-resolve (e.g. after a CS "send back") can
+        // notify again instead of being silently claimed forever.
+        resolvedTeamsNotifiedAt: status === 'Resolved' ? undefined : null
       }
     });
+
+    if (status === 'Resolved') {
+      const alert = await claimResolvedTeamsAlert({
+        ticketDbId: ticket.id,
+        externalId,
+        csAgent,
+        category,
+        subject,
+        companyName,
+        jiraTicketKey,
+        assignedAgent,
+        ticketNumber: state.ticketNumbers && state.ticketNumbers[externalId] ? String(state.ticketNumbers[externalId]) : null
+      });
+      if (alert) pendingResolvedTeamsAlerts.push(alert);
+    }
 
     if (!existingTicket) {
       await createTicketAuditEvent({
@@ -1745,7 +1984,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         userId: req.session?.userId || null,
         before: existingTicket,
         after: ticket,
-        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'hubspotTicketId', 'jiraTicketKey', 'body']
+        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'csAgent', 'hubspotTicketId', 'jiraTicketKey', 'body']
       });
     }
 
@@ -1756,6 +1995,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
           userId: req?.session?.userId || null,
           comment: comment.text,
           isInternal: true,
+          tags: comment.tags,
           createdAt: safeDateForDb(comment.ts) || new Date()
         }
       });
@@ -1776,10 +2016,217 @@ async function upsertBoardTicketsToDatabase(state, req) {
     }).catch(() => null);
   }
 
-  return { count };
+  if (pendingResolvedTeamsAlerts.length) {
+    void sendResolvedTeamsNotifications(pendingResolvedTeamsAlerts).catch((error) => {
+      console.warn('Resolved Teams notifications failed:', error?.message || error);
+    });
+  }
+
+  return { count, resolvedTeamsAlertsQueued: pendingResolvedTeamsAlerts.length };
 }
 
+app.get('/favicon.svg', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.type('image/svg+xml').sendFile(path.join(__dirname, 'public', 'favicon.svg'));
+});
+
+app.get('/favicon.ico', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.redirect(302, '/favicon.svg?v=q-logo-tab-v3');
+});
+
 app.get('/login', (req, res) => isAuthed(req) ? res.redirect('/') : res.type('html').sendFile(path.join(__dirname, 'public', 'login.html')));
+
+function renderResetPasswordPage(token) {
+  // Base64-encode (not JSON.stringify) before embedding in the inline
+  // <script> block: JSON.stringify does not escape "</script>", so a raw
+  // ?token=</script><script>...</script> could break out of the block and
+  // execute attacker JS. Base64 output only ever contains [A-Za-z0-9+/=],
+  // which can never form that sequence.
+  const base64TokenJson = JSON.stringify(Buffer.from(String(token || ''), 'utf8').toString('base64'));
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
+  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
+  <title>Reset Password</title>
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:linear-gradient(135deg,#f8fafc,#e2e8f0);display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+    .card{background:#fff;padding:28px;border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.12);width:min(390px,92vw)}
+    h1{margin:0 0 8px;font-size:20px;color:#1e293b}
+    p{margin:0 0 16px;color:#64748b;font-size:13px}
+    label{display:block;font-size:12px;color:#475569;font-weight:600;margin-bottom:6px}
+    input{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:12px;box-sizing:border-box}
+    button{width:100%;padding:10px;border:none;border-radius:8px;background:#4f46e5;color:#fff;font-weight:700;cursor:pointer}
+    button:disabled{opacity:.65;cursor:not-allowed}
+    a{color:#4f46e5;text-decoration:none;font-size:13px;font-weight:700}
+    .msg{margin-top:10px;font-size:12px;min-height:16px;color:#64748b}
+    .msg.err{color:#dc2626}
+    .msg.ok{color:#16a34a}
+  </style>
+</head>
+<body>
+  <form class="card" id="reset-form">
+    <h1>Reset password</h1>
+    <p>Choose a new password for your Support Kanban account.</p>
+    <label for="password">New password</label>
+    <input id="password" name="password" type="password" autocomplete="new-password" minlength="8" required />
+    <label for="confirm">Confirm password</label>
+    <input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="8" required />
+    <button id="submit-btn" type="submit">Change password</button>
+    <div class="msg" id="msg"></div>
+    <p style="margin-top:14px;margin-bottom:0;"><a href="/login">Back to sign in</a></p>
+  </form>
+  <script>
+    // safeTokenJson is a JSON string literal - JSON.stringify does not escape
+    // "</script>", so a raw ?token=</script><script>...</script> could break
+    // out of this block. Base64-encode it and decode at runtime instead of
+    // embedding the raw JSON, so the script body can never contain "</script".
+    const resetToken = atob(${base64TokenJson});
+    const form = document.getElementById('reset-form');
+    const msg = document.getElementById('msg');
+    const btn = document.getElementById('submit-btn');
+    if (!resetToken) {
+      msg.textContent = 'This reset link is missing its token.';
+      msg.className = 'msg err';
+      btn.disabled = true;
+    }
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      msg.className = 'msg';
+      msg.textContent = '';
+      const password = document.getElementById('password').value;
+      const confirm = document.getElementById('confirm').value;
+      if (password.length < 8) {
+        msg.textContent = 'Password must be at least 8 characters.';
+        msg.className = 'msg err';
+        return;
+      }
+      if (password !== confirm) {
+        msg.textContent = 'Passwords do not match.';
+        msg.className = 'msg err';
+        return;
+      }
+      btn.disabled = true;
+      try {
+        const res = await fetch('/auth/reset-password', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          credentials: 'include',
+          body: JSON.stringify({ token: resetToken, password })
+        });
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          msg.textContent = out.error === 'invalid_or_expired_token' ? 'This reset link is invalid or expired.' : 'Unable to change password.';
+          msg.className = 'msg err';
+          btn.disabled = false;
+          return;
+        }
+        msg.textContent = 'Password changed. You can sign in now.';
+        msg.className = 'msg ok';
+        setTimeout(() => { location.href = '/login'; }, 1200);
+      } catch (_) {
+        msg.textContent = 'Network error. Please try again.';
+        msg.className = 'msg err';
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
+app.get('/reset-password', (req, res) => {
+  res.type('html').send(renderResetPasswordPage(req.query.token || ''));
+});
+
+app.post('/auth/forgot-password', passwordResetLimiter, async (req, res) => {
+  try {
+    const email = normalizeEmailForDb(req.body?.email || '');
+    if (!email || !email.includes('@')) return res.status(400).json({ error: 'invalid_email' });
+
+    const user = await prisma.user.findFirst({
+      where: { email, isActive: true }
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'email_not_found' });
+    }
+
+    await ensurePasswordResetTable();
+    const token = crypto.randomBytes(32).toString('hex');
+    const tokenHash = passwordResetTokenHash(token);
+    const expiresAt = passwordResetExpiresAt();
+    const resetUrl = `${publicBaseUrlForRequest(req)}/reset-password?token=${encodeURIComponent(token)}`;
+
+    await prisma.$executeRaw`DELETE FROM "PasswordResetToken" WHERE "userId" = ${user.id} AND "usedAt" IS NULL`;
+    await prisma.$executeRaw`
+      INSERT INTO "PasswordResetToken" ("userId", "tokenHash", "expiresAt")
+      VALUES (${user.id}, ${tokenHash}, ${expiresAt})
+    `;
+
+    try {
+      await graphSendPasswordResetEmail(email, resetUrl);
+    } catch (mailError) {
+      await prisma.$executeRaw`DELETE FROM "PasswordResetToken" WHERE "tokenHash" = ${tokenHash}`;
+      console.error('Password reset email failed:', mailError);
+      return res.status(500).json({ error: 'send_email_failed' });
+    }
+
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Forgot password failed:', error);
+    return res.status(500).json({ error: 'forgot_password_failed' });
+  }
+});
+
+app.post('/auth/reset-password', passwordResetLimiter, async (req, res) => {
+  try {
+    const token = String(req.body?.token || '').trim();
+    const password = String(req.body?.password || '');
+    if (!token) return res.status(400).json({ error: 'missing_token' });
+    if (password.length < 8) return res.status(400).json({ error: 'password_too_short' });
+
+    await ensurePasswordResetTable();
+    const tokenHash = passwordResetTokenHash(token);
+    const rows = await prisma.$queryRaw`
+      SELECT "id", "userId", "expiresAt", "usedAt"
+      FROM "PasswordResetToken"
+      WHERE "tokenHash" = ${tokenHash}
+      LIMIT 1
+    `;
+    const reset = Array.isArray(rows) ? rows[0] : null;
+
+    if (!reset || reset.usedAt || new Date(reset.expiresAt).getTime() < Date.now()) {
+      return res.status(400).json({ error: 'invalid_or_expired_token' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: Number(reset.userId) } });
+    if (!user || user.isActive === false) {
+      return res.status(400).json({ error: 'invalid_or_expired_token' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: user.id }, data: { passwordHash } }),
+      prisma.$executeRaw`UPDATE "PasswordResetToken" SET "usedAt" = ${new Date()} WHERE "id" = ${Number(reset.id)}`
+    ]);
+
+    if (req.session) {
+      req.session.authenticated = false;
+      delete req.session.userId;
+      delete req.session.username;
+      delete req.session.role;
+    }
+
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Reset password failed:', error);
+    return res.status(500).json({ error: 'reset_password_failed' });
+  }
+});
 
 app.post('/auth/login', authLimiter, async (req, res) => {
   try {
@@ -1981,6 +2428,85 @@ app.patch('/api/profile', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'update_profile_failed' });
   }
 });
+// --- Templates: shared, team-wide reusable message templates ------------
+// Any logged-in user can create/edit/delete any template (same trust model
+// as the shared ticket board itself) - lastEditedByUserId gives a minimal
+// audit trail for "who changed this" without a full event log.
+const TEMPLATE_SELECT = {
+  id: true, name: true, body: true, createdAt: true, updatedAt: true,
+  createdBy: { select: { username: true, displayName: true } },
+  lastEditedBy: { select: { username: true, displayName: true } }
+};
+app.get('/api/templates', requireAuth, async (req, res) => {
+  const templates = await prisma.template.findMany({ orderBy: { updatedAt: 'desc' }, select: TEMPLATE_SELECT });
+  res.json({ templates });
+});
+app.get('/api/templates/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_template_id' });
+  const template = await prisma.template.findUnique({ where: { id }, select: TEMPLATE_SELECT });
+  if (!template) return res.status(404).json({ error: 'template_not_found' });
+  res.json({ template });
+});
+app.post('/api/templates', requireAuth, async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const body = String(req.body?.body || '');
+  if (!name) return res.status(400).json({ error: 'name_required' });
+  if (!body.trim()) return res.status(400).json({ error: 'body_required' });
+  const template = await prisma.template.create({
+    data: { name, body, createdByUserId: req.session.userId, lastEditedByUserId: req.session.userId },
+    select: TEMPLATE_SELECT
+  });
+  res.status(201).json({ template });
+});
+app.patch('/api/templates/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_template_id' });
+  const data = { lastEditedByUserId: req.session.userId };
+  if (req.body?.name !== undefined) {
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name_required' });
+    data.name = name;
+  }
+  if (req.body?.body !== undefined) {
+    const body = String(req.body.body || '');
+    if (!body.trim()) return res.status(400).json({ error: 'body_required' });
+    data.body = body;
+  }
+  try {
+    const template = await prisma.template.update({ where: { id }, data, select: TEMPLATE_SELECT });
+    res.json({ template });
+  } catch (error) {
+    res.status(404).json({ error: 'template_not_found' });
+  }
+});
+app.post('/api/templates/:id/duplicate', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_template_id' });
+  const source = await prisma.template.findUnique({ where: { id } });
+  if (!source) return res.status(404).json({ error: 'template_not_found' });
+  const template = await prisma.template.create({
+    data: {
+      name: `${source.name} (copy)`,
+      body: source.body,
+      createdByUserId: req.session.userId,
+      lastEditedByUserId: req.session.userId
+    },
+    select: TEMPLATE_SELECT
+  });
+  res.status(201).json({ template });
+});
+app.delete('/api/templates/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_template_id' });
+  try {
+    await prisma.template.delete({ where: { id } });
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(404).json({ error: 'template_not_found' });
+  }
+});
+
 app.get('/api/jira/status', requireAuth, async (req, res) => {
   try {
     const jira = await getJiraConfig();
@@ -2115,6 +2641,8 @@ app.get('/profile', requireAuth, (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
+  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
   <title>Profile - Support Kanban</title>
   <style>
     :root {
@@ -2606,6 +3134,19 @@ app.get('/profile', requireAuth, (req, res) => {
               </div>
             </div>
           </div>
+
+          <div class="row">
+            <div class="label">Claude connector</div>
+            <div class="value">
+              <div id="mcpTokenStatus" style="font-size:13px;color:var(--muted);margin-bottom:8px;">Loading...</div>
+              <div id="mcpTokenReveal" class="hidden" style="margin-bottom:8px;">
+                <input id="mcpTokenValue" class="form-input" type="text" readonly style="font-family:monospace;font-size:12px;" />
+                <div style="font-size:12px;color:var(--muted);margin-top:4px;">Copy this now - it will not be shown again. Paste it as the Bearer token when adding the Support Kanban connector in Claude.</div>
+              </div>
+              <button class="btn btn-secondary" id="mcpGenerateBtn" type="button">Generate token</button>
+              <button class="btn btn-danger hidden" id="mcpRevokeBtn" type="button">Revoke token</button>
+            </div>
+          </div>
         </div>
 
         <div class="actions">
@@ -2751,7 +3292,45 @@ app.get('/profile', requireAuth, (req, res) => {
     document.getElementById('logoutBtn')?.addEventListener('click', logout);
     document.getElementById('logoutTopBtn')?.addEventListener('click', logout);
 
+    async function loadMcpTokenStatus() {
+      const res = await fetch('/api/mcp/token', { credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      const statusEl = document.getElementById('mcpTokenStatus');
+      const revokeBtn = document.getElementById('mcpRevokeBtn');
+      if (data.token) {
+        const when = new Date(data.token.createdAt).toLocaleDateString();
+        statusEl.textContent = 'Active token created ' + when + (data.token.lastUsedAt ? ', last used ' + new Date(data.token.lastUsedAt).toLocaleString() : ', not used yet');
+        revokeBtn?.classList.remove('hidden');
+      } else {
+        statusEl.textContent = 'No active token. Generate one to connect Claude to the Support Kanban board.';
+        revokeBtn?.classList.add('hidden');
+      }
+    }
+
+    document.getElementById('mcpGenerateBtn')?.addEventListener('click', async () => {
+      if (document.getElementById('mcpRevokeBtn') && !document.getElementById('mcpRevokeBtn').classList.contains('hidden')) {
+        if (!confirm('Generating a new token will revoke your current one and disconnect any Claude connector using it. Continue?')) return;
+      }
+      const res = await fetch('/api/mcp/token', { method: 'POST', credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.error || 'Unable to generate token.');
+        return;
+      }
+      document.getElementById('mcpTokenValue').value = data.token;
+      document.getElementById('mcpTokenReveal')?.classList.remove('hidden');
+      loadMcpTokenStatus();
+    });
+
+    document.getElementById('mcpRevokeBtn')?.addEventListener('click', async () => {
+      if (!confirm('Revoke your Claude connector token? Any connected Claude sessions will stop working until you generate a new one.')) return;
+      await fetch('/api/mcp/token', { method: 'DELETE', credentials: 'same-origin' });
+      document.getElementById('mcpTokenReveal')?.classList.add('hidden');
+      loadMcpTokenStatus();
+    });
+
     loadProfile();
+    loadMcpTokenStatus();
   </script>
 </body>
 </html>
@@ -2767,7 +3346,7 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
   try {
     const username = normalizeUsername(req.body?.username || '');
     const password = String(req.body?.password || '');
-    const role = normalizeRole(req.body?.role || 'agent');
+    const role = normalizeRole(req.body?.role || 'support');
     const displayName = String(req.body?.displayName || '').trim() || null;
     const email = normalizeEmailForDb(req.body?.email || '') || null;
 
@@ -2873,6 +3452,158 @@ app.get('/api/tickets', requireAuth, async (req, res) => {
   });
   res.json({ tickets });
 });
+app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
+  try {
+    const bounds = kpiDateBounds(req.query.range);
+    const role = normalizeRole(req.session.role) || 'support';
+    const username = String(req.session.username || '').trim().toUpperCase();
+    const team = String(req.query.team || 'all').trim().toLowerCase();
+    const agent = String(req.query.agent || 'all').trim().toUpperCase();
+    const company = String(req.query.company || 'all').trim();
+    const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
+
+    const baseWhere = {
+      NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
+    };
+    if (company && company !== 'all') baseWhere.companyName = company;
+    if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
+
+    const accessWhere = {};
+    if (role === 'cs') accessWhere.csAgent = username;
+    else if (role === 'support') accessWhere.assignedAgent = username;
+    else if (agent && agent !== 'ALL') {
+      if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
+      else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
+      else accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }];
+    } else if (team === 'cs') {
+      accessWhere.csAgent = { in: Array.from(CS_AGENT_CODES) };
+    } else if (team === 'support') {
+      accessWhere.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
+    }
+    const rangeWhere = {
+      OR: [
+        { createdAt: { gte: bounds.start, lte: bounds.end } },
+        { updatedAt: { gte: bounds.start, lte: bounds.end } },
+        { resolvedAt: { gte: bounds.start, lte: bounds.end } }
+      ]
+    };
+    const statusWhere = { AND: [baseWhere, accessWhere] };
+    const where = { AND: [baseWhere, accessWhere, rangeWhere] };
+
+    const tickets = await prisma.ticket.findMany({
+      where,
+      select: {
+        id: true,
+        externalId: true,
+        subject: true,
+        status: true,
+        priority: true,
+        category: true,
+        assignedAgent: true,
+        csAgent: true,
+        companyName: true,
+        senderEmail: true,
+        jiraTicketKey: true,
+        createdAt: true,
+        updatedAt: true,
+        resolvedAt: true
+      },
+      orderBy: [{ createdAt: 'desc' }]
+    });
+    const statusTickets = await prisma.ticket.findMany({
+      where: statusWhere,
+      select: {
+        id: true,
+        status: true,
+        assignedAgent: true,
+        csAgent: true,
+        jiraTicketKey: true
+      }
+    });
+    const scopedTickets = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
+
+    const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
+    const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
+    const categoryCounts = {};
+    const priorityCounts = {};
+    const companyCounts = {};
+    const agentRows = {};
+    const csCounts = {};
+    let ticketsWithCs = 0;
+
+    const addAgentRow = (agentCode, statusKey) => {
+      const rowAgent = String(agentCode || 'Unassigned').trim().toUpperCase() || 'Unassigned';
+      if (!agentRows[rowAgent]) agentRows[rowAgent] = { agent: rowAgent, total: 0, new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0 };
+      agentRows[rowAgent].total++;
+      if (statusKey in agentRows[rowAgent]) agentRows[rowAgent][statusKey]++;
+    };
+
+    for (const ticket of statusTickets) {
+      const statusKey = normalizeDbStatusForBoard(ticket.status);
+      if (statusKey in statusCounts) statusCounts[statusKey]++;
+    }
+
+    for (const ticket of scopedTickets) {
+      const statusKey = normalizeDbStatusForBoard(ticket.status);
+      const category = String(ticket.category || 'Uncategorized').trim() || 'Uncategorized';
+      categoryCounts[category] = (categoryCounts[category] || 0) + 1;
+      const priority = String(ticket.priority || 'Normal').trim() || 'Normal';
+      priorityCounts[priority] = (priorityCounts[priority] || 0) + 1;
+      const companyName = String(ticket.companyName || 'Unknown').trim() || 'Unknown';
+      companyCounts[companyName] = (companyCounts[companyName] || 0) + 1;
+
+      const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
+      const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
+      if (team === 'cs') addAgentRow(csOwner || 'Unassigned', statusKey);
+      else if (team === 'support') addAgentRow(assignee || 'Unassigned', statusKey);
+      else {
+        addAgentRow(assignee || 'Unassigned', statusKey);
+        if (csOwner && csOwner !== assignee) addAgentRow(csOwner, statusKey);
+      }
+      const csLabel = csOwner || 'Unassigned';
+      csCounts[csLabel] = (csCounts[csLabel] || 0) + 1;
+      if (csOwner) ticketsWithCs++;
+    }
+
+    const sortRows = obj => Object.entries(obj).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const agents = Array.from(new Set([
+      ...Array.from(SUPPORT_AGENT_CODES),
+      ...Array.from(CS_AGENT_CODES),
+      ...tickets.flatMap(t => [t.assignedAgent, t.csAgent]).filter(Boolean).map(v => String(v).trim().toUpperCase())
+    ])).sort((a, b) => a.localeCompare(b));
+
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      range: { key: String(req.query.range || 'today'), label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() },
+      filters: { team, agent, company, jiraOnly },
+      totals: {
+        tickets: statusTickets.length,
+        rangeTickets: scopedTickets.length,
+        ticketsWithCs,
+        uniqueCs: Object.keys(csCounts).filter(k => k !== 'Unassigned').length,
+        jiraLinked: statusTickets.filter(t => t.jiraTicketKey).length
+      },
+      statusCounts,
+      categoryRows: sortRows(categoryCounts).map(([category, count]) => ({ category, count })),
+      priorityRows: sortRows(priorityCounts).map(([priority, count]) => ({ priority, count })),
+      companyRows: sortRows(companyCounts).map(([company, count]) => ({ company, count })),
+      csRows: sortRows(csCounts).map(([agent, count]) => ({ agent, count })),
+      agentRows: Object.values(agentRows).sort((a, b) => b.total - a.total || a.agent.localeCompare(b.agent)),
+      jiraRows: scopedTickets.filter(t => t.jiraTicketKey).slice(0, 50).map(t => ({
+        ticket: t.subject || '(no subject)',
+        company: t.companyName || 'Unknown',
+        agent: t.assignedAgent || 'Unassigned',
+        jira: t.jiraTicketKey,
+        createdAt: t.createdAt
+      })),
+      agents
+    });
+  } catch (error) {
+    console.error('Read ticket KPIs failed:', error);
+    return res.status(500).json({ error: 'read_ticket_kpis_failed' });
+  }
+});
 app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
   const ticketId = Number(req.params.id);
 
@@ -2953,6 +3684,8 @@ app.get('/audit/tickets', requireAdmin, (req, res) => {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
+  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
   <title>Ticket Audit Log</title>
   <style>
     body {
@@ -3176,17 +3909,614 @@ app.get('/api/tickets/:id', requireAuth, async (req, res) => {
   res.json({ ticket });
 });
 
+// --- Claude MCP connector -------------------------------------------------
+// Self-service token issuance (cookie-session authenticated, one active
+// token per user - regenerating revokes the previous one). The plaintext
+// token is only ever returned here, once; only its SHA-256 hash is stored.
+const mcpTokenLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
+app.get('/api/mcp/token', requireAuth, async (req, res) => {
+  const token = await prisma.apiToken.findFirst({
+    where: { userId: req.session.userId, revokedAt: null },
+    orderBy: { createdAt: 'desc' }
+  });
+  res.json({ token: token ? { createdAt: token.createdAt, lastUsedAt: token.lastUsedAt } : null });
+});
+app.post('/api/mcp/token', requireAuth, mcpTokenLimiter, async (req, res) => {
+  try {
+    await prisma.apiToken.updateMany({
+      where: { userId: req.session.userId, revokedAt: null },
+      data: { revokedAt: new Date() }
+    });
+    const rawToken = `kb_${crypto.randomBytes(32).toString('base64url')}`;
+    const created = await prisma.apiToken.create({
+      data: { userId: req.session.userId, tokenHash: hashApiToken(rawToken), label: 'Claude MCP connector' }
+    });
+    res.json({ token: rawToken, createdAt: created.createdAt });
+  } catch (error) {
+    console.error('Token generation failed:', error.message || error);
+    res.status(500).json({ error: 'token_generation_failed' });
+  }
+});
+app.delete('/api/mcp/token', requireAuth, async (req, res) => {
+  await prisma.apiToken.updateMany({
+    where: { userId: req.session.userId, revokedAt: null },
+    data: { revokedAt: new Date() }
+  });
+  res.json({ ok: true });
+});
+
+// Ticket API surface backing the Claude MCP connector - reached either via
+// the plain REST routes below (used by the standalone mcp-server/ service,
+// which forwards the caller's own Bearer token straight through) or directly
+// via the in-process /mcp route further down. Both paths call the same
+// mcp*() functions so there's exactly one implementation of each operation.
+const mcpApiLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false });
+const MCP_TICKET_SELECT = {
+  id: true, externalId: true, displayNumber: true, subject: true, senderName: true, senderEmail: true, companyName: true,
+  status: true, priority: true, category: true, assignedAgent: true, csAgent: true, jiraTicketKey: true,
+  hubspotTicketId: true, createdAt: true, updatedAt: true, resolvedAt: true
+};
+const MCP_WRITABLE_STATUSES = new Set(['New', 'In Progress', 'Waiting on Us', 'Due for Test', 'Waiting on Contact', 'Resolved']);
+
+// The board shows agents a short display number (e.g. "#0042") - completely
+// different from Ticket.id (the DB primary key) and externalId (a long
+// Outlook message ID). MCP tools used to only expose the DB id, so Claude
+// had no way to know it wasn't the number agents actually mean when they say
+// "ticket 42". Ticket.displayNumber is Postgres-assigned (its own sequence,
+// atomic, survives restarts) - hydrateStateFromDatabase seeds it into the
+// same ticketNumbers map the board's own ensureTicketNumber() already reads,
+// so the board and MCP always agree on the same number with no frontend
+// changes needed.
+function withMcpTicketNumber(ticket) {
+  if (!ticket) return ticket;
+  const { id, displayNumber, ...rest } = ticket;
+  return { ticketNumber: displayNumber ? `#${String(displayNumber).padStart(4, '0')}` : null, internalId: id, ...rest };
+}
+
+async function mcpListTickets({ status, assignee, q, limit }) {
+  const where = {};
+  if (status) where.status = String(status);
+  if (assignee) where.assignedAgent = String(assignee).trim().toUpperCase();
+  if (q) {
+    const term = String(q).trim();
+    where.OR = [
+      { subject: { contains: term, mode: 'insensitive' } },
+      { companyName: { contains: term, mode: 'insensitive' } },
+      { senderEmail: { contains: term, mode: 'insensitive' } }
+    ];
+  }
+  const take = Math.min(Number(limit) || 50, 200);
+  const tickets = await prisma.ticket.findMany({ where, take, orderBy: { updatedAt: 'desc' }, select: MCP_TICKET_SELECT });
+  return tickets.map(withMcpTicketNumber);
+}
+
+async function mcpGetTicket(id) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  const ticket = await prisma.ticket.findUnique({ where: { id }, include: { comments: { orderBy: { createdAt: 'asc' } } } });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+  return withMcpTicketNumber(ticket);
+}
+
+async function mcpAddComment(apiUser, id, rawText) {
+  const text = String(rawText || '').trim();
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  if (!text) throw Object.assign(new Error('text_required'), { status: 400 });
+  const ticket = await prisma.ticket.findUnique({ where: { id } });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+  const comment = await prisma.ticketComment.create({ data: { ticketId: id, userId: apiUser.id, comment: text, isInternal: true } });
+  await createTicketAuditEvent({ ticketId: id, userId: apiUser.id, eventType: 'comment_added', newValue: text.slice(0, 200), metadata: { via: 'mcp' } });
+  return comment;
+}
+
+async function mcpUpdateTicket(apiUser, id, fields) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  const existingTicket = await prisma.ticket.findUnique({ where: { id } });
+  if (!existingTicket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+
+  const data = {};
+  if (fields?.status !== undefined) {
+    const status = String(fields.status || '').trim();
+    if (!MCP_WRITABLE_STATUSES.has(status)) throw Object.assign(new Error('invalid_status'), { status: 400 });
+    data.status = status;
+    data.resolvedAt = status === 'Resolved' ? new Date() : null;
+    if (status !== 'Resolved') data.resolvedTeamsNotifiedAt = null;
+  }
+  if (fields?.assignedAgent !== undefined) data.assignedAgent = fields.assignedAgent ? String(fields.assignedAgent).trim().toUpperCase() : null;
+  if (fields?.csAgent !== undefined) data.csAgent = fields.csAgent ? String(fields.csAgent).trim().toUpperCase() : null;
+  if (fields?.priority !== undefined) data.priority = String(fields.priority || 'Normal').trim();
+  if (!Object.keys(data).length) throw Object.assign(new Error('no_fields'), { status: 400 });
+
+  const updated = await prisma.ticket.update({ where: { id }, data });
+  await auditTicketChanges({ ticketId: id, userId: apiUser.id, before: existingTicket, after: updated, fields: ['status', 'assignedAgent', 'csAgent', 'priority'] });
+
+  if (data.status === 'Resolved' && existingTicket.status !== 'Resolved') {
+    const alert = await claimResolvedTeamsAlert({
+      ticketDbId: updated.id,
+      externalId: updated.externalId || String(updated.id),
+      csAgent: updated.csAgent,
+      category: updated.category,
+      subject: updated.subject,
+      companyName: updated.companyName,
+      jiraTicketKey: updated.jiraTicketKey,
+      assignedAgent: updated.assignedAgent
+    });
+    if (alert) void sendResolvedTeamsNotifications([alert]).catch((error) => console.warn('Resolved Teams notification failed:', error?.message || error));
+  }
+
+  return withMcpTicketNumber(updated);
+}
+
+function mcpHttpErrorStatus(error) {
+  return Number.isInteger(error?.status) ? error.status : 500;
+}
+
+app.get('/api/mcp/tickets', requireApiToken, mcpApiLimiter, async (req, res) => {
+  const tickets = await mcpListTickets(req.query);
+  res.json({ tickets });
+});
+app.get('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    const ticket = await mcpGetTicket(Number(req.params.id));
+    res.json({ ticket });
+  } catch (error) {
+    res.status(mcpHttpErrorStatus(error)).json({ error: error.message });
+  }
+});
+app.post('/api/mcp/tickets/:id/comments', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    const comment = await mcpAddComment(req.apiUser, Number(req.params.id), req.body?.text);
+    res.json({ ok: true, comment });
+  } catch (error) {
+    res.status(mcpHttpErrorStatus(error)).json({ error: error.message });
+  }
+});
+app.patch('/api/mcp/tickets/:id', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    const updated = await mcpUpdateTicket(req.apiUser, Number(req.params.id), req.body || {});
+    res.json({ ok: true, ticket: updated });
+  } catch (error) {
+    res.status(mcpHttpErrorStatus(error)).json({ error: error.message });
+  }
+});
+
+// --- OAuth 2.1 (Authorization Code + PKCE) for the Claude connector --------
+// Wraps the app's *existing* session login - there is no separate identity
+// system here. A client (Claude) self-registers once (RFC 7591), then each
+// individual person authorizes it by logging into the normal Kanban login
+// page; the resulting access token is just a regular ApiToken row, so
+// everything downstream (/mcp, /api/mcp/*) needs zero changes.
+const oauthLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+const OAUTH_CODE_TTL_MS = 5 * 60 * 1000;
+
+function base64url(buffer) {
+  return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function hashOAuthCode(rawCode) {
+  return crypto.createHash('sha256').update(String(rawCode || '')).digest('hex');
+}
+function oauthIssuer(req) {
+  return publicBaseUrlForRequest(req);
+}
+
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  const issuer = oauthIssuer(req);
+  res.json({
+    issuer,
+    authorization_endpoint: `${issuer}/oauth/authorize`,
+    token_endpoint: `${issuer}/oauth/token`,
+    registration_endpoint: `${issuer}/oauth/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
+    code_challenge_methods_supported: ['S256'],
+    token_endpoint_auth_methods_supported: ['none']
+  });
+});
+app.get('/.well-known/oauth-protected-resource', (req, res) => {
+  const issuer = oauthIssuer(req);
+  res.json({
+    resource: `${issuer}/mcp`,
+    authorization_servers: [issuer]
+  });
+});
+
+// Dynamic Client Registration (RFC 7591). Deliberately permissive (anyone
+// can register a client) - the security boundary isn't here, it's the
+// strict redirect_uri exact-match enforced at /oauth/authorize and
+// /oauth/token, which makes a registered client_id useless to an attacker
+// without also controlling one of the redirect_uris it registered.
+app.post('/oauth/register', oauthLimiter, async (req, res) => {
+  const redirectUris = Array.isArray(req.body?.redirect_uris) ? req.body.redirect_uris.map(String) : [];
+  if (!redirectUris.length) return res.status(400).json({ error: 'invalid_client_metadata', error_description: 'redirect_uris is required' });
+  for (const uri of redirectUris) {
+    try {
+      const parsed = new URL(uri);
+      if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && parsed.hostname === 'localhost')) {
+        return res.status(400).json({ error: 'invalid_redirect_uri', error_description: 'redirect_uris must be https (or http://localhost for local dev)' });
+      }
+    } catch (_error) {
+      return res.status(400).json({ error: 'invalid_redirect_uri' });
+    }
+  }
+  const clientId = `mcp_${crypto.randomBytes(16).toString('hex')}`;
+  const clientName = req.body?.client_name ? String(req.body.client_name).slice(0, 200) : null;
+  await prisma.oAuthClient.create({ data: { clientId, clientName, redirectUris } });
+  res.status(201).json({
+    client_id: clientId,
+    client_name: clientName,
+    redirect_uris: redirectUris,
+    token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code'],
+    response_types: ['code']
+  });
+});
+
+function renderOAuthConsentPage({ clientName, params }) {
+  const hiddenFields = Object.entries(params).map(([key, value]) => `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(value)}" />`).join('\n');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Authorize Claude - Support Kanban</title>
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:linear-gradient(135deg,#f8fafc,#e2e8f0);display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+    .card{background:#fff;padding:28px;border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.12);width:min(420px,92vw)}
+    h1{margin:0 0 8px;font-size:20px;color:#1e293b}
+    p{margin:0 0 20px;color:#64748b;font-size:13px;line-height:1.5}
+    .actions{display:flex;gap:10px}
+    button{flex:1;padding:10px;border:none;border-radius:8px;font-weight:700;cursor:pointer}
+    .allow{background:#4f46e5;color:#fff}
+    .deny{background:#f1f5f9;color:#334155}
+  </style>
+</head>
+<body>
+  <form class="card" method="POST" action="/oauth/authorize/confirm">
+    <h1>Authorize connector</h1>
+    <p><strong>${escapeHtml(clientName || 'A Claude connector')}</strong> wants access to your Support Kanban account - it will be able to see and update tickets exactly as you can in the board. Only continue if you started this from Claude.</p>
+    ${hiddenFields}
+    <div class="actions">
+      <button class="deny" type="submit" name="decision" value="deny">Deny</button>
+      <button class="allow" type="submit" name="decision" value="allow">Allow</button>
+    </div>
+  </form>
+</body>
+</html>`;
+}
+
+app.get('/oauth/authorize', oauthLimiter, async (req, res) => {
+  const { response_type, client_id, redirect_uri, state, code_challenge, code_challenge_method } = req.query;
+  if (response_type !== 'code') return res.status(400).send('unsupported_response_type');
+  if (!client_id || !redirect_uri || !code_challenge || code_challenge_method !== 'S256') {
+    return res.status(400).send('invalid_request');
+  }
+  const client = await prisma.oAuthClient.findUnique({ where: { clientId: String(client_id) } });
+  if (!client || !client.redirectUris.includes(String(redirect_uri))) {
+    return res.status(400).send('invalid_client_or_redirect_uri');
+  }
+  if (!isAuthed(req)) {
+    const next = `/oauth/authorize?${new URLSearchParams(req.query).toString()}`;
+    return res.redirect(`/login?next=${encodeURIComponent(next)}`);
+  }
+  res.type('html').send(renderOAuthConsentPage({
+    clientName: client.clientName,
+    params: { client_id: String(client_id), redirect_uri: String(redirect_uri), state: String(state || ''), code_challenge: String(code_challenge), code_challenge_method: 'S256' }
+  }));
+});
+
+app.post('/oauth/authorize/confirm', oauthLimiter, requireAuth, async (req, res) => {
+  try {
+    const { client_id, redirect_uri, state, code_challenge, code_challenge_method, decision } = req.body || {};
+    const client = await prisma.oAuthClient.findUnique({ where: { clientId: String(client_id || '') } });
+    if (!client || !client.redirectUris.includes(String(redirect_uri || ''))) {
+      return res.status(400).send('invalid_client_or_redirect_uri');
+    }
+    const redirectUrl = new URL(String(redirect_uri));
+    if (decision !== 'allow') {
+      redirectUrl.searchParams.set('error', 'access_denied');
+      if (state) redirectUrl.searchParams.set('state', String(state));
+      return res.redirect(redirectUrl.toString());
+    }
+    const rawCode = crypto.randomBytes(32).toString('hex');
+    await prisma.oAuthAuthCode.create({
+      data: {
+        codeHash: hashOAuthCode(rawCode),
+        clientId: client.id,
+        userId: req.session.userId,
+        redirectUri: String(redirect_uri),
+        codeChallenge: String(code_challenge),
+        codeChallengeMethod: String(code_challenge_method || 'S256'),
+        expiresAt: new Date(Date.now() + OAUTH_CODE_TTL_MS)
+      }
+    });
+    redirectUrl.searchParams.set('code', rawCode);
+    if (state) redirectUrl.searchParams.set('state', String(state));
+    res.redirect(redirectUrl.toString());
+  } catch (error) {
+    console.error('OAuth authorize confirm failed:', error.message || error);
+    res.status(400).send('invalid_request');
+  }
+});
+
+app.post('/oauth/token', oauthLimiter, async (req, res) => {
+ try {
+  const { grant_type, code, redirect_uri, client_id, code_verifier } = req.body || {};
+  if (grant_type !== 'authorization_code') return res.status(400).json({ error: 'unsupported_grant_type' });
+  if (!code || !redirect_uri || !client_id || !code_verifier) return res.status(400).json({ error: 'invalid_request' });
+
+  const client = await prisma.oAuthClient.findUnique({ where: { clientId: String(client_id) } });
+  if (!client) return res.status(400).json({ error: 'invalid_client' });
+
+  const codeHash = hashOAuthCode(code);
+  // Atomic single-use claim, same pattern as the Resolved-Teams-DM and
+  // token dedup elsewhere in this file - a single UPDATE ... WHERE usedAt
+  // IS NULL guard means a replayed/duplicated exchange can never succeed
+  // twice, no read-then-write race.
+  const claimed = await prisma.$executeRaw`UPDATE "OAuthAuthCode" SET "usedAt" = NOW() WHERE "codeHash" = ${codeHash} AND "usedAt" IS NULL`;
+  if (claimed <= 0) return res.status(400).json({ error: 'invalid_grant' });
+
+  const authCode = await prisma.oAuthAuthCode.findUnique({ where: { codeHash } });
+  if (!authCode || authCode.clientId !== client.id || authCode.redirectUri !== String(redirect_uri) || authCode.expiresAt.getTime() < Date.now()) {
+    return res.status(400).json({ error: 'invalid_grant' });
+  }
+  const expectedChallenge = base64url(crypto.createHash('sha256').update(String(code_verifier)).digest());
+  if (expectedChallenge !== authCode.codeChallenge) {
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'code_verifier mismatch' });
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: authCode.userId } });
+  if (!user || user.isActive === false) return res.status(400).json({ error: 'invalid_grant' });
+
+  const rawToken = `kb_${crypto.randomBytes(32).toString('base64url')}`;
+  await prisma.apiToken.create({ data: { userId: user.id, tokenHash: hashApiToken(rawToken), label: `OAuth (${client.clientName || client.clientId})` } });
+
+  res.json({ access_token: rawToken, token_type: 'Bearer' });
+ } catch (error) {
+  console.error('OAuth token exchange failed:', error.message || error);
+  res.status(400).json({ error: 'invalid_request' });
+ }
+});
+
+// In-process MCP protocol endpoint - the same Bearer token used above, but
+// speaking actual MCP (JSON-RPC over Streamable HTTP) so it can be added as
+// a Claude custom connector directly, with no separate service to deploy.
+const TICKET_STATUS_ENUM = ['New', 'In Progress', 'Waiting on Us', 'Due for Test', 'Waiting on Contact', 'Resolved'];
+let mcpSdkModules = null;
+async function loadMcpSdk() {
+  if (!mcpSdkModules) {
+    const [{ McpServer }, { StreamableHTTPServerTransport }, { z }] = await Promise.all([
+      import('@modelcontextprotocol/sdk/server/mcp.js'),
+      import('@modelcontextprotocol/sdk/server/streamableHttp.js'),
+      import('zod')
+    ]);
+    mcpSdkModules = { McpServer, StreamableHTTPServerTransport, z };
+  }
+  return mcpSdkModules;
+}
+function mcpTextResult(value) {
+  return { content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] };
+}
+function mcpErrorResult(error) {
+  return { content: [{ type: 'text', text: error?.message || String(error) }], isError: true };
+}
+function buildKanbanMcpServer(apiUser, { McpServer, z }) {
+  const server = new McpServer({ name: 'support-kanban', version: '1.0.0' });
+
+  server.registerTool(
+    'list_tickets',
+    {
+      title: 'List support tickets',
+      description: 'List/search tickets on the Support Kanban board. Filter by status, assignee, or a free-text search term. Each result has both a "ticketNumber" (e.g. "#0042" - the number agents actually use when they refer to a ticket, shown on the board) and an "internalId" (a database id, only useful as the ticketId argument to get_ticket/add_comment/update_ticket). Always report ticketNumber to the user, never internalId.',
+      inputSchema: {
+        status: z.enum(TICKET_STATUS_ENUM).optional(),
+        assignee: z.string().optional().describe('Agent trigram, e.g. MBH'),
+        q: z.string().optional().describe('Free-text search over subject, company name, and sender email'),
+        limit: z.number().int().min(1).max(200).optional()
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpListTickets(args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'get_ticket',
+    {
+      title: 'Get ticket detail',
+      description: 'Get full detail for one ticket, including its comments. Report the returned "ticketNumber" (e.g. "#0042") to the user, not "internalId".',
+      inputSchema: { ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.') }
+    },
+    async ({ ticketId }) => {
+      try { return mcpTextResult(await mcpGetTicket(ticketId)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'add_comment',
+    {
+      title: 'Add a comment to a ticket',
+      description: 'Add an internal comment to a ticket.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.'),
+        text: z.string().min(1)
+      }
+    },
+    async ({ ticketId, text }) => {
+      try { return mcpTextResult(await mcpAddComment(apiUser, ticketId, text)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'update_ticket',
+    {
+      title: 'Update a ticket',
+      description: 'Move a ticket to a new stage, (re)assign it, or change its priority. Only send the fields you want to change.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.'),
+        status: z.enum(TICKET_STATUS_ENUM).optional(),
+        assignedAgent: z.string().optional().describe('Agent trigram to assign, or empty string to unassign'),
+        csAgent: z.string().optional().describe('CS owner trigram, or empty string to clear'),
+        priority: z.enum(['Low', 'Normal', 'High', 'Urgent']).optional()
+      }
+    },
+    async ({ ticketId, ...fields }) => {
+      try { return mcpTextResult(await mcpUpdateTicket(apiUser, ticketId, fields)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  return server;
+}
+async function handleMcpRequest(req, res) {
+  try {
+    const sdk = await loadMcpSdk();
+    const server = buildKanbanMcpServer(req.apiUser, sdk);
+    const transport = new sdk.StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on('close', () => { transport.close(); server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error('MCP request failed:', error);
+    if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null });
+  }
+}
+app.post('/mcp', requireApiToken, mcpApiLimiter, handleMcpRequest);
+// Same endpoint, different path - kept distinct from /mcp because Claude's
+// connector UI deduplicates custom connectors by URL. The org already has a
+// "Quinta Support Kanban" connector registered at /mcp configured for OAuth
+// (which this app doesn't implement), so any plugin pointing back at that
+// same URL inherits that broken OAuth requirement instead of using its own
+// Bearer-token header. This path lets the personal-token plugin connect
+// without colliding with that org-level registration.
+app.post('/mcp-plugin', requireApiToken, mcpApiLimiter, handleMcpRequest);
+
+// ---------------------------------------------------------------------------
+// Live sync (SSE)
+//
+// Before this, loadState() ran exactly once at boot and nothing ever re-read
+// server state, so every open tab held its own drifting copy of the board:
+// an agent's move was invisible to everyone else until they refreshed, and a
+// lagging tab's next full-snapshot save would silently revert it.
+//
+// Rather than rewrite every mutation into a granular endpoint at once, the
+// server diffs consecutive board snapshots on save and pushes just the
+// changed ticket fields. Clients apply those patches into the same keyed maps
+// they already render from, so the board updates in place.
+//
+// Single-instance only: SSE_CLIENTS is per-process. If this ever runs with
+// more than one replica, sseBroadcast() needs to fan out through Postgres
+// LISTEN/NOTIFY so clients on other replicas still get patches.
+// ---------------------------------------------------------------------------
+const SSE_CLIENTS = new Set();
+const SSE_BUFFER = [];
+const SSE_BUFFER_MAX = 500;
+// Above this many changed fields in one save, patching costs more than a
+// reload - tell clients to re-pull instead of shipping a huge frame.
+const SSE_PATCH_MAX = 400;
+let sseRev = 0;
+
+// Per-ticket keyed maps that clients render from. Anything not listed here is
+// session-local (caches, read-receipts) and deliberately not broadcast.
+const LIVE_SYNC_FIELDS = [
+  'ticketState', 'ticketStageTouchedAt', 'ticketAssignee', 'ticketCSOwner',
+  'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride',
+  'ticketPriority', 'ticketCategory', 'ticketSubtype', 'ticketJira',
+  'ticketHubspotId', 'ticketArchived', 'ticketResolutionMeta',
+  'ticketHasNewReply', 'ticketNumbers', 'ticketComments', 'ticketCreatedBy'
+];
+
+function sseFrame(rev, type, data) {
+  return `id: ${rev}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function sseBroadcast(type, data) {
+  sseRev += 1;
+  const rev = sseRev;
+  SSE_BUFFER.push({ rev, type, data });
+  if (SSE_BUFFER.length > SSE_BUFFER_MAX) SSE_BUFFER.splice(0, SSE_BUFFER.length - SSE_BUFFER_MAX);
+  const frame = sseFrame(rev, type, data);
+  SSE_CLIENTS.forEach((client) => {
+    try { client.write(frame); } catch (_) { SSE_CLIENTS.delete(client); }
+  });
+  return rev;
+}
+
+function diffBoardMaps(before, after) {
+  const changes = [];
+  for (const field of LIVE_SYNC_FIELDS) {
+    const prev = (before && typeof before[field] === 'object' && before[field]) || {};
+    const next = (after && typeof after[field] === 'object' && after[field]) || {};
+    for (const id of new Set([...Object.keys(prev), ...Object.keys(next)])) {
+      // JSON compare so object-valued maps (ticketResolutionMeta, comment
+      // arrays) diff by content rather than by reference.
+      if (JSON.stringify(prev[id]) === JSON.stringify(next[id])) continue;
+      changes.push({ id, field, value: next[id] === undefined ? null : next[id] });
+      if (changes.length > SSE_PATCH_MAX) return { changes, overflow: true };
+    }
+  }
+  return { changes, overflow: false };
+}
+
+function diffBoardTickets(before, after) {
+  const prevIds = new Set((Array.isArray(before?.allTickets) ? before.allTickets : []).map(t => String(t?.id || '')));
+  const nextList = Array.isArray(after?.allTickets) ? after.allTickets : [];
+  const nextIds = new Set(nextList.map(t => String(t?.id || '')));
+  return {
+    added: nextList.filter(t => t && t.id && !prevIds.has(String(t.id))),
+    removed: [...prevIds].filter(id => id && !nextIds.has(id))
+  };
+}
+
+app.get('/api/events', requireAuth, (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    // Stops nginx/ingress from buffering the stream into uselessness.
+    'X-Accel-Buffering': 'no'
+  });
+  res.write('retry: 3000\n\n');
+
+  // Replay anything the client missed while disconnected. EventSource sends
+  // Last-Event-ID automatically on reconnect, so a dropped connection
+  // resumes instead of silently losing patches.
+  const lastEventId = Number(req.headers['last-event-id'] || req.query.lastEventId || 0);
+  if (Number.isFinite(lastEventId) && lastEventId > 0) {
+    const missed = SSE_BUFFER.filter(e => e.rev > lastEventId);
+    // Gap wider than the buffer - can't prove we're complete, so make the
+    // client re-pull rather than hand it a partial history.
+    if (missed.length && missed[0].rev > lastEventId + 1) {
+      res.write(sseFrame(sseRev, 'board_reload', { reason: 'replay_gap' }));
+    } else {
+      missed.forEach(e => res.write(sseFrame(e.rev, e.type, e.data)));
+    }
+  }
+
+  res.write(sseFrame(sseRev, 'hello', { rev: sseRev, actor: String(req.session.username || '').toUpperCase() }));
+  SSE_CLIENTS.add(res);
+
+  const keepAlive = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch (_) {}
+  }, 25000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    SSE_CLIENTS.delete(res);
+    try { res.end(); } catch (_) {}
+  });
+});
+
 app.get('/api/state', requireAuth, async (req, res) => {
   try {
     const state = await hydrateStateFromDatabase(safeReadState());
-    res.json(state);
+    res.json({ ...state, _liveRev: sseRev });
   } catch (error) {
     console.error('State hydrate failed:', error);
-    res.json(safeReadState());
+    res.json({ ...safeReadState(), _liveRev: sseRev });
   }
 });
 app.post('/api/state', requireAuth, async (req, res) => {
   const state = req.body || {};
+  // Snapshot before the write so we can broadcast just what actually changed.
+  const beforeState = safeReadState();
   const result = await safeWriteState(state);
   let ticketDb = { count: 0 };
   try {
@@ -3198,7 +4528,30 @@ app.post('/api/state', requireAuth, async (req, res) => {
     }).catch(() => null);
   }
   const { state: _fullState, ...resultSummary } = result;
-  res.json({ ok: !!result.saved, ...resultSummary, ticketDb });
+
+  // Push the delta to every other open board. Note this reflects the MERGED
+  // post-write state, not the raw payload - so a stale tab's rejected fields
+  // broadcast as the value that actually won, which self-heals that tab.
+  let liveRev = sseRev;
+  try {
+    const afterState = result.state || safeReadState();
+    const { changes, overflow } = diffBoardMaps(beforeState, afterState);
+    const { added, removed } = diffBoardTickets(beforeState, afterState);
+    const actor = String(req.session.username || '').toUpperCase() || null;
+    // origin lets the sending tab ignore its own echo, so a patch in flight
+    // can't roll back an edit the user made in the meantime.
+    const origin = String(state?._meta?.clientId || '') || null;
+    if (overflow) {
+      liveRev = sseBroadcast('board_reload', { reason: 'patch_overflow', actor });
+    } else if (changes.length || added.length || removed.length) {
+      liveRev = sseBroadcast('board_patch', { actor, origin, changes, added, removed });
+    }
+  } catch (error) {
+    // A broadcast failure must never fail the save that already succeeded.
+    console.error('Live sync broadcast failed:', error?.message || error);
+  }
+
+  res.json({ ok: !!result.saved, ...resultSummary, ticketDb, liveRev });
 });
 
 app.post('/api/hubspot/companies/:companyId/custom-property', requireAuth, async (req, res) => {
@@ -3721,6 +5074,54 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
   } catch (err) {
     return res.status(500).json({ isError: true, error: String(err.message || err) });
   }
+});
+
+app.post('/api/qt-seize/outpaint', requireAuth, async (req, res) => {
+  const imageDataUrl = String(req.body?.imageDataUrl || '');
+  const maskDataUrl = String(req.body?.maskDataUrl || '');
+  const prompt = String(req.body?.prompt || '').trim();
+
+  if (!imageDataUrl || !maskDataUrl) {
+    return res.status(400).json({ error: 'missing_image_or_mask' });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(503).json({ error: 'missing_openai_api_key' });
+  }
+
+  const workerPath = path.join(__dirname, 'scripts', 'qt_seize_outpaint.py');
+  const pythonCmd = process.env.PYTHON || process.env.PYTHON_BIN || 'python';
+  const child = spawn(pythonCmd, [workerPath], {
+    cwd: __dirname,
+    env: process.env,
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  const timeout = setTimeout(() => child.kill('SIGTERM'), 120000);
+  let stdout = '';
+  let stderr = '';
+
+  child.stdout.on('data', chunk => { stdout += chunk.toString('utf8'); });
+  child.stderr.on('data', chunk => { stderr += chunk.toString('utf8'); });
+  child.stdin.end(JSON.stringify({ imageDataUrl, maskDataUrl, prompt }));
+
+  child.on('error', error => {
+    clearTimeout(timeout);
+    return res.status(500).json({ error: 'python_worker_failed', detail: String(error.message || error) });
+  });
+
+  child.on('close', code => {
+    clearTimeout(timeout);
+    if (code !== 0) {
+      return res.status(500).json({ error: 'outpaint_failed', detail: stderr.slice(0, 1200) || stdout.slice(0, 1200) });
+    }
+    try {
+      const payload = JSON.parse(stdout);
+      if (!payload?.imageDataUrl) return res.status(500).json({ error: 'missing_ai_image' });
+      return res.json(payload);
+    } catch (error) {
+      return res.status(500).json({ error: 'invalid_worker_response', detail: String(error.message || error) });
+    }
+  });
 });
 
 app.get(['/qt-seize', '/qt-seize/'], requireAuth, (req, res) => {

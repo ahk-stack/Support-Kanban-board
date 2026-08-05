@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: support-kanban-mcp
+  namespace: support-kanban
+  labels:
+    app: support-kanban-mcp
+data:
+  PORT: '3100'
+  # In-cluster ClusterIP service for the main app, not the public host -
+  # this traffic never needs to leave the cluster or go through TLS/ingress.
+  KANBAN_API_BASE: http://support-kanban

@@ -17,8 +17,79 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  comments     TicketComment[]
-  events       TicketEvent[]
+  comments      TicketComment[]
+  events        TicketEvent[]
+  apiTokens     ApiToken[]
+  oauthAuthCodes OAuthAuthCode[]
+  templatesCreated    Template[] @relation("TemplateCreatedBy")
+  templatesLastEdited Template[] @relation("TemplateLastEditedBy")
+}
+
+// Shared, team-wide message templates (CS/support use these to draft ticket
+// descriptions/comments with fill-in-the-blank [bracketed] placeholders,
+// parsed client-side). Not per-user - anyone on the team can edit/delete any
+// template, same trust model as the shared ticket board itself.
+model Template {
+  id                 Int      @id @default(autoincrement())
+  name               String
+  body               String
+  createdByUserId    Int?
+  lastEditedByUserId Int?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  createdBy    User? @relation("TemplateCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  lastEditedBy User? @relation("TemplateLastEditedBy", fields: [lastEditedByUserId], references: [id], onDelete: SetNull)
+}
+
+model ApiToken {
+  id         Int       @id @default(autoincrement())
+  userId     Int
+  tokenHash  String    @unique
+  label      String?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Dynamically registered per RFC 7591 - each Claude connector instance
+// (personal or org-wide) self-registers once and gets its own clientId,
+// bound to the exact redirectUris it registered with. authorize/token both
+// strictly enforce that binding, so a registered client can never be used
+// to redirect anywhere except where it originally declared.
+model OAuthClient {
+  id           Int      @id @default(autoincrement())
+  clientId     String   @unique
+  clientName   String?
+  redirectUris String[]
+  createdAt    DateTime @default(now())
+
+  authCodes    OAuthAuthCode[]
+}
+
+// Short-lived, single-use authorization code (PKCE, S256 only). Hashed at
+// rest like ApiToken/password-reset tokens - the raw code only ever exists
+// in the redirect URL and the immediate token-exchange request.
+model OAuthAuthCode {
+  id                  Int       @id @default(autoincrement())
+  codeHash            String    @unique
+  clientId            Int
+  userId              Int
+  redirectUri          String
+  codeChallenge        String
+  codeChallengeMethod  String
+  expiresAt            DateTime
+  usedAt               DateTime?
+  createdAt            DateTime  @default(now())
+
+  client               OAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user                 User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Ticket {
@@ -32,6 +103,7 @@ model Ticket {
   priority        String    @default("Normal")
   category        String?
   assignedAgent   String?
+  csAgent         String?
   source          String    @default("email")
   emailMessageId  String?
   hubspotTicketId String?
@@ -41,12 +113,20 @@ model Ticket {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   resolvedAt      DateTime?
+  resolvedTeamsNotifiedAt DateTime?
+  // The short "#0042"-style number agents actually use to refer to a
+  // ticket - durable (Postgres-assigned via its own sequence, backfilled
+  // for existing rows), unlike the old client-only ephemeral counter this
+  // replaces. Not the @id - that stays the internal DB primary key.
+  displayNumber   Int?      @unique
 
   comments        TicketComment[]
   events          TicketEvent[]
 
   @@index([senderEmail])
   @@index([status])
+  @@index([assignedAgent])
+  @@index([csAgent])
   @@index([createdAt])
 }
 
@@ -56,6 +136,7 @@ model TicketComment {
   userId     Int?
   comment    String
   isInternal Boolean  @default(true)
+  tags       String[] @default([])
   createdAt  DateTime @default(now())
 
   ticket     Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)

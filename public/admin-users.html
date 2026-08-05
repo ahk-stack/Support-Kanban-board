@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
+  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
   <title>Manage Users</title>
   <style>
     :root { color-scheme: light; color: #0f172a; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
@@ -146,7 +148,12 @@
     }
 
     function roleOptionsHtml(includeOwner = true) {
-      return `${includeOwner ? '<option value="owner">Owner</option>' : ''}<option value="admin">Admin</option><option value="agent">Agent</option><option value="viewer">Viewer</option>`;
+      return `${includeOwner ? '<option value="owner">Owner</option>' : ''}<option value="admin">Admin</option><option value="cs">CS</option><option value="support">Support</option>`;
+    }
+
+    function roleLabel(role) {
+      const labels = { owner: 'Owner', admin: 'Admin', cs: 'CS', support: 'Support', agent: 'Support', viewer: 'Support' };
+      return labels[role] || role || 'Support';
     }
 
     function renderUsers() {
@@ -187,7 +194,7 @@
         name.textContent = user.displayName || user.username;
         const role = document.createElement('span');
         role.className = 'role';
-        role.textContent = user.role === 'owner' ? 'Owner' : user.role;
+        role.textContent = roleLabel(user.role);
         if (user.role === 'owner') {
           role.style.background = '#fef3c7';
           role.style.color = '#92400e';
@@ -216,7 +223,7 @@
         <div class="panel-header">
           <div>
             <h2>Create new user</h2>
-            <p>Add a new agent, admin, or viewer account.</p>
+            <p>Add a new CS, Support, or admin account.</p>
           </div>
         </div>
         <div class="form-grid">

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Quinta Q logo">
+  <rect width="256" height="256" fill="#ffffff"/>
+  <circle cx="128" cy="128" r="119" fill="none" stroke="#000000" stroke-width="4"/>
+  <circle cx="128" cy="128" r="96" fill="none" stroke="#000000" stroke-width="11"/>
+  <circle cx="127" cy="129" r="51" fill="#000000"/>
+  <circle cx="127" cy="129" r="29" fill="#ffffff"/>
+  <path fill="#000000" d="M124 151c7 21 24 40 51 45 8 1 16 0 24-3l-14-23c-11 8-22 9-32 2-8-5-13-13-16-24l-13 3Z"/>
+</svg>

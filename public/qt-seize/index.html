@@ -3,496 +3,1153 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
   <title>QT Seize</title>
   <style>
     :root {
-      --bg: #f8fafc;
-      --card: #ffffff;
-      --ink: #0f172a;
-      --muted: #64748b;
-      --border: #d7d7d7;
-      --primary: #2563eb;
-      --primary-dark: #1d4ed8;
-      --soft: #eef4ff;
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --ink: #111827;
+      --muted: #667085;
+      --border: #d9dde5;
+      --accent: #0f766e;
+      --accent-dark: #0b5f59;
+      --accent-soft: #e9fbf6;
+      --blue: #2563eb;
+      --blue-soft: #eff6ff;
+      --danger: #b42318;
     }
-
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: Inter, "Segoe UI", Arial, sans-serif;
+      min-height: 100vh;
       background: var(--bg);
       color: var(--ink);
+      font-family: Inter, "Segoe UI", Arial, sans-serif;
     }
-
-    .qt-app {
-      padding: 18px;
+    .app {
       min-height: 100vh;
-    }
-
-    .qt-grid {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 330px;
-      gap: 14px;
-      align-items: start;
+      grid-template-rows: auto 1fr;
     }
-
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      box-shadow: 0 1px 0 rgba(16, 24, 40, .03);
+    }
+    h1 { margin: 0; font-size: 22px; letter-spacing: 0; }
+    .status { color: var(--muted); font-size: 13px; text-align: right; }
+    main {
+      display: grid;
+      grid-template-columns: 360px minmax(0, 1fr);
+      gap: 18px;
+      padding: 18px;
+      min-height: 0;
+    }
     .panel {
-      background: var(--card);
+      background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 10px;
-      box-shadow: 0 6px 16px rgba(0,0,0,.06);
+      border-radius: 8px;
+      box-shadow: 0 10px 28px rgba(16, 24, 40, .06);
     }
-
-    .drop-zone {
-      min-height: 250px;
+    .controls {
+      padding: 18px;
+      display: grid;
+      gap: 15px;
+      align-content: start;
+    }
+    .drop {
+      min-height: 160px;
+      border: 1px dashed #aeb8c8;
+      border-radius: 8px;
       display: grid;
       place-items: center;
-      padding: 32px;
-      border: 2px dashed #b8c4d8;
-      background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
-      cursor: pointer;
+      padding: 22px;
       text-align: center;
+      cursor: pointer;
+      background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+      transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease, background .16s ease;
     }
-
-    .drop-zone.dragging {
-      border-color: var(--primary);
-      background: var(--soft);
-    }
-
-    .drop-icon {
-      width: 52px;
-      height: 52px;
-      margin: 0 auto 14px;
-      border-radius: 14px;
-      display: grid;
-      place-items: center;
-      background: #e0ecff;
-      color: var(--primary);
-      font-size: 28px;
-      font-weight: 900;
-    }
-
-    h1, h2, p { margin: 0; }
-    h1 {
-      font-family: Caladea, Georgia, serif;
-      font-size: 28px;
-      font-weight: 700;
-    }
-
-    .hint {
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .settings {
-      padding: 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    .settings h2 {
-      font-family: Caladea, Georgia, serif;
-      font-size: 22px;
-      margin-bottom: 2px;
-    }
-
-    label {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      font-size: 12px;
-      color: var(--muted);
-      font-weight: 700;
-    }
-
-    input, select {
+    .drop:hover { border-color: #7f8da3; box-shadow: 0 8px 18px rgba(16, 24, 40, .08); }
+    .drop.dragging { border-color: var(--accent); background: #ecfdf9; transform: translateY(-1px); }
+    .drop strong { display: block; font-size: 17px; margin-bottom: 8px; }
+    .drop span, .note { color: var(--muted); font-size: 13px; line-height: 1.45; }
+    textarea, select, input[type="number"] {
       width: 100%;
-      border: 1px solid #cbd5e1;
+      resize: vertical;
+      border: 1px solid var(--border);
       border-radius: 8px;
       padding: 10px 11px;
-      color: var(--ink);
-      background: #ffffff;
       font: inherit;
-    }
-
-    input[type="checkbox"] {
-      width: auto;
-    }
-
-    input[type="range"] {
-      padding-left: 0;
-      padding-right: 0;
-    }
-
-    .row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
-
-    .check-row {
-      flex-direction: row;
-      align-items: center;
-      justify-content: space-between;
-      border: 1px solid #e2e8f0;
-      border-radius: 8px;
-      padding: 9px 10px;
       color: var(--ink);
-      background: #f8fafc;
+      background: #fff;
+      outline: none;
+      transition: border-color .15s ease, box-shadow .15s ease;
     }
-
-    .btn {
-      border: none;
-      border-radius: 10px;
-      padding: 12px 14px;
-      background: var(--primary);
-      color: #ffffff;
+    textarea:focus, select:focus, input[type="number"]:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, .12);
+    }
+    textarea { min-height: 74px; }
+    select, input[type="number"] { min-height: 42px; resize: none; }
+    label {
+      display: grid;
+      gap: 7px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #475467;
+    }
+    .field-label {
+      display: grid;
+      gap: 7px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #475467;
+    }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .mode-option {
+      position: relative;
+      display: grid;
+      gap: 4px;
+      min-height: 82px;
+      padding: 11px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+      transition: border-color .16s ease, box-shadow .16s ease, background .16s ease, transform .16s ease;
+    }
+    .mode-option:hover { transform: translateY(-1px); border-color: #b5becb; }
+    .mode-option input { position: absolute; opacity: 0; pointer-events: none; }
+    .mode-option strong { font-size: 13px; color: var(--ink); display: flex; align-items: center; gap: 7px; }
+    .mode-option span { font-size: 12px; line-height: 1.35; color: var(--muted); font-weight: 500; }
+    .mode-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 99px;
+      background: #cbd5e1;
+      box-shadow: 0 0 0 4px #f1f5f9;
+    }
+    .mode-option:has(input:checked) {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, .12);
+      background: var(--accent-soft);
+    }
+    .mode-option:has(input:checked) .mode-dot { background: var(--accent); box-shadow: 0 0 0 4px rgba(15, 118, 110, .14); }
+    .custom-resolution { display: none; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .custom-resolution.open { display: grid; }
+    button {
+      border: 1px solid transparent;
+      border-radius: 8px;
+      min-height: 42px;
+      padding: 10px 12px;
+      font: inherit;
       font-weight: 800;
       cursor: pointer;
+      transition: transform .14s ease, box-shadow .14s ease, background .14s ease, border-color .14s ease;
     }
-
-    .btn:hover { background: var(--primary-dark); }
-    .btn:disabled { opacity: .55; cursor: not-allowed; }
-
-    .btn-secondary {
-      background: #f1f5f9;
-      color: #334155;
-      border: 1px solid #cbd5e1;
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    button:not(:disabled):active { transform: translateY(1px); }
+    .primary { background: var(--accent); color: #fff; box-shadow: 0 10px 18px rgba(15, 118, 110, .18); }
+    .primary:hover:not(:disabled) { background: var(--accent-dark); }
+    .secondary { background: #fff; border-color: var(--border); color: #344054; }
+    .secondary:hover:not(:disabled) { border-color: #aeb8c8; box-shadow: 0 8px 16px rgba(16, 24, 40, .06); }
+    .stage {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto auto;
+      overflow: hidden;
     }
-
-    .btn-secondary:hover { background: #e2e8f0; }
-
-    .toolbar {
-      display: flex;
+    .preview {
+      min-height: 360px;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      background-color: #f8fafc;
+      background-image:
+        linear-gradient(45deg, #eef1f5 25%, transparent 25%),
+        linear-gradient(-45deg, #eef1f5 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #eef1f5 75%),
+        linear-gradient(-45deg, transparent 75%, #eef1f5 75%);
+      background-size: 26px 26px;
+      background-position: 0 0, 0 13px, 13px -13px, -13px 0;
+    }
+    .preview img {
+      width: min(100%, 1100px);
+      max-height: 56vh;
+      object-fit: contain;
+      background: #101828;
+      border-radius: 8px;
+      box-shadow: 0 18px 42px rgba(16, 24, 40, .20);
+    }
+    .empty {
+      width: min(100%, 780px);
+      aspect-ratio: 16 / 9;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      background: rgba(255,255,255,.74);
+      text-align: center;
+      padding: 20px;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.6);
+    }
+    /* Queue / batch list */
+    .queue {
+      border-top: 1px solid var(--border);
+      background: #fff;
+      max-height: 210px;
+      overflow: auto;
+      padding: 10px 12px;
+      display: grid;
       gap: 8px;
+    }
+    .queue:empty { display: none; }
+    .q-item {
+      display: grid;
+      grid-template-columns: 52px 1fr auto;
+      align-items: center;
+      gap: 11px;
+      padding: 7px 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+    }
+    .q-item.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(15,118,110,.12); }
+    .q-thumb {
+      width: 52px; height: 40px;
+      object-fit: cover;
+      border-radius: 5px;
+      background: #101828;
+      border: 1px solid var(--border);
+    }
+    .q-info { min-width: 0; }
+    .q-name { font-size: 12.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .q-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+    .q-badge { font-size: 11px; font-weight: 800; padding: 3px 8px; border-radius: 99px; white-space: nowrap; }
+    .q-badge.pending { background: #f1f5f9; color: #64748b; }
+    .q-badge.working { background: var(--blue-soft); color: #1e40af; }
+    .q-badge.done { background: var(--accent-soft); color: var(--accent-dark); }
+    .q-badge.error { background: #fee4e2; color: var(--danger); }
+    .q-remove {
+      border: none; background: transparent; color: var(--muted);
+      font-size: 16px; line-height: 1; min-height: 0; padding: 4px 6px; font-weight: 900;
+    }
+    .q-remove:hover { color: var(--danger); }
+    .meta {
+      display: flex;
       align-items: center;
       justify-content: space-between;
-      margin: 14px 0 10px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .image-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
       gap: 12px;
-    }
-
-    .image-card {
-      overflow: hidden;
-    }
-
-    .thumb {
-      aspect-ratio: 16 / 10;
-      background: #e2e8f0;
-      overflow: hidden;
-    }
-
-    .thumb img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
-
-    .image-meta {
-      padding: 10px;
-      display: grid;
-      gap: 6px;
-      font-size: 12px;
-    }
-
-    .image-name {
-      font-weight: 800;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .meta-line {
-      display: flex;
-      justify-content: space-between;
-      color: var(--muted);
-      gap: 8px;
-    }
-
-    .empty {
-      padding: 18px;
+      padding: 12px 14px;
+      border-top: 1px solid var(--border);
       color: var(--muted);
       font-size: 13px;
-      text-align: center;
+      background: #fff;
     }
-
+    .error { color: var(--danger); }
     @media (max-width: 900px) {
-      .qt-grid { grid-template-columns: 1fr; }
+      header, main { padding: 14px; }
+      main { grid-template-columns: 1fr; }
+      .status { text-align: left; }
+      header { align-items: flex-start; flex-direction: column; }
+      .preview img { max-height: 44vh; }
     }
   </style>
 </head>
 <body>
-  <div class="qt-app">
-    <div class="qt-grid">
-      <section>
-        <div class="panel drop-zone" id="dropZone">
-          <input id="fileInput" type="file" accept="image/*" multiple hidden />
+  <div class="app">
+    <header>
+      <h1>QT Seize</h1>
+      <div class="status" id="status">Expand or resize one or many images to a chosen size.</div>
+    </header>
+    <main>
+      <section class="panel controls">
+        <div class="drop" id="drop">
+          <input id="file" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
           <div>
-            <div class="drop-icon">+</div>
-            <h1>Drop your images here</h1>
-            <p class="hint">Click or drag images to prepare resized exports.</p>
+            <strong>Drop one or more images</strong>
+            <span>PNG, JPG, or WebP. Add several to batch-process them with the same settings.</span>
           </div>
         </div>
-
-        <div class="toolbar">
-          <span id="imageCount">No images selected</span>
-          <button class="btn btn-secondary" id="clearBtn" type="button">Clear</button>
+        <div class="field-label">Output mode
+          <div class="mode-grid">
+            <label class="mode-option">
+              <input type="radio" name="output-mode" value="expand" checked />
+              <strong><span class="mode-dot"></span>Expand</strong>
+              <span>Fill the selected frame from the same photo.</span>
+            </label>
+            <label class="mode-option">
+              <input type="radio" name="output-mode" value="resize" />
+              <strong><span class="mode-dot"></span>Resize</strong>
+              <span>Fit the original image into the selected size.</span>
+            </label>
+          </div>
         </div>
-        <div class="image-grid" id="imageGrid">
-          <div class="panel empty">Uploaded images will appear here.</div>
-        </div>
-      </section>
-
-      <aside class="panel settings">
-        <h2>Resize Settings</h2>
-        <div class="row">
+        <label>Resolution
+          <select id="resolution">
+            <option value="1920x1080">Full HD - 1920 x 1080</option>
+            <option value="2560x1440">QHD - 2560 x 1440</option>
+            <option value="3840x2160">4K UHD - 3840 x 2160</option>
+            <option value="1280x720">HD - 1280 x 720</option>
+            <option value="1080x1080">Square - 1080 x 1080</option>
+            <option value="1080x1920">Story - 1080 x 1920</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+        <div class="custom-resolution" id="custom-resolution">
           <label>Width
-            <input id="widthInput" type="number" min="1" value="1920" />
+            <input id="custom-width" type="number" min="256" max="7680" step="1" value="1920" />
           </label>
           <label>Height
-            <input id="heightInput" type="number" min="1" value="1080" />
+            <input id="custom-height" type="number" min="256" max="7680" step="1" value="1080" />
           </label>
         </div>
-        <label>Fit
-          <select id="fitInput">
-            <option value="cover">Cover</option>
-            <option value="contain">Contain</option>
-            <option value="stretch">Stretch</option>
-          </select>
-        </label>
-        <label>Format
-          <select id="formatInput">
-            <option value="image/jpeg">jpeg</option>
-            <option value="image/png">png</option>
-            <option value="image/webp">webp</option>
-          </select>
-        </label>
-        <label>Quality <span id="qualityLabel">100%</span>
-          <input id="qualityInput" type="range" min="50" max="100" value="100" />
-        </label>
-        <label class="check-row">
-          Smart Sharpen
-          <input id="sharpenInput" type="checkbox" checked />
-        </label>
-        <button class="btn" id="resizeBtn" type="button">Resize Images</button>
-      </aside>
-    </div>
+        <div class="actions">
+          <button class="primary" id="generate" type="button" disabled>Generate</button>
+          <button class="secondary" id="download" type="button" disabled>Download</button>
+        </div>
+        <button class="secondary" id="reset" type="button">Clear all</button>
+        <div class="note" id="details">Expand fills the frame from the photo. Resize fits the original into the selected size. Download asks where to save.</div>
+      </section>
+      <section class="panel stage">
+        <div class="preview" id="preview"><div class="empty">Upload one or more images to start.</div></div>
+        <div class="queue" id="queue"></div>
+        <div class="meta"><span id="sourceMeta">No images selected</span><span id="outputMeta">1920 x 1080 PNG</span></div>
+      </section>
+    </main>
   </div>
-
   <script>
-    const state = { images: [] };
-    const dropZone = document.getElementById('dropZone');
-    const fileInput = document.getElementById('fileInput');
-    const imageGrid = document.getElementById('imageGrid');
-    const imageCount = document.getElementById('imageCount');
-    const qualityInput = document.getElementById('qualityInput');
-    const qualityLabel = document.getElementById('qualityLabel');
+    // Each queue entry: { id, file, name, sourceUrl, w, h, resultUrl, status }
+    const state = { items: [], activeId: null, seq: 0 };
 
-    function formatBytes(bytes) {
-      if (!bytes) return '0 KB';
-      const units = ['B', 'KB', 'MB', 'GB'];
-      const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-      return `${(bytes / Math.pow(1024, index)).toFixed(index ? 2 : 0)} ${units[index]}`;
+    const fileInput = document.getElementById('file');
+    const drop = document.getElementById('drop');
+    const preview = document.getElementById('preview');
+    const queueEl = document.getElementById('queue');
+    const statusEl = document.getElementById('status');
+    const sourceMeta = document.getElementById('sourceMeta');
+    const outputMeta = document.getElementById('outputMeta');
+    const generateBtn = document.getElementById('generate');
+    const downloadBtn = document.getElementById('download');
+    const resolutionSelect = document.getElementById('resolution');
+    const customResolution = document.getElementById('custom-resolution');
+    const customWidth = document.getElementById('custom-width');
+    const customHeight = document.getElementById('custom-height');
+    const outputModeInputs = [...document.querySelectorAll('input[name="output-mode"]')];
+
+    function getOutputMode() {
+      return outputModeInputs.find(input => input.checked)?.value || 'expand';
     }
 
-    function esc(value) {
-      return String(value ?? '').replace(/[&<>"']/g, ch => ({
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;'
-      })[ch]);
+    function setStatus(text, isError) {
+      statusEl.textContent = text;
+      statusEl.classList.toggle('error', !!isError);
     }
 
-    function loadImage(file) {
+    function loadImageFromUrl(url) {
       return new Promise((resolve, reject) => {
-        const url = URL.createObjectURL(file);
         const img = new Image();
-        img.onload = () => resolve({ file, url, width: img.naturalWidth, height: img.naturalHeight });
-        img.onerror = () => {
-          URL.revokeObjectURL(url);
-          reject(new Error(`Could not load ${file.name}`));
-        };
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('Could not load image.'));
         img.src = url;
       });
     }
 
-    async function addFiles(files) {
-      const imageFiles = [...files].filter(file => file.type.startsWith('image/'));
-      const loaded = await Promise.all(imageFiles.map(loadImage));
-      state.images.push(...loaded.map(item => ({ id: crypto.randomUUID(), ...item })));
-      renderImages();
+    function canvasToDataUrl(canvas) {
+      return canvas.toDataURL('image/png');
     }
 
-    function renderImages() {
-      imageCount.textContent = state.images.length
-        ? `${state.images.length} image${state.images.length === 1 ? '' : 's'} ready`
-        : 'No images selected';
-      if (!state.images.length) {
-        imageGrid.innerHTML = '<div class="panel empty">Uploaded images will appear here.</div>';
-        return;
-      }
-      imageGrid.innerHTML = '';
-      state.images.forEach(image => {
-        const card = document.createElement('div');
-        card.className = 'panel image-card';
-        const name = esc(image.file.name);
-        card.innerHTML = `
-          <div class="thumb"><img src="${image.url}" alt=""></div>
-          <div class="image-meta">
-            <div class="image-name" title="${name}">${name}</div>
-            <div class="meta-line"><span>Resolution</span><strong>${image.width} x ${image.height}</strong></div>
-            <div class="meta-line"><span>Size</span><strong>${formatBytes(image.file.size)}</strong></div>
-            <button class="btn btn-secondary" type="button" data-remove="${image.id}">Remove</button>
-          </div>
-        `;
-        card.querySelector('[data-remove]').addEventListener('click', () => removeImage(image.id));
-        imageGrid.appendChild(card);
-      });
-    }
-
-    function removeImage(id) {
-      const image = state.images.find(item => item.id === id);
-      if (image) URL.revokeObjectURL(image.url);
-      state.images = state.images.filter(item => item.id !== id);
-      renderImages();
-    }
-
-    function settings() {
-      return {
-        width: Math.max(1, Number(document.getElementById('widthInput').value) || 1),
-        height: Math.max(1, Number(document.getElementById('heightInput').value) || 1),
-        fit: document.getElementById('fitInput').value,
-        format: document.getElementById('formatInput').value,
-        quality: Number(qualityInput.value) / 100,
-        sharpen: document.getElementById('sharpenInput').checked,
-      };
-    }
-
-    function drawCover(ctx, img, width, height) {
-      const scale = Math.max(width / img.naturalWidth, height / img.naturalHeight);
-      const sw = width / scale;
-      const sh = height / scale;
-      const sx = (img.naturalWidth - sw) / 2;
-      const sy = (img.naturalHeight - sh) / 2;
-      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, width, height);
-    }
-
-    function drawContain(ctx, img, width, height) {
-      const scale = Math.min(width / img.naturalWidth, height / img.naturalHeight);
-      const dw = img.naturalWidth * scale;
-      const dh = img.naturalHeight * scale;
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, width, height);
-      ctx.drawImage(img, (width - dw) / 2, (height - dh) / 2, dw, dh);
-    }
-
-    function sharpen(canvas) {
-      const ctx = canvas.getContext('2d');
-      const src = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const out = ctx.createImageData(src);
-      const w = canvas.width;
-      const weights = [0, -1, 0, -1, 5, -1, 0, -1, 0];
-      for (let y = 1; y < canvas.height - 1; y++) {
-        for (let x = 1; x < canvas.width - 1; x++) {
-          for (let c = 0; c < 3; c++) {
-            let value = 0;
-            for (let ky = -1; ky <= 1; ky++) {
-              for (let kx = -1; kx <= 1; kx++) {
-                const srcIndex = ((y + ky) * w + (x + kx)) * 4 + c;
-                value += src.data[srcIndex] * weights[(ky + 1) * 3 + (kx + 1)];
-              }
-            }
-            out.data[(y * w + x) * 4 + c] = Math.max(0, Math.min(255, value));
-          }
-          out.data[(y * w + x) * 4 + 3] = src.data[(y * w + x) * 4 + 3];
+    function getTargetSize() {
+      if (resolutionSelect.value === 'custom') {
+        const width = Math.round(Number(customWidth.value || 0));
+        const height = Math.round(Number(customHeight.value || 0));
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width < 256 || height < 256 || width > 7680 || height > 7680) {
+          throw new Error('Choose a resolution between 256 and 7680 pixels per side.');
         }
+        return { width, height };
       }
-      ctx.putImageData(out, 0, 0);
+      const [width, height] = resolutionSelect.value.split('x').map(Number);
+      return { width, height };
     }
 
-    function extensionFor(format) {
-      return format === 'image/png' ? 'png' : format === 'image/webp' ? 'webp' : 'jpg';
+    function updateOutputMeta() {
+      try {
+        const target = getTargetSize();
+        const modeLabel = getOutputMode() === 'resize' ? 'resize' : 'expand';
+        outputMeta.textContent = `${target.width} x ${target.height} PNG - ${modeLabel}`;
+      } catch (_) {
+        outputMeta.textContent = 'Custom PNG';
+      }
+      customResolution.classList.toggle('open', resolutionSelect.value === 'custom');
     }
 
-    function canvasToBlob(canvas, format, quality) {
-      return new Promise(resolve => canvas.toBlob(resolve, format, quality));
-    }
-
-    async function resizeOne(image, config) {
-      const source = await loadImage(image.file);
-      const img = new Image();
-      img.src = source.url;
-      await img.decode();
+    function makeCanvas(width, height) {
       const canvas = document.createElement('canvas');
-      canvas.width = config.width;
-      canvas.height = config.height;
+      canvas.width = width;
+      canvas.height = height;
       const ctx = canvas.getContext('2d');
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
-      if (config.fit === 'cover') drawCover(ctx, img, config.width, config.height);
-      else if (config.fit === 'contain') drawContain(ctx, img, config.width, config.height);
-      else ctx.drawImage(img, 0, 0, config.width, config.height);
-      URL.revokeObjectURL(source.url);
-      if (config.sharpen && config.width * config.height <= 8000000) sharpen(canvas);
-      const blob = await canvasToBlob(canvas, config.format, config.quality);
+      return { canvas, ctx };
+    }
+
+    // Centered "contain" placement of a source inside a target frame.
+    function containRect(iw, ih, tw, th) {
+      const scale = Math.min(tw / iw, th / ih);
+      const w = Math.round(iw * scale);
+      const h = Math.round(ih * scale);
+      return { x: Math.round((tw - w) / 2), y: Math.round((th - h) / 2), w, h };
+    }
+
+    // Seamlessly fill a canvas by mirror-tiling the source around a centered
+    // rect: every neighbouring tile is a reflection, so edges line up and a
+    // subsequent blur erases the seams. This continues the photo's own edge
+    // content into the expanded area instead of a generic centre-zoom.
+    function mirrorTile(ctx, img, r, cw, ch) {
+      const nx = Math.ceil(Math.max(r.x, cw - (r.x + r.w)) / r.w) + 1;
+      const ny = Math.ceil(Math.max(r.y, ch - (r.y + r.h)) / r.h) + 1;
+      for (let i = -nx; i <= nx; i++) {
+        for (let j = -ny; j <= ny; j++) {
+          const flipX = (((i % 2) + 2) % 2) === 1;
+          const flipY = (((j % 2) + 2) % 2) === 1;
+          ctx.save();
+          ctx.translate(r.x + (i + (flipX ? 1 : 0)) * r.w, r.y + (j + (flipY ? 1 : 0)) * r.h);
+          ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+          ctx.drawImage(img, 0, 0, r.w, r.h);
+          ctx.restore();
+        }
+      }
+    }
+
+    // Stretch the subject's own edge pixels outward into a gap, fading away
+    // from the subject boundary, so real edge content (a horizon, wall, sky)
+    // appears to continue instead of a symmetric mirror. Rendered on a small
+    // buffer for a cheap blur, then upscaled into place.
+    function edgeExtend(ctx, img, r, gaps) {
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+      const strip = 0.16; // fraction of the image used as the seed edge
+      const place = (sx, sy, sw, sh, dx, dy, dw, dh, axis, subjectAt) => {
+        if (dw <= 1 || dh <= 1) return;
+        const scale = Math.min(1, 420 / Math.max(dw, dh));
+        const bw = Math.max(2, Math.round(dw * scale));
+        const bh = Math.max(2, Math.round(dh * scale));
+        const { canvas: buf, ctx: bx } = makeCanvas(bw, bh);
+        const blurPx = Math.max(2, Math.round((axis === 'x' ? bw : bh) * 0.25));
+        bx.filter = `blur(${blurPx}px)`;
+        bx.drawImage(img, sx, sy, sw, sh, 0, 0, bw, bh);
+        bx.filter = 'none';
+        // Fade the strip out as it moves away from the subject edge.
+        bx.globalCompositeOperation = 'destination-in';
+        const g = axis === 'x'
+          ? bx.createLinearGradient(0, 0, bw, 0)
+          : bx.createLinearGradient(0, 0, 0, bh);
+        const near = subjectAt === 'start' ? 0 : 1;
+        g.addColorStop(0, near === 0 ? 'rgba(0,0,0,1)' : 'rgba(0,0,0,0)');
+        g.addColorStop(1, near === 0 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        bx.fillStyle = g;
+        bx.fillRect(0, 0, bw, bh);
+        bx.globalCompositeOperation = 'source-over';
+        ctx.drawImage(buf, dx, dy, dw, dh);
+      };
+      // Left / right gaps seed from the matching vertical edge strip.
+      if (gaps.gapR > 1) place(iw * (1 - strip), 0, iw * strip, ih, r.x + r.w, r.y, gaps.gapR, r.h, 'x', 'start');
+      if (gaps.gapL > 1) place(0, 0, iw * strip, ih, 0, r.y, gaps.gapL, r.h, 'x', 'end');
+      // Top / bottom gaps seed from the matching horizontal edge strip.
+      if (gaps.gapB > 1) place(0, ih * (1 - strip), iw, ih * strip, r.x, r.y + r.h, r.w, gaps.gapB, 'y', 'start');
+      if (gaps.gapT > 1) place(0, 0, iw, ih * strip, r.x, 0, r.w, gaps.gapT, 'y', 'end');
+    }
+
+    // A cached low-res monochrome noise tile, generated once and reused.
+    let _noiseTile = null;
+    function noiseTile() {
+      if (_noiseTile) return _noiseTile;
+      const size = 160;
+      const { canvas, ctx } = makeCanvas(size, size);
+      const id = ctx.createImageData(size, size);
+      for (let i = 0; i < id.data.length; i += 4) {
+        const v = 90 + Math.random() * 90;
+        id.data[i] = id.data[i + 1] = id.data[i + 2] = v;
+        id.data[i + 3] = 255;
+      }
+      ctx.putImageData(id, 0, 0);
+      _noiseTile = canvas;
+      return canvas;
+    }
+
+    // Tile subtle film-grain across the frame with an 'overlay' blend so the
+    // fill reads as textured photography rather than a glassy gradient.
+    function addGrain(ctx, w, h, alpha) {
+      const n = noiseTile();
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.globalCompositeOperation = 'overlay';
+      for (let y = 0; y < h; y += n.height) {
+        for (let x = 0; x < w; x += n.width) ctx.drawImage(n, x, y);
+      }
+      ctx.restore();
+    }
+
+    function resizeCanvasHighQuality(sourceCanvas, width, height) {
+      let current = sourceCanvas;
+      while (current.width * 0.5 > width && current.height * 0.5 > height) {
+        const next = makeCanvas(Math.max(width, Math.round(current.width * 0.5)), Math.max(height, Math.round(current.height * 0.5)));
+        next.ctx.drawImage(current, 0, 0, next.canvas.width, next.canvas.height);
+        current = next.canvas;
+      }
+      if (current.width === width && current.height === height) return current;
+      const finalCanvas = makeCanvas(width, height);
+      finalCanvas.ctx.drawImage(current, 0, 0, width, height);
+      return finalCanvas.canvas;
+    }
+
+    function resizeImageHighQuality(img, width, height) {
+      const start = makeCanvas(img.naturalWidth, img.naturalHeight);
+      start.ctx.drawImage(img, 0, 0);
+      return resizeCanvasHighQuality(start.canvas, width, height);
+    }
+
+    async function resizeOnly(img, target) {
+      const resizedCanvas = resizeImageHighQuality(img, target.width, target.height);
+      return canvasToDataUrl(resizedCanvas);
+    }
+
+    function clampInt(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+    // Feather a subject canvas so it dissolves into the fill on the sides that
+    // were actually extended (transparent gap side, opaque interior).
+    function featherSubject(fx, w, h, gaps, frac) {
+      fx.globalCompositeOperation = 'destination-in';
+      if (gaps.gapL > 1 || gaps.gapR > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(w * frac)) / w);
+        const g = fx.createLinearGradient(0, 0, w, 0);
+        g.addColorStop(0, gaps.gapL > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gaps.gapR > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, w, h);
+      }
+      if (gaps.gapT > 1 || gaps.gapB > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(h * frac)) / h);
+        const g = fx.createLinearGradient(0, 0, 0, h);
+        g.addColorStop(0, gaps.gapT > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gaps.gapB > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, w, h);
+      }
+      fx.globalCompositeOperation = 'source-over';
+    }
+
+    // Sum of squared RGB differences between the PxP patch around (tx,ty) and
+    // the one around (sx,sy) in a float RGB buffer. Bails early past `cutoff`.
+    function patchDist(buf, W, H, tx, ty, sx, sy, P, cutoff) {
+      let sum = 0;
+      for (let dy = -P; dy <= P; dy++) {
+        const ty2 = clampInt(ty + dy, 0, H - 1), sy2 = clampInt(sy + dy, 0, H - 1);
+        for (let dx = -P; dx <= P; dx++) {
+          const tx2 = clampInt(tx + dx, 0, W - 1), sx2 = clampInt(sx + dx, 0, W - 1);
+          const ti = (ty2 * W + tx2) * 3, si = (sy2 * W + sx2) * 3;
+          const dr = buf[ti] - buf[si], dg = buf[ti + 1] - buf[si + 1], db = buf[ti + 2] - buf[si + 2];
+          sum += dr * dr + dg * dg + db * db;
+        }
+        if (sum >= cutoff) return sum;
+      }
+      return sum;
+    }
+
+    // PatchMatch-based hole filling (Barnes et al. + Wexler-style EM
+    // reconstruction). `hole` marks pixels to synthesise; known pixels are the
+    // photo itself and are never sampled from anything but real content, so the
+    // fill is grown from the picture's own colours and textures.
+    function patchMatchInpaint(buf, hole, W, H) {
+      const P = 2;              // 5x5 patches
+      const N = W * H;
+
+      // Source centres whose whole patch is in-bounds AND fully known.
+      const validSrc = new Uint8Array(N);
+      const srcList = [];
+      for (let y = P; y < H - P; y++) {
+        for (let x = P; x < W - P; x++) {
+          let ok = 1;
+          for (let dy = -P; dy <= P && ok; dy++) {
+            for (let dx = -P; dx <= P; dx++) {
+              if (hole[(y + dy) * W + (x + dx)]) { ok = 0; break; }
+            }
+          }
+          if (ok) { validSrc[y * W + x] = 1; srcList.push(y * W + x); }
+        }
+      }
+      if (srcList.length === 0) return;
+
+      // Target centres = any patch overlapping the hole (hole dilated by P).
+      const active = new Uint8Array(N);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          if (!hole[y * W + x]) continue;
+          for (let dy = -P; dy <= P; dy++) {
+            const yy = y + dy; if (yy < 0 || yy >= H) continue;
+            for (let dx = -P; dx <= P; dx++) {
+              const xx = x + dx; if (xx < 0 || xx >= W) continue;
+              active[yy * W + xx] = 1;
+            }
+          }
+        }
+      }
+
+      const nnx = new Int32Array(N), nny = new Int32Array(N), nnd = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        if (!active[i]) { nnd[i] = Infinity; continue; }
+        const tx = i % W, ty = (i / W) | 0;
+        const s = srcList[(Math.random() * srcList.length) | 0];
+        const sx = s % W, sy = (s / W) | 0;
+        nnx[i] = sx; nny[i] = sy;
+        nnd[i] = patchDist(buf, W, H, tx, ty, sx, sy, P, Infinity);
+      }
+
+      const maxR = Math.max(W, H);
+      const ITERS = 6;
+      const accR = new Float32Array(N), accG = new Float32Array(N), accB = new Float32Array(N), accW = new Float32Array(N);
+      const norm = 25 * 3 * ((2 * P + 1) * (2 * P + 1));
+
+      for (let it = 0; it < ITERS; it++) {
+        const forward = (it % 2 === 0);
+        const xs = forward ? 0 : W - 1, xe = forward ? W : -1;
+        const ys = forward ? 0 : H - 1, ye = forward ? H : -1;
+        const step = forward ? 1 : -1;
+
+        for (let ty = ys; ty !== ye; ty += step) {
+          for (let tx = xs; tx !== xe; tx += step) {
+            const i = ty * W + tx;
+            if (!active[i]) continue;
+            let bx = nnx[i], by = nny[i], bd = nnd[i];
+
+            const px = tx - step;
+            if (px >= 0 && px < W) {
+              const ni = i - step;
+              if (active[ni]) {
+                const cx = nnx[ni] + step, cy = nny[ni];
+                if (cx >= P && cx < W - P && validSrc[cy * W + cx]) {
+                  const d = patchDist(buf, W, H, tx, ty, cx, cy, P, bd);
+                  if (d < bd) { bd = d; bx = cx; by = cy; }
+                }
+              }
+            }
+            const py = ty - step;
+            if (py >= 0 && py < H) {
+              const ni = i - step * W;
+              if (active[ni]) {
+                const cx = nnx[ni], cy = nny[ni] + step;
+                if (cy >= P && cy < H - P && validSrc[cy * W + cx]) {
+                  const d = patchDist(buf, W, H, tx, ty, cx, cy, P, bd);
+                  if (d < bd) { bd = d; bx = cx; by = cy; }
+                }
+              }
+            }
+            for (let radius = maxR; radius >= 1; radius = (radius / 2) | 0) {
+              const rx = bx + (((Math.random() * 2 - 1) * radius) | 0);
+              const ry = by + (((Math.random() * 2 - 1) * radius) | 0);
+              if (rx >= P && ry >= P && rx < W - P && ry < H - P && validSrc[ry * W + rx]) {
+                const d = patchDist(buf, W, H, tx, ty, rx, ry, P, bd);
+                if (d < bd) { bd = d; bx = rx; by = ry; }
+              }
+            }
+            nnx[i] = bx; nny[i] = by; nnd[i] = bd;
+          }
+        }
+
+        // EM reconstruction: each hole pixel is the similarity-weighted average
+        // of the matched source pixel from every patch that covers it.
+        accR.fill(0); accG.fill(0); accB.fill(0); accW.fill(0);
+        for (let ty = 0; ty < H; ty++) {
+          for (let tx = 0; tx < W; tx++) {
+            const i = ty * W + tx;
+            if (!active[i]) continue;
+            const sx = nnx[i], sy = nny[i];
+            const w = 1 / (1 + nnd[i] / norm);
+            for (let dy = -P; dy <= P; dy++) {
+              const pyy = ty + dy; if (pyy < 0 || pyy >= H) continue;
+              const syy = clampInt(sy + dy, 0, H - 1);
+              for (let dx = -P; dx <= P; dx++) {
+                const pxx = tx + dx; if (pxx < 0 || pxx >= W) continue;
+                const hp = pyy * W + pxx;
+                if (!hole[hp]) continue;
+                const sxx = clampInt(sx + dx, 0, W - 1);
+                const sidx = (syy * W + sxx) * 3;
+                accR[hp] += buf[sidx] * w; accG[hp] += buf[sidx + 1] * w;
+                accB[hp] += buf[sidx + 2] * w; accW[hp] += w;
+              }
+            }
+          }
+        }
+        for (let p = 0; p < N; p++) {
+          if (hole[p] && accW[p] > 0) {
+            buf[p * 3] = accR[p] / accW[p];
+            buf[p * 3 + 1] = accG[p] / accW[p];
+            buf[p * 3 + 2] = accB[p] / accW[p];
+          }
+        }
+      }
+    }
+
+    // Content-aware Expand: synthesise the extended area from the photo's own
+    // patches, then composite the sharp original on top. Falls back to the
+    // fast blurred fill if anything goes wrong (e.g. a tainted canvas).
+    async function contentAwareExpand(img, target) {
+      try {
+        const tw = target.width, th = target.height;
+        const iw = img.naturalWidth, ih = img.naturalHeight;
+        const r = containRect(iw, ih, tw, th);
+        const gaps = { gapL: r.x, gapR: tw - (r.x + r.w), gapT: r.y, gapB: th - (r.y + r.h) };
+        if (gaps.gapL < 2 && gaps.gapR < 2 && gaps.gapT < 2 && gaps.gapB < 2) {
+          return resizeOnly(img, target);
+        }
+
+        // Small working frame - synthesis is done here, the subject is re-added
+        // at full resolution afterwards so its detail is never downsampled.
+        const WORK_MAX = 224;
+        const s = Math.min(1, WORK_MAX / Math.max(tw, th));
+        const W = Math.max(24, Math.round(tw * s));
+        const H = Math.max(24, Math.round(th * s));
+        const rw = containRect(iw, ih, W, H);
+
+        const { canvas: wc, ctx: wx } = makeCanvas(W, H);
+        // Seed the hole with a blurred mirror estimate so EM converges fast.
+        wx.filter = `blur(${Math.max(2, Math.round(Math.min(W, H) * 0.05))}px)`;
+        mirrorTile(wx, img, rw, W, H);
+        wx.filter = 'none';
+        // Overwrite the known region with the real (downscaled) photo.
+        wx.drawImage(img, rw.x, rw.y, rw.w, rw.h);
+
+        const idata = wx.getImageData(0, 0, W, H);
+        const px = idata.data;
+        const N = W * H;
+        const buf = new Float32Array(N * 3);
+        for (let i = 0; i < N; i++) {
+          buf[i * 3] = px[i * 4]; buf[i * 3 + 1] = px[i * 4 + 1]; buf[i * 3 + 2] = px[i * 4 + 2];
+        }
+        const hole = new Uint8Array(N);
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const inSub = x >= rw.x && x < rw.x + rw.w && y >= rw.y && y < rw.y + rw.h;
+            if (!inSub) hole[y * W + x] = 1;
+          }
+        }
+
+        patchMatchInpaint(buf, hole, W, H);
+
+        for (let i = 0; i < N; i++) {
+          px[i * 4] = clampInt(Math.round(buf[i * 3]), 0, 255);
+          px[i * 4 + 1] = clampInt(Math.round(buf[i * 3 + 1]), 0, 255);
+          px[i * 4 + 2] = clampInt(Math.round(buf[i * 3 + 2]), 0, 255);
+          px[i * 4 + 3] = 255;
+        }
+        wx.putImageData(idata, 0, 0);
+
+        // Compose full-res: upscale the synthesised frame, add grain, then lay
+        // the sharp subject back with a wide feather into the new content.
+        const { canvas, ctx } = makeCanvas(tw, th);
+        // A touch of blur on the upscale hides low-res synthesis pixels without
+        // flattening the structure PatchMatch produced.
+        ctx.filter = `blur(${Math.max(0, Math.round(Math.max(tw, th) / W * 0.6))}px)`;
+        ctx.drawImage(wc, 0, 0, tw, th);
+        ctx.filter = 'none';
+
+        addGrain(ctx, tw, th, 0.05);
+
+        const { canvas: fgCanvas, ctx: fx } = makeCanvas(r.w, r.h);
+        fx.drawImage(img, 0, 0, r.w, r.h);
+        featherSubject(fx, r.w, r.h, gaps, 0.06);
+        ctx.drawImage(fgCanvas, r.x, r.y);
+
+        return canvasToDataUrl(canvas);
+      } catch (err) {
+        return generateLocalOutpaint(img, target);
+      }
+    }
+
+    async function generateLocalOutpaint(img, target) {
+      const tw = target.width, th = target.height;
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+
+      // --- 1. Background, built at a capped low resolution (the fast part) ---
+      // A large-radius blur costs ~O(pixels), so blurring a <=512px canvas
+      // instead of the full (up to 4K) target is the key efficiency win. The
+      // final upscale to target size smooths it further at no extra cost.
+      const MAX_BG = 512;
+      const bgScale = Math.min(1, MAX_BG / Math.max(tw, th));
+      const bw = Math.max(8, Math.round(tw * bgScale));
+      const bh = Math.max(8, Math.round(th * bgScale));
+      const rb = containRect(iw, ih, bw, bh);
+
+      const { canvas: bgCanvas, ctx: bg } = makeCanvas(bw, bh);
+      const blur = Math.max(6, Math.round(Math.min(bw, bh) * 0.06));
+      bg.filter = `blur(${blur}px) saturate(1.12) brightness(0.97)`;
+      mirrorTile(bg, img, rb, bw, bh);
+      bg.filter = 'none';
+
+      // --- 2. Compose at full target resolution ---
+      const { canvas, ctx } = makeCanvas(tw, th);
+      ctx.drawImage(bgCanvas, 0, 0, tw, th);
+
+      const r = containRect(iw, ih, tw, th);
+      const gapL = r.x, gapR = tw - (r.x + r.w);
+      const gapT = r.y, gapB = th - (r.y + r.h);
+      const gaps = { gapL, gapR, gapT, gapB };
+
+      // --- 3. Continue the subject's real edge content into the gaps ---
+      // Layered over the blurred colour base, strongest at the subject edge.
+      edgeExtend(ctx, img, r, gaps);
+
+      // --- 4. Film grain so the fill reads as photography, not a gradient ---
+      addGrain(ctx, tw, th, 0.05);
+
+      // Barely-there corner falloff (no obvious vignette "effect").
+      const vig = ctx.createRadialGradient(
+        tw / 2, th / 2, Math.min(tw, th) * 0.35,
+        tw / 2, th / 2, Math.max(tw, th) * 0.72);
+      vig.addColorStop(0, 'rgba(10,15,25,0)');
+      vig.addColorStop(1, 'rgba(10,15,25,0.10)');
+      ctx.fillStyle = vig;
+      ctx.fillRect(0, 0, tw, th);
+
+      // --- 5. Subject on top, with a wide seamless feather on extended sides ---
+      const { canvas: fgCanvas, ctx: fx } = makeCanvas(r.w, r.h);
+      fx.drawImage(img, 0, 0, r.w, r.h);
+      fx.globalCompositeOperation = 'destination-in';
+      // Wider feather (~9%) blends the sharp subject into the generated fill so
+      // there is no detectable seam.
+      if (gapL > 1 || gapR > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(r.w * 0.09)) / r.w);
+        const g = fx.createLinearGradient(0, 0, r.w, 0);
+        g.addColorStop(0, gapL > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gapR > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, r.w, r.h);
+      }
+      if (gapT > 1 || gapB > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(r.h * 0.09)) / r.h);
+        const g = fx.createLinearGradient(0, 0, 0, r.h);
+        g.addColorStop(0, gapT > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gapB > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, r.w, r.h);
+      }
+      fx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(fgCanvas, r.x, r.y);
+
+      return canvasToDataUrl(canvas);
+    }
+
+    // ---- Queue / batch management ----
+    function activeItem() {
+      return state.items.find(i => i.id === state.activeId) || null;
+    }
+
+    function setActive(id) {
+      state.activeId = id;
+      const item = activeItem();
+      if (item) showImage(item.resultUrl || item.sourceUrl);
+      renderQueue();
+      refreshMeta();
+    }
+
+    function refreshMeta() {
+      const n = state.items.length;
+      const done = state.items.filter(i => i.resultUrl).length;
+      if (!n) { sourceMeta.textContent = 'No images selected'; return; }
+      const item = activeItem();
+      const base = item ? `${item.name} - ${item.w} x ${item.h}` : `${n} image${n > 1 ? 's' : ''}`;
+      sourceMeta.textContent = n > 1 ? `${base}  (${n} in queue, ${done} done)` : base;
+    }
+
+    function showImage(url) {
+      preview.innerHTML = '';
+      if (!url) {
+        preview.innerHTML = '<div class="empty">Upload one or more images to start.</div>';
+        return;
+      }
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = 'QT Seize preview';
+      preview.appendChild(img);
+    }
+
+    function renderQueue() {
+      queueEl.innerHTML = '';
+      if (state.items.length < 1) return;
+      for (const item of state.items) {
+        const row = document.createElement('div');
+        row.className = 'q-item' + (item.id === state.activeId ? ' active' : '');
+        row.addEventListener('click', (e) => { if (!e.target.classList.contains('q-remove')) setActive(item.id); });
+
+        const thumb = document.createElement('img');
+        thumb.className = 'q-thumb';
+        thumb.src = item.resultUrl || item.sourceUrl;
+        thumb.alt = '';
+
+        const info = document.createElement('div');
+        info.className = 'q-info';
+        const name = document.createElement('div');
+        name.className = 'q-name';
+        name.textContent = item.name;
+        const sub = document.createElement('div');
+        sub.className = 'q-sub';
+        sub.textContent = `${item.w} x ${item.h}`;
+        info.appendChild(name);
+        info.appendChild(sub);
+
+        const badge = document.createElement('span');
+        badge.className = 'q-badge ' + item.status;
+        badge.textContent = { pending: 'Pending', working: 'Working', done: 'Done', error: 'Error' }[item.status] || item.status;
+
+        const remove = document.createElement('button');
+        remove.className = 'q-remove';
+        remove.type = 'button';
+        remove.title = 'Remove';
+        remove.textContent = '×';
+        remove.addEventListener('click', () => removeItem(item.id));
+
+        row.appendChild(thumb);
+        row.appendChild(info);
+        row.appendChild(badge);
+        row.appendChild(remove);
+        queueEl.appendChild(row);
+      }
+    }
+
+    function removeItem(id) {
+      const idx = state.items.findIndex(i => i.id === id);
+      if (idx < 0) return;
+      const [removed] = state.items.splice(idx, 1);
+      if (removed.sourceUrl) URL.revokeObjectURL(removed.sourceUrl);
+      if (state.activeId === id) {
+        const next = state.items[idx] || state.items[idx - 1] || null;
+        state.activeId = next ? next.id : null;
+        showImage(next ? (next.resultUrl || next.sourceUrl) : null);
+      }
+      syncButtons();
+      renderQueue();
+      refreshMeta();
+    }
+
+    function syncButtons() {
+      const hasPending = state.items.some(i => i.status !== 'done');
+      generateBtn.disabled = state.items.length < 1 || !hasPending;
+      downloadBtn.disabled = !state.items.some(i => i.resultUrl);
+      const mode = getOutputMode();
+      const verb = mode === 'resize' ? 'Resize' : 'Generate';
+      generateBtn.textContent = state.items.length > 1 ? `${verb} all` : verb;
+      const doneCount = state.items.filter(i => i.resultUrl).length;
+      downloadBtn.textContent = doneCount > 1 ? `Download (${doneCount})` : 'Download';
+    }
+
+    async function addFiles(fileList) {
+      const files = [...fileList].filter(f => f && f.type.startsWith('image/'));
+      if (!files.length) return;
+      for (const file of files) {
+        const id = ++state.seq;
+        const sourceUrl = URL.createObjectURL(file);
+        const item = { id, file, name: file.name || `image-${id}`, sourceUrl, w: 0, h: 0, resultUrl: '', status: 'pending' };
+        state.items.push(item);
+        try {
+          const img = await loadImageFromUrl(sourceUrl);
+          item.w = img.naturalWidth;
+          item.h = img.naturalHeight;
+        } catch (_) {
+          item.status = 'error';
+        }
+      }
+      if (state.activeId === null && state.items.length) setActive(state.items[0].id);
+      syncButtons();
+      renderQueue();
+      refreshMeta();
+      const n = state.items.length;
+      setStatus(n > 1 ? `${n} images ready. ${getOutputMode() === 'resize' ? 'Resize' : 'Generate'} all when ready.` : 'Ready.');
+    }
+
+    async function processItem(item, mode, target) {
+      item.status = 'working';
+      renderQueue();
+      const img = await loadImageFromUrl(item.sourceUrl);
+      // Let the "working" badge paint before the synthesis blocks the thread.
+      await new Promise(r => setTimeout(r, 0));
+      const dataUrl = mode === 'resize'
+        ? await resizeOnly(img, target)
+        : await contentAwareExpand(img, target);
+      item.resultUrl = dataUrl;
+      item.status = 'done';
+    }
+
+    generateBtn.addEventListener('click', async () => {
+      if (state.items.length < 1) return;
+      let target;
+      try { target = getTargetSize(); }
+      catch (error) { setStatus(error.message, true); return; }
+      const mode = getOutputMode();
+      generateBtn.disabled = true;
+      downloadBtn.disabled = true;
+
+      let done = 0, failed = 0;
+      for (const item of state.items) {
+        if (item.resultUrl) continue;
+        try {
+          setStatus(`Processing ${item.name} (${done + failed + 1}/${state.items.length})...`);
+          await processItem(item, mode, target);
+          done++;
+          if (item.id === state.activeId) showImage(item.resultUrl);
+          renderQueue();
+        } catch (error) {
+          item.status = 'error';
+          failed++;
+          renderQueue();
+        }
+      }
+      syncButtons();
+      refreshMeta();
+      setStatus(failed
+        ? `Finished with ${failed} error${failed > 1 ? 's' : ''}. ${done} done at ${target.width} x ${target.height}.`
+        : `Done. ${done} image${done !== 1 ? 's' : ''} at ${target.width} x ${target.height}.`,
+        !!failed);
+    });
+
+    // ---- Download (ask where to save) ----
+    function dataUrlToBlob(dataUrl) {
+      const [head, b64] = dataUrl.split(',');
+      const mime = (head.match(/:(.*?);/) || [,'image/png'])[1];
+      const bin = atob(b64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return new Blob([arr], { type: mime });
+    }
+
+    function outNameFor(item, mode, target) {
+      const base = (item.name || 'image').replace(/\.[^.]+$/, '');
+      return `${base}-qt-${mode}-${target.width}x${target.height}.png`;
+    }
+
+    function fallbackDownload(blob, filename) {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `${image.file.name.replace(/\.[^/.]+$/, '')}.${extensionFor(config.format)}`;
+      link.download = filename;
       document.body.appendChild(link);
       link.click();
       link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
     }
 
-    dropZone.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', event => addFiles(event.target.files));
-    dropZone.addEventListener('dragover', event => {
-      event.preventDefault();
-      dropZone.classList.add('dragging');
-    });
-    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragging'));
-    dropZone.addEventListener('drop', event => {
-      event.preventDefault();
-      dropZone.classList.remove('dragging');
-      addFiles(event.dataTransfer.files);
-    });
-    qualityInput.addEventListener('input', () => {
-      qualityLabel.textContent = `${qualityInput.value}%`;
-    });
-    document.getElementById('clearBtn').addEventListener('click', () => {
-      state.images.forEach(image => URL.revokeObjectURL(image.url));
-      state.images = [];
-      renderImages();
-    });
-    document.getElementById('resizeBtn').addEventListener('click', async event => {
-      if (!state.images.length) {
-        alert('Please upload at least one image.');
+    downloadBtn.addEventListener('click', async () => {
+      const ready = state.items.filter(i => i.resultUrl);
+      if (!ready.length) return;
+      const mode = getOutputMode();
+      let target;
+      try { target = getTargetSize(); } catch (_) { target = { width: ready[0].w, height: ready[0].h }; }
+
+      // Single image: ask for a save location via the file picker when available.
+      if (ready.length === 1) {
+        const item = ready[0];
+        const blob = dataUrlToBlob(item.resultUrl);
+        const filename = outNameFor(item, mode, target);
+        if (window.showSaveFilePicker) {
+          try {
+            const handle = await window.showSaveFilePicker({
+              suggestedName: filename,
+              types: [{ description: 'PNG image', accept: { 'image/png': ['.png'] } }]
+            });
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            setStatus(`Saved ${filename}.`);
+            return;
+          } catch (err) {
+            if (err && err.name === 'AbortError') { setStatus('Save cancelled.'); return; }
+            // fall through to normal download on any picker failure
+          }
+        }
+        fallbackDownload(blob, filename);
+        setStatus(`Downloaded ${filename}.`);
         return;
       }
-      event.currentTarget.disabled = true;
-      event.currentTarget.textContent = 'Processing...';
-      try {
-        const config = settings();
-        for (const image of state.images) await resizeOne(image, config);
-      } catch (error) {
-        alert(error.message || String(error));
-      } finally {
-        event.currentTarget.disabled = false;
-        event.currentTarget.textContent = 'Resize Images';
+
+      // Multiple images: ask for a destination folder when available.
+      if (window.showDirectoryPicker) {
+        try {
+          const dir = await window.showDirectoryPicker({ mode: 'readwrite' });
+          let saved = 0;
+          for (const item of ready) {
+            const filename = outNameFor(item, mode, target);
+            const handle = await dir.getFileHandle(filename, { create: true });
+            const writable = await handle.createWritable();
+            await writable.write(dataUrlToBlob(item.resultUrl));
+            await writable.close();
+            saved++;
+            setStatus(`Saving to folder... ${saved}/${ready.length}`);
+          }
+          setStatus(`Saved ${saved} images to the chosen folder.`);
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') { setStatus('Save cancelled.'); return; }
+          // fall through to per-file downloads
+        }
       }
+      // Fallback: trigger individual downloads to the browser's download folder.
+      for (const item of ready) {
+        fallbackDownload(dataUrlToBlob(item.resultUrl), outNameFor(item, mode, target));
+        await new Promise(r => setTimeout(r, 250));
+      }
+      setStatus(`Downloaded ${ready.length} images.`);
     });
+
+    // ---- Wiring ----
+    drop.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', event => { addFiles(event.target.files); fileInput.value = ''; });
+    drop.addEventListener('dragover', event => {
+      event.preventDefault();
+      drop.classList.add('dragging');
+    });
+    drop.addEventListener('dragleave', () => drop.classList.remove('dragging'));
+    drop.addEventListener('drop', event => {
+      event.preventDefault();
+      drop.classList.remove('dragging');
+      addFiles(event.dataTransfer.files);
+    });
+    resolutionSelect.addEventListener('change', () => { updateOutputMeta(); syncButtons(); });
+    customWidth.addEventListener('input', updateOutputMeta);
+    customHeight.addEventListener('input', updateOutputMeta);
+    outputModeInputs.forEach(input => input.addEventListener('change', () => {
+      updateOutputMeta();
+      syncButtons();
+      if (state.items.length) setStatus(getOutputMode() === 'resize' ? 'Ready to resize.' : 'Ready to generate.');
+    }));
+
+    document.getElementById('reset').addEventListener('click', () => {
+      for (const item of state.items) if (item.sourceUrl) URL.revokeObjectURL(item.sourceUrl);
+      state.items = [];
+      state.activeId = null;
+      showImage(null);
+      renderQueue();
+      syncButtons();
+      refreshMeta();
+      setStatus('Cleared. Upload one or more images to start.');
+    });
+
+    updateOutputMeta();
+    syncButtons();
   </script>
 </body>
 </html>
