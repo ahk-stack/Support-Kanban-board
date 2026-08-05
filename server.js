@@ -305,7 +305,11 @@ async function auditTicketChanges({
   userId = null,
   before = {},
   after = {},
-  fields = []
+  fields = [],
+  // Per-field extra metadata, e.g. the real actor behind an assignment change.
+  // The session user only identifies whose save carried the change, which for
+  // an auto-assign or a cross-tab overwrite is not who caused it.
+  fieldMetadata = {}
 }) {
   for (const field of fields) {
     const oldValue = before?.[field] ?? null;
@@ -319,7 +323,7 @@ async function auditTicketChanges({
       eventType: `ticket_${field}_changed`,
       oldValue,
       newValue,
-      metadata: { field }
+      metadata: { field, ...(fieldMetadata[field] || {}) }
     });
   }
 }
@@ -861,10 +865,45 @@ async function safeWriteState(state) {
     ...((currentState[field] && typeof currentState[field] === 'object') ? currentState[field] : {}),
     ...((nextState[field] && typeof nextState[field] === 'object') ? nextState[field] : {})
   });
-  nextState.ticketAssignee = mergeTicketMap('ticketAssignee');
-  nextState.ticketCSOwner = mergeTicketMap('ticketCSOwner');
-  nextState.ticketAssignmentMode = mergeTicketMap('ticketAssignmentMode');
-  nextState.manualSupportOverride = mergeTicketMap('manualSupportOverride');
+  // Assignment is merged per ticket by timestamp, exactly as ticketState is by
+  // ticketStageTouchedAt above. It used to use the plain spread below, which is
+  // unconditional last-writer-wins: any tab saving an older snapshot silently
+  // replaced a fresh assignment. That was invisible until a reload before live
+  // sync existed - now the merged result is broadcast, so the stale value
+  // bounced straight back and the ticket appeared to "jump back" to its
+  // previous agent moments after being assigned.
+  //
+  // manualSupportOverride and ticketAssignmentMode ride the same clock, since
+  // they describe the assignment and must not be split from it.
+  const currentAssignTouched = (currentState.ticketAssigneeTouchedAt && typeof currentState.ticketAssigneeTouchedAt === 'object') ? currentState.ticketAssigneeTouchedAt : {};
+  const incomingAssignTouched = (nextState.ticketAssigneeTouchedAt && typeof nextState.ticketAssigneeTouchedAt === 'object') ? nextState.ticketAssigneeTouchedAt : {};
+  const assignFields = ['ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride'];
+  const mergedAssign = {};
+  assignFields.forEach((field) => {
+    mergedAssign[field] = { ...((currentState[field] && typeof currentState[field] === 'object') ? currentState[field] : {}) };
+  });
+  const mergedAssignTouched = { ...currentAssignTouched };
+  const assignIds = new Set([
+    ...Object.keys(currentAssignTouched),
+    ...Object.keys(incomingAssignTouched),
+    ...assignFields.flatMap(f => Object.keys((nextState[f] && typeof nextState[f] === 'object') ? nextState[f] : {}))
+  ]);
+  assignIds.forEach((ticketId) => {
+    const curTs = Number(currentAssignTouched[ticketId] || 0);
+    const inTs = Number(incomingAssignTouched[ticketId] || 0);
+    // Untimestamped incoming data (an older client build, or a tab that never
+    // touched this ticket) must not beat a stamped local assignment.
+    if (inTs === 0 && curTs > 0) return;
+    if (inTs < curTs) return;
+    assignFields.forEach((field) => {
+      const incoming = (nextState[field] && typeof nextState[field] === 'object') ? nextState[field] : {};
+      if (Object.prototype.hasOwnProperty.call(incoming, ticketId)) mergedAssign[field][ticketId] = incoming[ticketId];
+    });
+    mergedAssignTouched[ticketId] = inTs || curTs;
+  });
+  assignFields.forEach((field) => { nextState[field] = mergedAssign[field]; });
+  nextState.ticketAssigneeTouchedAt = mergedAssignTouched;
+
   nextState.manualCSOverride = mergeTicketMap('manualCSOverride');
   nextState.ticketCreatedBy = mergeTicketMap('ticketCreatedBy');
   nextState.ticketResolutionMeta = mergeTicketMap('ticketResolutionMeta');
@@ -898,7 +937,7 @@ async function safeWriteState(state) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketCreatedBy'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketCreatedBy'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -940,6 +979,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
 
   state.ticketState = (state.ticketState && typeof state.ticketState === 'object') ? state.ticketState : {};
   state.ticketStageTouchedAt = (state.ticketStageTouchedAt && typeof state.ticketStageTouchedAt === 'object') ? state.ticketStageTouchedAt : {};
+  state.ticketAssigneeTouchedAt = (state.ticketAssigneeTouchedAt && typeof state.ticketAssigneeTouchedAt === 'object') ? state.ticketAssigneeTouchedAt : {};
   state.ticketPriority = (state.ticketPriority && typeof state.ticketPriority === 'object') ? state.ticketPriority : {};
   state.ticketCategory = (state.ticketCategory && typeof state.ticketCategory === 'object') ? state.ticketCategory : {};
   state.ticketSubtype = (state.ticketSubtype && typeof state.ticketSubtype === 'object') ? state.ticketSubtype : {};
@@ -996,8 +1036,15 @@ async function hydrateStateFromDatabase(baseState = {}) {
     }
     if (ticket.priority) state.ticketPriority[externalId] = ticket.priority;
     if (ticket.category) state.ticketCategory[externalId] = ticket.category;
-    if (ticket.assignedAgent) state.ticketAssignee[externalId] = ticket.assignedAgent;
-    if (ticket.csAgent) state.ticketCSOwner[externalId] = ticket.csAgent;
+    // Same timestamp gate as the stage a few lines up. Taking the DB value
+    // unconditionally meant every /api/state read re-imposed whatever assignee
+    // Postgres last saw, undoing a newer assignment held in the JSON state.
+    const assignTouchedAt = Number(state.ticketAssigneeTouchedAt[externalId] || 0);
+    if (dbTouchedAt >= assignTouchedAt) {
+      if (ticket.assignedAgent) state.ticketAssignee[externalId] = ticket.assignedAgent;
+      if (ticket.csAgent) state.ticketCSOwner[externalId] = ticket.csAgent;
+      if (ticket.assignedAgent || ticket.csAgent) state.ticketAssigneeTouchedAt[externalId] = dbTouchedAt;
+    }
     if (ticket.assignedAgent || ticket.csAgent) state.ticketAssignmentMode[externalId] = 'support';
     if (ticket.senderEmail) state.ticketClientEmail[externalId] = ticket.senderEmail;
     if (ticket.createdAt) state.ticketCreatedAt[externalId] = ticket.createdAt.toISOString();
@@ -1979,12 +2026,22 @@ async function upsertBoardTicketsToDatabase(state, req) {
         metadata: { externalId, subject, senderEmail, source: 'outlook' }
       });
     } else if (!fieldsUnchanged) {
+      // The board records who actually changed the assignment and why
+      // (manual dropdown, workload auto-assign, a live patch from another
+      // agent). Attach it so the audit row names the responsible agent rather
+      // than whoever's tab happened to flush the save.
+      const assignMeta = (state.ticketAssigneeBy && typeof state.ticketAssigneeBy === 'object')
+        ? state.ticketAssigneeBy[externalId]
+        : null;
       await auditTicketChanges({
         ticketId: ticket.id,
         userId: req.session?.userId || null,
         before: existingTicket,
         after: ticket,
-        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'csAgent', 'hubspotTicketId', 'jiraTicketKey', 'body']
+        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'csAgent', 'hubspotTicketId', 'jiraTicketKey', 'body'],
+        fieldMetadata: assignMeta ? {
+          assignedAgent: { actor: assignMeta.by || null, source: assignMeta.source || null }
+        } : {}
       });
     }
 
@@ -3648,6 +3705,69 @@ app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
   }
 });
 
+// Assignment history: who moved which ticket from whom to whom, and whether a
+// change undid the one before it. requireAuth rather than requireAdmin - the
+// board already shows every assignee to every agent, and the whole point is
+// that the team can see when a ticket bounces.
+app.get('/api/audit/assignments', requireAuth, async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit || 300), 1), 1000);
+  try {
+    const events = await prisma.ticketEvent.findMany({
+      where: { eventType: 'ticket_assignedAgent_changed' },
+      take: limit,
+      include: {
+        ticket: { select: { id: true, externalId: true, subject: true, displayNumber: true } },
+        user: { select: { id: true, username: true, displayName: true, role: true } }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    // Walk oldest-first per ticket so "did this undo the previous change?" can
+    // be answered by looking only one step back.
+    const chronological = [...events].reverse();
+    const lastByTicket = new Map();
+    const flags = new Map();
+    chronological.forEach((e) => {
+      const key = String(e.ticketId);
+      const prev = lastByTicket.get(key);
+      // A revert = this change puts the ticket back to where the previous
+      // change moved it away from (A->B followed by B->A).
+      if (prev && String(e.newValue || '') === String(prev.oldValue || '') && String(e.oldValue || '') === String(prev.newValue || '')) {
+        flags.set(e.id, { revert: true, revertedFrom: prev.id, secondsAfter: Math.round((new Date(e.createdAt) - new Date(prev.createdAt)) / 1000) });
+      }
+      lastByTicket.set(key, e);
+    });
+
+    const rows = events.map((e) => {
+      const meta = (e.metadata && typeof e.metadata === 'object') ? e.metadata : {};
+      const flag = flags.get(e.id) || null;
+      return {
+        id: e.id,
+        at: e.createdAt,
+        ticketId: e.ticketId,
+        externalId: e.ticket?.externalId || null,
+        ticketNumber: e.ticket?.displayNumber || null,
+        subject: e.ticket?.subject || '',
+        from: e.oldValue || null,
+        to: e.newValue || null,
+        // actor is the agent the board says did it; account is the login whose
+        // save carried it. They differ for auto-assign and cross-tab writes.
+        actor: meta.actor || null,
+        source: meta.source || null,
+        account: e.user?.username || null,
+        accountName: e.user?.displayName || null,
+        isRevert: !!flag,
+        revertedAfterSeconds: flag ? flag.secondsAfter : null
+      };
+    });
+
+    return res.json({ assignments: rows, count: rows.length });
+  } catch (error) {
+    console.error('Read assignment audit failed:', error);
+    return res.status(500).json({ error: 'read_assignment_audit_failed' });
+  }
+});
+
 app.get('/api/audit/tickets', requireAdmin, async (req, res) => {
   const limit = Math.min(Number(req.query.limit || 100), 500);
 
@@ -4416,7 +4536,7 @@ let sseRev = 0;
 // Per-ticket keyed maps that clients render from. Anything not listed here is
 // session-local (caches, read-receipts) and deliberately not broadcast.
 const LIVE_SYNC_FIELDS = [
-  'ticketState', 'ticketStageTouchedAt', 'ticketAssignee', 'ticketCSOwner',
+  'ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketAssignee', 'ticketCSOwner',
   'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride',
   'ticketPriority', 'ticketCategory', 'ticketSubtype', 'ticketJira',
   'ticketHubspotId', 'ticketArchived', 'ticketResolutionMeta',
@@ -5129,7 +5249,19 @@ app.get(['/qt-seize', '/qt-seize/'], requireAuth, (req, res) => {
 });
 app.use('/qt-seize', requireAuth, express.static(path.join(__dirname, 'public', 'qt-seize')));
 app.use('/assets', requireAuth, express.static(path.join(__dirname, 'public')));
-app.get('/', (req, res) => isAuthed(req) ? res.type('html').sendFile(path.join(__dirname, 'index.html')) : res.redirect('/login'));
+// index.html carries the entire app - all CSS and all JS are inline - so a
+// cached copy means a browser can keep rendering an old build indefinitely
+// while the server has the new one. sendFile's default (max-age=0 + ETag)
+// still lets a browser answer a plain reload from its in-memory cache without
+// revalidating, which cost real debugging time: a stale tab showed a broken
+// layout that no longer existed in the file. no-store forces a fetch every
+// time. The document is small relative to the API traffic it triggers, so the
+// cost is negligible.
+app.get('/', (req, res) => {
+  if (!isAuthed(req)) return res.redirect('/login');
+  res.set('Cache-Control', 'no-store, must-revalidate');
+  res.type('html').sendFile(path.join(__dirname, 'index.html'));
+});
 
 const server = app.listen(PORT, () => {
   console.log(`Support Kanban secure web app on http://localhost:${PORT}`);

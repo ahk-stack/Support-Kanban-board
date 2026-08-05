@@ -3202,6 +3202,78 @@ th {
     min-width: min(240px, calc(100vw - 28px));
   }
 }
+
+/* =========================================================================
+   Fit all six stages on screen
+   -------------------------------------------------------------------------
+   .column was `flex: 1 1 var(--board-col-w)` with `min-width: 190px`, so six
+   columns needed ~1205px of board width. Below that they stopped shrinking
+   and the last stages went off-screen behind a horizontal scroll (measured on
+   this file: only 4 of 6 visible at 1002px, 5 of 6 at 1258px). Browsers that
+   keep their own sidebar, like Opera GX, lose that width before the page even
+   starts.
+
+   `flex: 1 1 0` makes all six take an equal share of whatever width exists and
+   shrink together. Deliberately plain flexbox: an earlier attempt used a grid
+   plus `container-type: inline-size` for per-column queries, and because
+   container-type implies `contain: inline-size` (an element's inline size may
+   then not come from its contents) the columns collapsed to slivers with text
+   running one letter per line. Nothing here may depend on containment.
+   ========================================================================= */
+@media (min-width: 860px) {
+  .column {
+    flex: 1 1 0;
+    /* Far below min-content (~162px) so all six still fit, but a hard floor:
+       if anything ever squeezes this container the board scrolls instead of
+       collapsing the columns to nothing. */
+    min-width: 96px;
+    max-width: none;
+  }
+}
+
+/* The base .crm-shell is a row with `align-items: flex-start`. The existing
+   980px rule flips it to a column, which turns that align-items into
+   CROSS-axis (width) sizing - so .crm-main shrink-wrapped to its contents and
+   the board grew to the full width of all six columns, overflowing the PAGE
+   sideways (measured: 760px of page overflow at 778px, 164px at 878px).
+   Stretching the children back to the container width is what contains it; the
+   board then scrolls inside itself, as it already intends to. */
+@media (max-width: 980px) {
+  .crm-shell {
+    align-items: stretch;
+  }
+
+  .crm-main {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+}
+
+/* Long unbreakable tokens are common in support mail (ibelzunce@medplaya.com,
+   raw URLs, Jira keys) and are wider than a narrow column. `break-word`, not
+   `anywhere`: break-word only breaks a word that cannot fit on a line of its
+   own, while anywhere also breaks ordinary prose mid-word. Column headers are
+   excluded - stage names are short and must never break. */
+.card-title,
+.card-summary {
+  overflow-wrap: break-word;
+}
+
+/* A card's control rows are nowrap, so their combined min-content (~162px) is
+   wider than a narrow column and overflows it visibly, which re-widens the
+   board. Let them wrap once columns get tight. */
+@media (max-width: 1340px) {
+  .card-top-meta,
+  .card-controls {
+    flex-wrap: wrap;
+    row-gap: 5px;
+  }
+
+  .card-top-meta {
+    gap: 5px;
+  }
+}
 </style>
 </head>
 <body>
@@ -3292,6 +3364,7 @@ th {
         <button class="crm-nav-btn" id="archive-view-btn"> Archive Inbox <span class="spam-count-badge" id="archive-count" style="display:none">0</span></button>
         <button class="crm-nav-btn" id="companies-view-btn"> Companies</button>
         <button class="crm-nav-btn" id="dashboard-view-btn"> Data Hygiene</button>
+        <button class="crm-nav-btn" id="assignlog-view-btn"> Assignment Log</button>
       </div>
       <div class="crm-nav-section" aria-label="QT-Tools">
         <div class="crm-nav-section-title">QT-Tools</div>
@@ -3407,6 +3480,32 @@ th {
     </div>
   </div>
   <div id="companies-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr));gap:12px;"></div>
+</div>
+<div id="assignlog-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+    <div>
+      <div style="font-family:'Caladea',serif;font-size:24px;">Assignment Log</div>
+      <div style="font-size:12px;color:var(--muted);" id="assignlog-summary">Loading&hellip;</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <select class="filter-sel" id="assignlog-agent-filter" style="max-width:190px;"><option value="all">All agents</option></select>
+      <button class="chip" id="assignlog-reverts-only" type="button" title="Show only changes that undid the previous one">Reverts only</button>
+      <button class="chip" id="assignlog-refresh" type="button">Refresh</button>
+    </div>
+  </div>
+  <div style="background:var(--white);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow-sm);overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:760px;">
+      <thead><tr style="text-align:left;">
+        <th style="padding:9px 12px;">When</th>
+        <th style="padding:9px 12px;">Ticket</th>
+        <th style="padding:9px 12px;">From</th>
+        <th style="padding:9px 12px;">To</th>
+        <th style="padding:9px 12px;">Done by</th>
+        <th style="padding:9px 12px;">How</th>
+      </tr></thead>
+      <tbody id="assignlog-rows"></tbody>
+    </table>
+  </div>
 </div>
 <div id="kpi-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
@@ -3919,7 +4018,7 @@ function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId){if(!ticket||!ti
   if(ticketCategory[ticket.id]!=='Spam'){
     const supportFromSender=supportAgentFromSenderEmail(emailObj.sender);
     if(supportFromSender&&supportFromSender!==ticketAssignee[ticket.id]){
-      ticketAssignee[ticket.id]=supportFromSender;
+      setTicketAssignee(ticket.id,supportFromSender);
       ticketAssignmentMode[ticket.id]='support';
       manualSupportOverride[ticket.id]=true;
     }
@@ -3956,6 +4055,64 @@ let ticketNumberCounter=0;
 let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
 let ticketHubspotId={}; // ticketId -> HubSpot ticket ID
 let ticketStageTouchedAt={}; // ticketId -> last stage-change timestamp (ms)
+// ticketId -> last assignment-change timestamp (ms). Stage moves have had this
+// since forever and are merged by it, so a lagging tab cannot roll one back.
+// Assignment had no equivalent: the server merged it with a plain
+// {...current, ...incoming} spread, so ANY tab saving an older snapshot
+// silently overwrote a fresh assignment - and once live sync started
+// broadcasting the merged result, that overwrite bounced straight back to the
+// assigning tab, which is why a ticket "goes back immediately" after being
+// assigned to someone else.
+let ticketAssigneeTouchedAt={};
+// ticketId -> { by, source } for the LAST assignment change. The Postgres audit
+// event only knows whichever session's save happened to carry the change, which
+// for an auto-assign or a stale-tab overwrite is not the person responsible.
+// This carries the real actor and the reason through to the audit row.
+let ticketAssigneeBy={};
+// Ring buffer of every assignment change, with the calling function. Assignment
+// has several writers (manual dropdown, workload auto-assign, DB merge, live
+// patches, reply-sender follow), so when one of them undoes another the only
+// way to know WHICH is to record it. Inspect with `window.assignLog()`.
+const ASSIGN_LOG=[];
+function logAssignChange(entry){
+  ASSIGN_LOG.push(entry);
+  if(ASSIGN_LOG.length>300)ASSIGN_LOG.splice(0,ASSIGN_LOG.length-300);
+}
+window.assignLog=(id)=>{
+  const rows=id?ASSIGN_LOG.filter(r=>r.id===String(id)):ASSIGN_LOG;
+  console.table(rows.map(r=>({...r,at:new Date(r.at).toLocaleTimeString('en-GB')})));
+  return rows;
+};
+function assignCaller(){
+  // 3rd frame = whoever called setTicketAssignee.
+  const line=String(new Error().stack||'').split('\n')[3]||'';
+  return (line.match(/at\s+([A-Za-z0-9_$.<>]+)/)||[,'?'])[1];
+}
+function setTicketAssignee(id,agent,ts,source){
+  if(!id)return false;
+  const next=agent||'';
+  const stamp=Number(ts||Date.now());
+  const prev=ticketAssignee[id]||'';
+  const prevTs=Number(ticketAssigneeTouchedAt[id]||0);
+  if(ticketAssignee[id]===next&&prevTs>=stamp)return false;
+  // A stamped older write must never replace a newer value. Call sites gate
+  // this too, but centralising it means a missed one cannot cause a revert.
+  if(prev&&next!==prev&&stamp<prevTs){
+    logAssignChange({id:String(id),from:prev,to:next,result:'REJECTED (older)',ts:stamp,prevTs,by:source||assignCaller(),at:Date.now()});
+    return false;
+  }
+  if(next)ticketAssignee[id]=next; else delete ticketAssignee[id];
+  ticketAssigneeTouchedAt[id]=stamp;
+  if(prev!==next){
+    const why=source||assignCaller();
+    // A live-sync patch is someone else's change arriving; the actor is the
+    // agent named in the patch, not whoever happens to be looking at this tab.
+    const actor=/^liveSync\//.test(why)?why.split('/')[1]:currentUser();
+    ticketAssigneeBy[id]={by:actor,source:why,at:stamp,from:prev||''};
+    logAssignChange({id:String(id),from:prev||'(none)',to:next||'(none)',result:'applied',ts:stamp,prevTs,by:why,actor,at:Date.now()});
+  }
+  return true;
+}
 let ticketHasNewReply={}; // ticketId -> true while an unread reply is glowing on the card
 let ticketResolutionMeta={}; // ticketId -> CS confirmation / send-back metadata
 let ticketArchived={}; // ticketId -> {archivedAt,archivedBy,reason:'manual'|'resolved_confirmed'}
@@ -4169,7 +4326,7 @@ function buildStatePayload(reason){
   const snapshot={
     allTickets,
     seenIds:Object.keys(seen),
-    ticketState,ticketStageTouchedAt,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
+    ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssigneeBy,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketHubspotId,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion,clientId:LIVE_CLIENT_ID}
   };
@@ -4381,7 +4538,12 @@ function mergeDatabaseTickets(dbTickets){
     }
     if(row.priority)ticketPriority[id]=row.priority;
     if(row.category)ticketCategory[id]=row.category;
-    if(row.assignedAgent)ticketAssignee[id]=normalizeSupportAgent(row.assignedAgent)||row.assignedAgent;
+    // Gated on the DB row's own updatedAt, the same way the stage above is.
+    // Unconditionally taking the DB value re-imposed whatever assignee was
+    // last written to Postgres over a newer local assignment on every load.
+    if(row.assignedAgent&&dbTouchedAt>=Number(ticketAssigneeTouchedAt[id]||0)){
+      setTicketAssignee(id,normalizeSupportAgent(row.assignedAgent)||row.assignedAgent,dbTouchedAt);
+    }
     if(row.csAgent)ticketCSOwner[id]=normalizeCSAgent(row.csAgent)||row.csAgent;
     if(row.assignedAgent||row.csAgent)ticketAssignmentMode[id]='support';
     if(row.senderEmail)ticketClientEmail[id]=String(row.senderEmail).toLowerCase();
@@ -4420,7 +4582,7 @@ let liveRev=0,liveSource=null,liveReloadTimer=null;
 // Registry of the maps a patch may write. These are all mutated in place
 // (never reassigned), so holding references here stays valid for the session.
 function liveSyncTargets(){
-  return {ticketState,ticketStageTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
+  return {ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
     manualSupportOverride,manualCSOverride,ticketPriority,ticketCategory,ticketSubtype,
     ticketJira,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
     ticketNumbers,ticketComments,ticketCreatedBy};
@@ -4450,11 +4612,47 @@ function applyBoardPatch(p){
     if(allTickets.some(x=>String(x.id)===String(t.id)))return;
     allTickets.push(t);touched++;
   });
+  // Assignment patches must be checked against our own clock before being
+  // applied. Writing them raw was the reason a ticket still "went back" right
+  // after being assigned: saveState() is queued and asynchronous, so between
+  // the local assignment and our save reaching the server, another tab's
+  // broadcast could arrive carrying the OLD agent. Applied blindly it
+  // overwrote the fresh choice in place - visibly reverting the card, and
+  // poisoning the next save with the stale value.
+  const ASSIGN_CLUSTER=['ticketAssignee','ticketCSOwner','ticketAssignmentMode','manualSupportOverride'];
+  const incomingAssignTs={};
+  (p.changes||[]).forEach(c=>{
+    if(c&&c.field==='ticketAssigneeTouchedAt')incomingAssignTs[String(c.id)]=Number(c.value||0);
+  });
   (p.changes||[]).forEach(c=>{
     if(!c||!c.field)return;
     const map=targets[c.field];
     if(!map)return;
     const id=String(c.id);
+    if(ASSIGN_CLUSTER.includes(c.field)){
+      const localTs=Number(ticketAssigneeTouchedAt[id]||0);
+      const remoteTs=Number(incomingAssignTs[id]||0);
+      // Our assignment is newer (or the sender did not stamp theirs at all):
+      // keep ours and let our own save win the argument on the server.
+      if(localTs>0&&remoteTs<localTs){
+        if(c.field==='ticketAssignee'){
+          logAssignChange({id,from:ticketAssignee[id]||'(none)',to:c.value||'(none)',
+            result:'REJECTED (stale live patch)',ts:remoteTs,prevTs:localTs,
+            by:'applyBoardPatch/'+(p.actor||'?'),at:Date.now()});
+        }
+        return;
+      }
+      // Goes through the setter so the change is stamped and recorded like any
+      // other, rather than written straight into the map.
+      if(c.field==='ticketAssignee'){
+        // remoteTs 0 means the sender never stamped it (legacy value). Record it
+        // as timestamp 1, not Date.now() - adopting the value is fine, but it
+        // must not masquerade as a fresh decision and outrank a real assignment
+        // made elsewhere a moment later.
+        if(setTicketAssignee(id,c.value,remoteTs>0?remoteTs:1,'liveSync/'+(p.actor||'?')))touched++;
+        return;
+      }
+    }
     if(c.value===null||c.value===undefined){if(id in map){delete map[id];touched++;}return;}
     const next=c.field==='ticketState'?normalizeTicketStage(c.value):c.value;
     if(JSON.stringify(map[id])===JSON.stringify(next))return;
@@ -4520,6 +4718,8 @@ async function loadState(){
   }
   if(s.ticketState){Object.entries(s.ticketState).forEach(([k,v])=>{ticketState[k]=normalizeTicketStage(v);});}
   if(s.ticketStageTouchedAt&&typeof s.ticketStageTouchedAt==='object')Object.assign(ticketStageTouchedAt,s.ticketStageTouchedAt);
+  if(s.ticketAssigneeTouchedAt&&typeof s.ticketAssigneeTouchedAt==='object')Object.assign(ticketAssigneeTouchedAt,s.ticketAssigneeTouchedAt);
+  if(s.ticketAssigneeBy&&typeof s.ticketAssigneeBy==='object')Object.assign(ticketAssigneeBy,s.ticketAssigneeBy);
   if(s.ticketHasNewReply&&typeof s.ticketHasNewReply==='object')Object.assign(ticketHasNewReply,s.ticketHasNewReply);
   if(s.ticketResolutionMeta&&typeof s.ticketResolutionMeta==='object')Object.assign(ticketResolutionMeta,s.ticketResolutionMeta);
   if(s.ticketArchived&&typeof s.ticketArchived==='object')Object.assign(ticketArchived,s.ticketArchived);
@@ -4558,7 +4758,7 @@ async function loadState(){
   normalizeStoredJiraLinks();
   normalizeLegacyAssignmentModes();
 }
-function normalizeLegacyAssignmentModes(){let changed=false;allTickets.forEach(t=>{const id=t.id;if(ticketCategory[id]==='Spam')return;const assignee=normalizeAgentCode(ticketAssignee[id]||'');if(CS_AGENTS.includes(assignee)){if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;ticketAssignee[id]=leastLoadedSupportAgent();ticketAssignmentMode[id]='support';manualSupportOverride[id]=false;changed=true;}else if(SUPPORT_AGENTS.includes(assignee)&&ticketAssignmentMode[id]!=='support'){ticketAssignmentMode[id]='support';changed=true;}if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]){const cs=resolveDefaultCSForTicket(id,t.email);if(cs){ticketCSOwner[id]=cs;changed=true;}}});if(changed)saveState('normalize_legacy_assignment_modes');}
+function normalizeLegacyAssignmentModes(){let changed=false;allTickets.forEach(t=>{const id=t.id;if(ticketCategory[id]==='Spam')return;const assignee=normalizeAgentCode(ticketAssignee[id]||'');if(CS_AGENTS.includes(assignee)){if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;setTicketAssignee(id,leastLoadedSupportAgent());ticketAssignmentMode[id]='support';manualSupportOverride[id]=false;changed=true;}else if(SUPPORT_AGENTS.includes(assignee)&&ticketAssignmentMode[id]!=='support'){ticketAssignmentMode[id]='support';changed=true;}if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]){const cs=resolveDefaultCSForTicket(id,t.email);if(cs){ticketCSOwner[id]=cs;changed=true;}}});if(changed)saveState('normalize_legacy_assignment_modes');}
 function saveReads(){saveState();}
 function saveHsCache(){saveState();}
 window.addEventListener('pagehide',flushStateWithBeacon);
@@ -4584,6 +4784,7 @@ function setSideNavActive(mode){
   document.getElementById('dashboard-view-btn')?.classList.toggle('active',mode==='dashboard');
   document.getElementById('ticket-kpi-view-btn')?.classList.toggle('active',mode==='kpi');
   document.getElementById('qt-seize-view-btn')?.classList.toggle('active',mode==='qtSeize');
+  document.getElementById('assignlog-view-btn')?.classList.toggle('active',mode==='assignlog');
 }
 function setBoardChromeVisible(visible){
   const display=visible?'':'none';
@@ -4642,6 +4843,8 @@ function restoreLastWorkspaceSession(){
   if(mode==='dashboard')return showDashboardView();
   if(mode==='kpi')return showKpiView();
   if(mode==='qtSeize')return showQtSeizeView();
+  if(mode==='assignlog')return showAssignLogView();
+  // 'archive' intentionally falls through to the board, as before.
   return showBoardView();
 }
 function applyRestoredWorkspaceControls(){
@@ -5082,7 +5285,7 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   if(clientEmail)ticketClientEmail[id]=clientEmail;
   ticketCategory[id]=category;
   if(subtype)ticketSubtype[id]=subtype;
-  ticketAssignee[id]=normalizeSupportAgent(document.getElementById('ct-agent').value)||leastLoadedSupportAgent();
+  setTicketAssignee(id,normalizeSupportAgent(document.getElementById('ct-agent').value)||leastLoadedSupportAgent());
   ticketAssignmentMode[id]='support';
   const creatorCS=currentUserCSAgent();
   if(creatorCS){ticketCSOwner[id]=creatorCS;manualCSOverride[id]=true;}
@@ -5134,14 +5337,88 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';}
+function hidePrimaryViews(){document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('main-board').style.display='flex';setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
 function showDashboardView(){companiesViewType='report';viewMode='companies';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('companies-view').style.display='block';setSideNavActive('dashboard');saveLastWorkspaceSession('dashboard');renderCompaniesView();}
 function showKpiView(){viewMode='kpi';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('kpi-view').style.display='block';setSideNavActive('kpi');saveLastWorkspaceSession('kpi');renderKpiView();}
 function showQtSeizeView(){viewMode='qtSeize';setBoardChromeVisible(false);hidePrimaryViews();const frame=document.getElementById('qt-seize-frame');if(frame&&!frame.src)frame.src='/qt-seize/';document.getElementById('qt-seize-view').style.display='block';setSideNavActive('qtSeize');saveLastWorkspaceSession('qtSeize');}
-function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+function showAssignLogView(){viewMode='assignlog';setBoardChromeVisible(false);hidePrimaryViews();document.getElementById('assignlog-view').style.display='block';setSideNavActive('assignlog');saveLastWorkspaceSession('assignlog');renderAssignLogView();}
+function renderActiveView(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+
+// ---------------------------------------------------------------------------
+// Assignment Log
+// Reads the durable Postgres audit trail (ticket_assignedAgent_changed), not
+// the in-memory ring buffer, so history survives reloads and every agent sees
+// the same record. The server flags an entry as a revert when it puts a ticket
+// back to where the previous change moved it from.
+// ---------------------------------------------------------------------------
+let assignLogRows=[],assignLogRevertsOnly=false,assignLogAgent='all',assignLogLoading=false;
+async function fetchAssignmentLog(){
+  try{
+    const res=await fetch('/api/audit/assignments?limit=500',{credentials:'include'});
+    if(!res.ok)return null;
+    const out=await res.json();
+    return Array.isArray(out?.assignments)?out.assignments:[];
+  }catch(_){return null;}
+}
+function assignLogAgentOptions(){
+  const sel=document.getElementById('assignlog-agent-filter');
+  if(!sel)return;
+  const names=[...new Set(assignLogRows.flatMap(r=>[r.from,r.to,r.actor]).filter(Boolean))].sort();
+  const cur=sel.value||'all';
+  sel.innerHTML='<option value="all">All agents</option>'+names.map(n=>`<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  sel.value=names.includes(cur)?cur:'all';
+}
+async function renderAssignLogView(){
+  const body=document.getElementById('assignlog-rows');
+  const summary=document.getElementById('assignlog-summary');
+  if(!body)return;
+  if(!assignLogRows.length&&!assignLogLoading){
+    assignLogLoading=true;
+    body.innerHTML='<tr><td colspan="6" style="padding:16px;color:var(--muted);">Loading assignment history&hellip;</td></tr>';
+    const rows=await fetchAssignmentLog();
+    assignLogLoading=false;
+    if(rows===null){
+      body.innerHTML='<tr><td colspan="6" style="padding:16px;color:var(--muted);">Could not load the assignment log.</td></tr>';
+      if(summary)summary.textContent='';
+      return;
+    }
+    assignLogRows=rows;
+    assignLogAgentOptions();
+  }
+  let rows=assignLogRows;
+  if(assignLogRevertsOnly)rows=rows.filter(r=>r.isRevert);
+  if(assignLogAgent!=='all')rows=rows.filter(r=>r.from===assignLogAgent||r.to===assignLogAgent||r.actor===assignLogAgent);
+  const reverts=assignLogRows.filter(r=>r.isRevert).length;
+  if(summary)summary.textContent=`${assignLogRows.length} change${assignLogRows.length===1?'':'s'} recorded  ${reverts} revert${reverts===1?'':'s'}  showing ${rows.length}`;
+  if(!rows.length){
+    body.innerHTML='<tr><td colspan="6" style="padding:16px;color:var(--muted);">No assignment changes match this filter.</td></tr>';
+    return;
+  }
+  body.innerHTML=rows.map(r=>{
+    const when=r.at?new Date(r.at):null;
+    const ticketLabel=r.ticketNumber?`#${esc(String(r.ticketNumber))}`:(r.externalId?esc(String(r.externalId).slice(0,10)):'-');
+    // "How" distinguishes a deliberate dropdown change from workload
+    // auto-assign or a patch that arrived from another agent's session.
+    const src=String(r.source||'');
+    const how=/manual|applyTicketAgentSelection/i.test(src)?'Manual'
+      :/liveSync/i.test(src)?'From '+esc(src.split('/')[1]||'another session')
+      :/ensureSupportAssignment|leastLoaded|autoAssign|applyCompanyCS/i.test(src)?'Auto (workload)'
+      :/mergeDatabaseTickets|liveSync/i.test(src)?'Sync'
+      :src?esc(src):'-';
+    const actor=r.actor||r.account||'-';
+    return `<tr style="border-top:1px solid var(--border);${r.isRevert?'background:rgba(var(--rose-500-rgb,244,63,94),.07);':''}">
+      <td style="padding:9px 12px;white-space:nowrap;color:var(--muted);">${when?esc(when.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})):'-'}</td>
+      <td style="padding:9px 12px;"><div style="font-weight:700;">${ticketLabel}</div><div style="color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.subject||'')}</div></td>
+      <td style="padding:9px 12px;">${r.from?`<span class="agent-pill" style="--agent-accent:${agentColor(r.from)}">${esc(r.from)}</span>`:'<span style="color:var(--muted);">unassigned</span>'}</td>
+      <td style="padding:9px 12px;">${r.to?`<span class="agent-pill" style="--agent-accent:${agentColor(r.to)}">${esc(r.to)}</span>`:'<span style="color:var(--muted);">unassigned</span>'}</td>
+      <td style="padding:9px 12px;white-space:nowrap;">${esc(actor)}${r.account&&r.account!==actor?`<div style="color:var(--muted);font-size:10.5px;">login: ${esc(r.account)}</div>`:''}</td>
+      <td style="padding:9px 12px;white-space:nowrap;">${how}${r.isRevert?`<div style="color:var(--rose-600,#e11d48);font-weight:800;font-size:10.5px;">REVERTED${r.revertedAfterSeconds!==null?` after ${r.revertedAfterSeconds}s`:''}</div>`:''}</td>
+    </tr>`;
+  }).join('');
+}
 function ticketTimestampMs(t){
   const id=t?.id;
   const raw=t?.email?.receivedDateTime||ticketCreatedAt[id]||null;
@@ -5626,6 +5903,14 @@ document.getElementById('btn-back-board').addEventListener('click',showBoardView
 document.getElementById('spam-view-btn').addEventListener('click',()=>{if(viewMode==='spam')showBoardView();else showSpamView();});
 document.getElementById('btn-back-board-archive').addEventListener('click',showBoardView);
 document.getElementById('archive-view-btn').addEventListener('click',()=>{if(viewMode==='archive')showBoardView();else showArchiveView();});
+document.getElementById('assignlog-view-btn').addEventListener('click',()=>{if(viewMode==='assignlog')showBoardView();else showAssignLogView();});
+document.getElementById('assignlog-refresh').addEventListener('click',()=>{assignLogRows=[];renderAssignLogView();});
+document.getElementById('assignlog-reverts-only').addEventListener('click',e=>{
+  assignLogRevertsOnly=!assignLogRevertsOnly;
+  e.currentTarget.classList.toggle('active',assignLogRevertsOnly);
+  renderAssignLogView();
+});
+document.getElementById('assignlog-agent-filter').addEventListener('change',e=>{assignLogAgent=e.target.value;renderAssignLogView();});
 document.getElementById('companies-view-btn').addEventListener('click',()=>{if(viewMode==='companies'&&companiesViewType==='report'){companiesViewType='table';saveState('companies_view_type_change_sidebar');showCompaniesView();return;}if(viewMode==='companies')showBoardView();else showCompaniesView();});
 document.getElementById('board-view-btn').addEventListener('click',showBoardView);
 document.getElementById('dashboard-view-btn').addEventListener('click',()=>{if(viewMode==='companies'&&companiesViewType==='report')showBoardView();else showDashboardView();});
@@ -5874,7 +6159,7 @@ function ensureTicketCSOwnerResolved(id,emailObj){
   }
   return ticketCSOwner[id]||null;
 }
-function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:leastLoadedSupportAgent();const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){ticketAssignee[id]=supportAgent;ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]!==false){manualSupportOverride[id]=false;changed=true;}return changed;}
+function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:leastLoadedSupportAgent();const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){setTicketAssignee(id,supportAgent);ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]===undefined){manualSupportOverride[id]=false;changed=true;}return changed;}
 function shouldRefreshHubspotCacheEntry(email){const ce=String(email||'').toLowerCase();if(!ce)return false;if(!(ce in hsCache))return true;const cached=hsCache[ce];const related=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&(ticketClientEmail[t.id]||getClientEmail(t.email))===ce);if(!related.length)return false;if(cached===null)return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);if(!cached||!cached.companyName||!cached.companyId||!cached.coOwner)return true;return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);}
 function applyCompanyCSAssignments(){let changed=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs&&!manualCSOverride[id]){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true}))changed++;}});if(changed){saveState('auto_assign_cs_owner');}}
 
@@ -6184,7 +6469,9 @@ function applyTicketAgentSelection(id,previousAgent,selected){
     if(cs)ticketCSOwner[id]=cs;
   }
   ticketAssignmentMode[id]='support';
-  ticketAssignee[id]=supportAgent;
+  // Stamped so this deliberate, human assignment outranks any older snapshot
+  // another tab is about to save.
+  setTicketAssignee(id,supportAgent);
   manualSupportOverride[id]=true;
   saveState('manual_agent_dropdown');
   updateWorkload();
@@ -6244,7 +6531,7 @@ function makeCard(ticket,isNew=false){
   ensureTicketNumber(id);
   const priority=ticketPriority[id]||ticket.priority;
   const agent=normalizeSupportAgent(ticketAssignee[id])||leastLoadedSupportAgent();
-  if(ticketAssignee[id]!==agent)ticketAssignee[id]=agent;
+  if(ticketAssignee[id]!==agent)setTicketAssignee(id,agent);
   const csOwner=ensureTicketCSOwnerResolved(id,email)||normalizeCSAgent(ticketCSOwner[id]||'');
   const showCSBadge=!!csOwner;
   const canAssign = currentUserCanAssignTicket(ticket);
@@ -6428,7 +6715,43 @@ function makeCard(ticket,isNew=false){
   return div;
 }
 
+// The agent dropdown is moved out to <body> while open (so it can escape the
+// column's clipping). If the board re-renders while it is open - a poll, a
+// live-sync patch, any saveState-driven redraw - the card and its
+// .agent-assign-wrap are destroyed but the menu survives, parked on <body>,
+// still .open with display:block and pointer-events:auto. Every close path
+// looks for `.agent-assign-wrap.open`, and that wrap no longer exists, so the
+// orphan is unreachable and stays on screen forever. Worse, the re-render
+// builds a fresh menu carrying the SAME data-agent-menu-id, so
+// getAgentAssignMenuElement() finds the new one and never the orphan.
+//
+// This is the "dropdown gets stuck and doesn't go away" bug. Called before
+// every board render so a redraw can never leave one behind.
+function closeAllAgentMenus(){
+  document.querySelectorAll('.agent-assign-wrap.open').forEach(w=>{
+    w.classList.remove('open');
+    const m=getAgentAssignMenuElement(w);
+    if(!m)return;
+    m.classList.remove('open');
+    m.style.display='';m.style.visibility='';m.style.pointerEvents='';
+    restoreAgentAssignMenuToWrap(w);
+  });
+  // Sweep any menu still sitting directly on <body>. Re-home it if its wrap is
+  // still around and has no menu of its own, otherwise drop it - renderBoard
+  // recreates the real one from scratch.
+  document.querySelectorAll('body > .agent-assign-menu').forEach(m=>{
+    const wrap=document.querySelector(`.agent-assign-wrap[data-agent-menu="${m.dataset.agentMenuId}"]`);
+    if(wrap && !wrap.querySelector('.agent-assign-menu')){
+      wrap.appendChild(m);
+      m.classList.remove('open');
+      m.style.display='';m.style.visibility='';m.style.pointerEvents='';
+      return;
+    }
+    m.remove();
+  });
+}
 function renderBoard(){
+  closeAllAgentMenus();
   allTickets.sort((a,b)=>{const ta=new Date(a.email.receivedDateTime||0).getTime(),tb=new Date(b.email.receivedDateTime||0).getTime();return sortDesc?tb-ta:ta-tb;});
   rebuildTagged();
   syncRoleRestrictedControls();
@@ -6617,15 +6940,15 @@ document.getElementById('account-btn').addEventListener('click',e=>{e.stopPropag
 document.addEventListener('click',e=>{const panel=document.getElementById('account-panel');const menu=e.target.closest('.account-menu');if(!menu&&panel.classList.contains('open'))panel.classList.remove('open');});
 document.addEventListener('click',e=>{
   if(!e.target.closest('.agent-assign-wrap') && !e.target.closest('.agent-assign-menu')){
-    document.querySelectorAll('.agent-assign-wrap.open').forEach(w=>{
-      w.classList.remove('open');
-      const menu=getAgentAssignMenuElement(w);
-      if(menu){
-        menu.classList.remove('open');
-        restoreAgentAssignMenuToWrap(w);
-      }
-    });
+    // Shared with renderBoard so a click-away also clears any orphaned menu
+    // left on <body> by an earlier re-render; the old version only walked
+    // `.agent-assign-wrap.open`, which cannot match an orphan.
+    closeAllAgentMenus();
   }
+});
+// Escape is the reflex for a stuck overlay - it did nothing here before.
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&document.querySelector('.agent-assign-wrap.open, body > .agent-assign-menu'))closeAllAgentMenus();
 });
 function repositionOpenAgentMenu(){document.querySelectorAll('.agent-assign-wrap.open').forEach(positionAgentAssignMenu);}
 window.addEventListener('scroll',repositionOpenAgentMenu,{passive:true});
