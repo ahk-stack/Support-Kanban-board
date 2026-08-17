@@ -37,5 +37,10 @@ data/*.json
 versions/*.json
 backups/
 
+# Translation language packages, downloaded on demand at runtime. Hundreds of MB
+# of model weights - a cache, not source. Delete the directory to reclaim the
+# space; the next translation re-downloads only the languages it needs.
+data/mt-models/
+
 # Prisma generated client
 /generated/prisma

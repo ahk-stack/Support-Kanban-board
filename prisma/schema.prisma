@@ -119,6 +119,16 @@ model Ticket {
   // for existing rows), unlike the old client-only ephemeral counter this
   // replaces. Not the @id - that stays the internal DB primary key.
   displayNumber   Int?      @unique
+  // Set when an agent marks this ticket as a duplicate of another one: the
+  // externalId of the ticket it duplicates ("" is not used - null means "not a
+  // duplicate"). A duplicate is real inbox noise, not real work, so the KPI
+  // dashboard excludes it from resolved/throughput/SLA figures and counts it
+  // under its own heading instead. Resolving a duplicate used to look
+  // identical to resolving a genuine ticket and quietly inflated every
+  // resolved-ticket number.
+  duplicateOfExternalId String?
+  duplicateMarkedAt     DateTime?
+  duplicateMarkedBy     String?
 
   comments        TicketComment[]
   events          TicketEvent[]
@@ -128,6 +138,7 @@ model Ticket {
   @@index([assignedAgent])
   @@index([csAgent])
   @@index([createdAt])
+  @@index([duplicateOfExternalId])
 }
 
 model TicketComment {
@@ -176,4 +187,39 @@ model SyncLog {
   message   String?
   metadata  Json?
   createdAt DateTime @default(now())
+}
+
+// One cached machine translation of one ticket's text into one target
+// language. Not tied to the Ticket table by foreign key on purpose: the board
+// can hold a ticket (manual, or not yet synced) that has no row there yet, and
+// a translation is disposable cache rather than ticket data.
+//
+// sourceHash is a hash of the exact source segments that were sent, so the
+// cache is self-invalidating: merge a new reply into a thread and the body
+// changes, the hash changes, and the next request re-translates instead of
+// serving a translation that is missing the newest message. Re-opening an
+// unchanged ticket is free, and free for every other agent too - the cache is
+// shared, so the second person to read a French ticket pays nothing.
+model TicketTranslation {
+  id               Int      @id @default(autoincrement())
+  ticketExternalId String
+  targetLang       String
+  sourceHash       String
+  // What the model detected the source was, so the UI can say "translated
+  // from French" without a second round trip.
+  sourceLang       String?
+  sourceLangName   String?
+  // { "<segment id>": "<translated text>" } - segment ids are assigned by the
+  // client (subject, summary, b0, b1, ... c0, c1) and are meaningless to the
+  // server beyond round-tripping them.
+  segments         Json
+  model            String?
+  usage            Json?
+  createdBy        String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([ticketExternalId, targetLang, sourceHash])
+  @@index([ticketExternalId])
+  @@index([createdAt])
 }

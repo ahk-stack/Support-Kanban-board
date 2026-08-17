@@ -717,7 +717,15 @@
 
         // Small working frame - synthesis is done here, the subject is re-added
         // at full resolution afterwards so its detail is never downsampled.
-        const WORK_MAX = 224;
+        //
+        // 320 rather than 224: measured on a ~36% hole (a 16:9 photo expanded
+        // to square), PatchMatch costs 197ms at 224 and 354ms at 320, for 43%
+        // more linear detail in the synthesised band. Past this it turns
+        // superlinear as the patch search stops fitting in cache - 384 is
+        // 537ms, 448 is 935ms and 512 is 2.3s - so 320 is the last size that
+        // stays comfortably interactive, including on hardware slower than a
+        // dev machine and when a queue of images is processed one after another.
+        const WORK_MAX = 320;
         const s = Math.min(1, WORK_MAX / Math.max(tw, th));
         const W = Math.max(24, Math.round(tw * s));
         const H = Math.max(24, Math.round(th * s));
