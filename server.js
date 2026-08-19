@@ -45,6 +45,21 @@ const M365_TENANT_ID = process.env.M365_TENANT_ID || '';
 const M365_CLIENT_ID = process.env.M365_CLIENT_ID || '';
 const M365_CLIENT_SECRET = process.env.M365_CLIENT_SECRET || '';
 const M365_REDIRECT_URI = process.env.M365_REDIRECT_URI || `http://localhost:${PORT}/auth/microsoft/callback`;
+// Azure shows a new client secret as two fields side by side, "Secret ID" and
+// "Value", and only the Value is a credential - the ID is a GUID. Pasting the
+// ID is the single easiest mistake to make here and it fails in the most
+// confusing possible way: everything works until the current access token
+// expires an hour later, then every Graph call dies with a 401 that says
+// nothing, tickets lose their formatting and their images, and no log line
+// points at the cause. The shape is unmistakable, so say so at boot.
+// (Real secret values are ~40 chars and contain punctuation; a GUID is 36 hex
+// characters and dashes.)
+const M365_SECRET_LOOKS_LIKE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(process.env.M365_CLIENT_SECRET || '');
+if (M365_SECRET_LOOKS_LIKE_ID) {
+  console.error('[m365] M365_CLIENT_SECRET is a GUID, which means it is the client secret ID, not the secret VALUE.');
+  console.error('[m365] Graph will reject every token request with AADSTS7000215, so ticket bodies and inline images cannot load.');
+  console.error('[m365] Fix: Azure portal > App registrations > this app > Certificates & secrets > New client secret > copy the Value column.');
+}
 // Chat.Create/Chat.ReadWrite/User.ReadBasic.All intentionally excluded:
 // they're only needed by graphSendTeamsDirectMessage() (via
 // graphFindUserByEmail(), which looks up other users), and nothing currently
@@ -1402,7 +1417,24 @@ async function refreshStoredM365Tokens(tokens, req = null) {
   const res = await fetch(`https://login.microsoftonline.com/${M365_TENANT_ID}/oauth2/v2.0/token`, {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form
   });
-  if (!res.ok) throw new Error(`graph_refresh_error_${res.status}`);
+  if (!res.ok) {
+    // `graph_refresh_error_401` on its own cost real time: it says a status and
+    // nothing else, while Azure had already said precisely what was wrong in a
+    // body we threw away. Keep the AADSTS line, and split the two cases apart -
+    // they need opposite responses and only one of them is the agent's to fix.
+    const raw = await res.text();
+    let parsed = {};
+    try { parsed = JSON.parse(raw); } catch (_) {}
+    const detail = String(parsed.error_description || raw).split(/\r?\n/)[0].slice(0, 240);
+    // invalid_client: the app's own credential is wrong or expired. No amount
+    // of reconnecting helps - the secret has to be fixed in Azure and in the
+    // deployment env.
+    if (parsed.error === 'invalid_client') throw new Error(`m365_client_secret_invalid:${detail}`);
+    // invalid_grant: the credential is fine, this user's consent is not.
+    // Signing in to Outlook again fixes it.
+    if (parsed.error === 'invalid_grant') throw new Error(`m365_reauth_required:${detail}`);
+    throw new Error(`graph_refresh_error_${res.status}:${detail}`);
+  }
   const json = await res.json();
   const refreshed = {
     accessToken: json.access_token,
@@ -1444,6 +1476,44 @@ async function graphRequest(pathname, token, init = {}) {
 
 async function graphGet(pathname, token) {
   return graphRequest(pathname, token);
+}
+
+// graphRequest throws `graph_error_<status>:<body>`; this is the status back out.
+function graphErrorStatus(err) {
+  return Number(String(err?.message || '').match(/^graph_error_(\d{3})/)?.[1]) || 0;
+}
+
+// A GET that survives the two failures that are not the caller's fault.
+//
+// 401: the access token is refreshed on expiry, but a token can also be
+// invalidated before it expires (password change, admin revoke, conditional
+// access re-evaluation). One forced refresh turns that from "this ticket has no
+// body" into a request that just works.
+//
+// 429/503/504: Graph throttles per-mailbox, and opening several tickets in a
+// row is exactly the burst that trips it. Retrying after a beat costs one
+// second; not retrying costs the agent the message they clicked on.
+async function graphGetResilient(pathname, req) {
+  let token = await graphDelegatedToken(req);
+  let refreshed = false;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await graphGet(pathname, token);
+    } catch (err) {
+      const status = graphErrorStatus(err);
+      if (status === 401 && !refreshed) {
+        refreshed = true;
+        const tokens = await resolveStoredM365Tokens(req);
+        token = (await refreshStoredM365Tokens(tokens, req)).accessToken;
+        continue;
+      }
+      if ((status === 429 || status === 503 || status === 504) && attempt < 2) {
+        await new Promise(r => setTimeout(r, 700 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 async function graphSendPasswordResetEmail(recipientEmail, resetUrl) {
@@ -2686,7 +2756,11 @@ app.get('/auth/microsoft/callback', requireAuth, async (req, res) => {
 
 app.get('/auth/microsoft/status', requireAuth, async (req, res) => {
   const connected = !!(req.session?.m365Tokens?.refreshToken || (await getStoredOAuthTokens('m365'))?.refreshToken || getPersistedM365Tokens()?.refreshToken);
-  res.json({ connected });
+  // "Connected" only means a refresh token is stored. If the app's own secret
+  // is malformed, that token can never be exchanged for anything - so say so
+  // here rather than letting the UI report a healthy connection that cannot
+  // fetch a single message.
+  res.json({ connected, configError: M365_SECRET_LOOKS_LIKE_ID ? 'client_secret_looks_like_secret_id' : '' });
 });
 
 app.get('/auth/hubspot/start', requireAuth, (req, res) => {
@@ -4347,6 +4421,198 @@ app.get('/api/audit/tickets', requireAdmin, async (req, res) => {
     return res.status(500).json({ error: 'read_ticket_audit_list_failed' });
   }
 });
+// Which tickets each Support agent and each CS agent actually worked, and what
+// they changed on them.
+//
+// The old audit page was a flat reverse-chronological list of every event in
+// the database. It answered "what happened last?" and nothing else - to see
+// what one agent had been doing you scrolled and pattern-matched. Grouping the
+// same events by the agent responsible for the ticket answers the question the
+// page is opened for.
+//
+// Attribution is by the ticket's own assignedAgent / csAgent, not by the login
+// that saved the change. Two reasons: `metadata.actor` is only recorded for
+// assignment changes, so grouping on the actor would leave almost every row in
+// an "unknown" bucket; and the account that flushed a save is often not who
+// caused it (auto-assign, a cross-tab write, an MCP call). The acting account
+// is still printed on every row, so nothing is lost. A ticket has both a
+// Support agent and a CS agent, so its events appear under both - that is the
+// point of the two sections.
+const AGENT_DRIVEN_EVENTS = new Set([
+  'ticket_created',
+  'ticket_status_changed',
+  'ticket_priority_changed',
+  'ticket_category_changed',
+  'ticket_assignedAgent_changed',
+  'ticket_csAgent_changed',
+  'ticket_jiraTicketKey_changed',
+  'ticket_hubspotTicketId_changed',
+  'comment_added'
+]);
+// Outlook rewrites these whenever a reply merges into an existing ticket. They
+// are real changes to the row but nobody on the team made them, so counting
+// them as agent activity buried the actual work. Available behind ?includeSync=1.
+const SYNC_DRIVEN_EVENTS = new Set([
+  'ticket_subject_changed',
+  'ticket_senderEmail_changed',
+  'ticket_companyName_changed',
+  'ticket_body_changed'
+]);
+const EVENT_LABELS = {
+  ticket_created: 'Created',
+  ticket_status_changed: 'Status',
+  ticket_priority_changed: 'Priority',
+  ticket_category_changed: 'Category',
+  ticket_assignedAgent_changed: 'Support assignment',
+  ticket_csAgent_changed: 'CS assignment',
+  ticket_jiraTicketKey_changed: 'Jira link',
+  ticket_hubspotTicketId_changed: 'HubSpot link',
+  comment_added: 'Note added',
+  ticket_subject_changed: 'Subject (mail sync)',
+  ticket_senderEmail_changed: 'Sender (mail sync)',
+  ticket_companyName_changed: 'Company (mail sync)',
+  ticket_body_changed: 'Body (mail sync)'
+};
+const UNASSIGNED_BUCKET = '(unassigned)';
+// Per ticket, so one runaway thread cannot dominate the payload. The count on
+// the row is the true total either way.
+const MAX_CHANGES_PER_TICKET = 40;
+
+function clipAuditValue(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  return text.length > 120 ? `${text.slice(0, 119)}...` : text;
+}
+
+// The grouping itself, kept out of the route handler so it can be exercised
+// without a database.
+function buildAgentActivity(events, { includeSync = false } = {}) {
+  const kept = events.filter(e => includeSync
+    ? (AGENT_DRIVEN_EVENTS.has(e.eventType) || SYNC_DRIVEN_EVENTS.has(e.eventType))
+    : AGENT_DRIVEN_EVENTS.has(e.eventType));
+
+  // kind -> code -> { tickets: Map, eventCount, lastActivityAt }
+  const buckets = { support: new Map(), cs: new Map() };
+
+  for (const e of kept) {
+    if (!e.ticket) continue;
+    const meta = (e.metadata && typeof e.metadata === 'object') ? e.metadata : {};
+    const change = {
+      at: e.createdAt,
+      type: e.eventType,
+      label: EVENT_LABELS[e.eventType] || e.eventType,
+      from: clipAuditValue(e.oldValue),
+      to: clipAuditValue(e.newValue),
+      actor: meta.actor || null,
+      source: meta.source || null,
+      account: e.user?.displayName || e.user?.username || null,
+      sync: SYNC_DRIVEN_EVENTS.has(e.eventType)
+    };
+
+    for (const kind of ['support', 'cs']) {
+      const raw = kind === 'support' ? e.ticket.assignedAgent : e.ticket.csAgent;
+      const code = String(raw || '').trim().toUpperCase() || UNASSIGNED_BUCKET;
+      const byCode = buckets[kind];
+      if (!byCode.has(code)) byCode.set(code, { code, kind, tickets: new Map(), eventCount: 0, lastActivityAt: null });
+      const agent = byCode.get(code);
+      agent.eventCount += 1;
+      if (!agent.lastActivityAt || new Date(e.createdAt) > new Date(agent.lastActivityAt)) agent.lastActivityAt = e.createdAt;
+
+      const tid = String(e.ticket.id);
+      if (!agent.tickets.has(tid)) {
+        agent.tickets.set(tid, {
+          ticketId: e.ticket.id,
+          number: e.ticket.displayNumber || null,
+          externalId: e.ticket.externalId || null,
+          subject: e.ticket.subject || '',
+          status: e.ticket.status || '',
+          eventCount: 0,
+          lastAt: e.createdAt,
+          changes: []
+        });
+      }
+      const t = agent.tickets.get(tid);
+      t.eventCount += 1;
+      if (new Date(e.createdAt) > new Date(t.lastAt)) t.lastAt = e.createdAt;
+      if (t.changes.length < MAX_CHANGES_PER_TICKET) t.changes.push(change);
+    }
+  }
+
+  const shape = (kind) => [...buckets[kind].values()]
+    .map(a => ({
+      code: a.code,
+      kind: a.kind,
+      known: kind === 'support' ? SUPPORT_AGENT_CODES.has(a.code) : CS_AGENT_CODES.has(a.code),
+      eventCount: a.eventCount,
+      ticketCount: a.tickets.size,
+      lastActivityAt: a.lastActivityAt,
+      tickets: [...a.tickets.values()].sort((x, y) => new Date(y.lastAt) - new Date(x.lastAt))
+    }))
+    // Busiest first - the point of the page is who is carrying what. The
+    // unassigned bucket sinks to the bottom regardless of size: it is a data
+    // problem to fix, not an agent to compare against.
+    .sort((x, y) => {
+      if ((x.code === UNASSIGNED_BUCKET) !== (y.code === UNASSIGNED_BUCKET)) return x.code === UNASSIGNED_BUCKET ? 1 : -1;
+      return y.eventCount - x.eventCount || x.code.localeCompare(y.code);
+    });
+
+  // Agents on the roster with nothing in the window are still listed, at zero.
+  // "No updates from this agent in 30 days" is a finding; an absent row reads
+  // as an oversight.
+  const withRoster = (kind, rows) => {
+    const roster = kind === 'support' ? SUPPORT_AGENT_CODES : CS_AGENT_CODES;
+    const present = new Set(rows.map(r => r.code));
+    const missing = [...roster].filter(c => !present.has(c))
+      .sort()
+      .map(code => ({ code, kind, known: true, eventCount: 0, ticketCount: 0, lastActivityAt: null, tickets: [] }));
+    return [...rows, ...missing];
+  };
+
+  return {
+    includeSync,
+    totals: {
+      events: kept.length,
+      tickets: new Set(kept.map(e => e.ticketId)).size
+    },
+    support: withRoster('support', shape('support')),
+    cs: withRoster('cs', shape('cs'))
+  };
+}
+
+const AGENT_ACTIVITY_EVENT_CAP = 5000;
+
+app.get('/api/audit/agent-activity', requireAdmin, async (req, res) => {
+  const days = Math.min(Math.max(Number(req.query.days || 30), 1), 365);
+  const includeSync = String(req.query.includeSync || '') === '1';
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  try {
+    const events = await prisma.ticketEvent.findMany({
+      where: { createdAt: { gte: since } },
+      take: AGENT_ACTIVITY_EVENT_CAP,
+      include: {
+        ticket: {
+          select: { id: true, displayNumber: true, externalId: true, subject: true, status: true, assignedAgent: true, csAgent: true }
+        },
+        user: { select: { username: true, displayName: true, role: true } }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    return res.json({
+      generatedAt: new Date().toISOString(),
+      days,
+      // True when the cap bit, so the page can say the window is partial rather
+      // than quietly under-reporting it.
+      truncated: events.length >= AGENT_ACTIVITY_EVENT_CAP,
+      ...buildAgentActivity(events, { includeSync })
+    });
+  } catch (error) {
+    console.error('Read agent activity audit failed:', error);
+    return res.status(500).json({ error: 'read_agent_activity_failed' });
+  }
+});
+
 app.get('/audit/tickets', requireAdmin, (req, res) => {
   return res.type('html').send(`
 <!doctype html>
@@ -4356,7 +4622,7 @@ app.get('/audit/tickets', requireAdmin, (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
   <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
-  <title>Ticket Audit Log</title>
+  <title>Ticket Activity by Agent</title>
   <style>
     body {
       margin: 0;
@@ -4384,7 +4650,7 @@ app.get('/audit/tickets', requireAdmin, (req, res) => {
 
     main {
       padding: 24px;
-      max-width: 1200px;
+      max-width: 1320px;
       margin: 0 auto;
     }
 
@@ -4394,6 +4660,7 @@ app.get('/audit/tickets', requireAdmin, (req, res) => {
       border-radius: 18px;
       box-shadow: 0 12px 34px rgba(15,23,42,.08);
       overflow: hidden;
+      margin-bottom: 18px;
     }
 
     .toolbar {
@@ -4402,8 +4669,31 @@ app.get('/audit/tickets', requireAdmin, (req, res) => {
       display: flex;
       justify-content: space-between;
       gap: 12px;
-      align-items: center;
+      align-items: flex-end;
+      flex-wrap: wrap;
     }
+
+    .controls { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+    .control { display: flex; flex-direction: column; gap: 4px; }
+    .control label {
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: #64748b;
+    }
+    select, input[type="search"] {
+      font: inherit;
+      font-size: 13px;
+      padding: 7px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      background: white;
+      color: #0f172a;
+    }
+    input[type="search"] { min-width: 210px; }
+    .check { flex-direction: row; align-items: center; gap: 6px; padding-bottom: 8px; }
+    .check label { text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 600; color: #334155; }
 
     button {
       border: 0;
@@ -4415,13 +4705,39 @@ app.get('/audit/tickets', requireAdmin, (req, res) => {
       cursor: pointer;
     }
 
+    /* Every wide table scrolls sideways inside its own card rather than pushing
+       the page wider. The track is kept permanently visible: WebKit hides
+       overlay scrollbars until they are used, and on a table that is only
+       slightly too wide that reads as "there is nothing more to see". */
+    .scroll-x {
+      overflow-x: auto;
+      overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      scrollbar-color: #94a3b8 #eef2f7;
+      padding-bottom: 2px;
+    }
+    .scroll-x::-webkit-scrollbar { height: 12px; }
+    .scroll-x::-webkit-scrollbar-track { background: #eef2f7; border-radius: 999px; }
+    .scroll-x::-webkit-scrollbar-thumb {
+      background: #94a3b8;
+      border-radius: 999px;
+      border: 3px solid transparent;
+      background-clip: padding-box;
+    }
+    .scroll-x::-webkit-scrollbar-thumb:hover { background: #64748b; background-clip: padding-box; }
+
     table {
       width: 100%;
       border-collapse: collapse;
+      /* A width:100% table shrinks to its container and would never overflow,
+         so the wrapper above would have nothing to scroll. This is the floor
+         that hands the overflow to it. */
+      min-width: 940px;
     }
 
     th, td {
-      padding: 12px 14px;
+      padding: 11px 14px;
       border-bottom: 1px solid #e2e8f0;
       text-align: left;
       font-size: 13px;
@@ -4434,7 +4750,10 @@ app.get('/audit/tickets', requireAdmin, (req, res) => {
       text-transform: uppercase;
       font-size: 11px;
       letter-spacing: .04em;
+      white-space: nowrap;
     }
+
+    tbody tr:hover { background: #fbfdff; }
 
     .muted {
       color: #64748b;
@@ -4449,17 +4768,89 @@ app.get('/audit/tickets', requireAdmin, (req, res) => {
       font-weight: 800;
       font-size: 11px;
     }
+    .pill.sync { background: #f1f5f9; color: #64748b; }
 
     .empty {
       padding: 40px;
       text-align: center;
       color: #94a3b8;
     }
+
+    /* Agent header: the code first and large, because the page is scanned by
+       agent, and the two counts next to it because they are what gets compared. */
+    .agent-head {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 16px;
+      border-bottom: 1px solid #e2e8f0;
+      flex-wrap: wrap;
+    }
+    .agent-code {
+      font-size: 15px;
+      font-weight: 900;
+      letter-spacing: .04em;
+      background: #0f172a;
+      color: white;
+      padding: 6px 12px;
+      border-radius: 10px;
+    }
+    .agent-code.cs { background: #0d9488; }
+    .agent-code.unknown { background: #b45309; }
+    .agent-stat { font-size: 12px; color: #334155; }
+    .agent-stat strong { font-size: 15px; color: #0f172a; }
+    .agent-quiet { padding: 14px 16px; color: #94a3b8; font-size: 13px; }
+
+    .section-title {
+      margin: 26px 4px 10px;
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: #64748b;
+    }
+
+    .tno { font-weight: 800; white-space: nowrap; }
+    .status { white-space: nowrap; font-weight: 700; font-size: 11px; color: #475569; }
+    .when { white-space: nowrap; color: #475569; }
+    .count { text-align: right; font-weight: 800; white-space: nowrap; }
+
+    /* The change list. <details> rather than a JS accordion: the summary line
+       is the useful default and the full history is one click away without any
+       state to keep. */
+    details summary {
+      cursor: pointer;
+      font-size: 12px;
+      color: #4338ca;
+      font-weight: 700;
+    }
+    .change {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      flex-wrap: wrap;
+      padding: 4px 0;
+      font-size: 12px;
+      border-top: 1px dashed #e8edf5;
+    }
+    .change:first-child { border-top: 0; }
+    .change .arrow { color: #94a3b8; }
+    .change .val { font-weight: 700; }
+    .change .by { color: #64748b; }
+    .notice {
+      margin: 0 0 18px;
+      padding: 10px 14px;
+      border: 1px solid #f59e0b;
+      border-left-width: 4px;
+      border-radius: 10px;
+      background: #fffbeb;
+      font-size: 12.5px;
+    }
   </style>
 </head>
 <body>
   <header>
-    <strong>Ticket Audit Log</strong>
+    <strong>Ticket Activity by Agent</strong>
     <div style="display:flex;gap:10px;">
       <a href="/">Board</a>
       <a href="/profile">Profile</a>
@@ -4470,18 +4861,43 @@ app.get('/audit/tickets', requireAdmin, (req, res) => {
     <section class="card">
       <div class="toolbar">
         <div>
-          <strong>Recent ticket activity</strong>
-          <div class="muted" style="font-size:12px;margin-top:3px;">
-            Created tickets, status changes, assignments, priorities, and other tracked edits.
-          </div>
+          <strong>Which tickets each agent updated</strong>
+          <div class="muted" style="font-size:12px;margin-top:3px;" id="summary">Loading...</div>
         </div>
-        <button id="refreshBtn">Refresh</button>
-      </div>
-
-      <div id="content">
-        <div class="empty">Loading audit log...</div>
+        <div class="controls">
+          <div class="control">
+            <label for="days">Window</label>
+            <select id="days">
+              <option value="7">Last 7 days</option>
+              <option value="30" selected>Last 30 days</option>
+              <option value="90">Last 90 days</option>
+              <option value="180">Last 180 days</option>
+            </select>
+          </div>
+          <div class="control">
+            <label for="scope">Show</label>
+            <select id="scope">
+              <option value="both" selected>Support and CS</option>
+              <option value="support">Support only</option>
+              <option value="cs">CS only</option>
+            </select>
+          </div>
+          <div class="control">
+            <label for="q">Filter</label>
+            <input type="search" id="q" placeholder="Agent code, ticket no. or subject" autocomplete="off">
+          </div>
+          <div class="control check">
+            <input type="checkbox" id="includeSync">
+            <label for="includeSync">Include mail-sync changes</label>
+          </div>
+          <button id="refreshBtn">Refresh</button>
+        </div>
       </div>
     </section>
+
+    <div id="content">
+      <div class="empty">Loading activity...</div>
+    </div>
   </main>
 
   <script>
@@ -4499,68 +4915,158 @@ app.get('/audit/tickets', requireAdmin, (req, res) => {
       return new Date(value).toLocaleString();
     }
 
-    function formatUser(user) {
-      if (!user) return 'System';
-      return user.displayName || user.username || 'User #' + user.id;
+    // Last loaded payload, so changing the filter or the scope re-renders
+    // without a round trip. Only Window and Include-mail-sync change what the
+    // server has to send.
+    let current = null;
+
+    function ticketLabel(t) {
+      if (t.number) return '#' + String(t.number).padStart(4, '0');
+      return 'ID ' + t.ticketId;
+    }
+
+    function changeLine(c) {
+      const from = c.from ? '<span class="val">' + esc(c.from) + '</span>' : '<span class="muted">empty</span>';
+      const to = c.to ? '<span class="val">' + esc(c.to) + '</span>' : '<span class="muted">empty</span>';
+      // Created and Note added have no meaningful "from", so they read as a
+      // single value rather than a transition.
+      const body = (c.type === 'ticket_created' || c.type === 'comment_added')
+        ? to
+        : from + ' <span class="arrow">&rarr;</span> ' + to;
+      // actor is the agent the board says did it; account is the login whose
+      // save carried it. They differ for auto-assign and cross-tab writes, and
+      // when they do, both are worth seeing.
+      const who = [c.actor ? 'by ' + esc(c.actor) : null, c.account ? '(' + esc(c.account) + ')' : null, c.source ? esc(c.source) : null]
+        .filter(Boolean).join(' ');
+      return '<div class="change">'
+        + '<span class="pill' + (c.sync ? ' sync' : '') + '">' + esc(c.label) + '</span>'
+        + '<span>' + body + '</span>'
+        + '<span class="by">' + esc(formatDate(c.at)) + (who ? ' ' + who : '') + '</span>'
+        + '</div>';
+    }
+
+    function ticketRow(t) {
+      const first = t.changes.length ? changeLine(t.changes[0]) : '';
+      const rest = t.changes.slice(1);
+      const more = rest.length
+        ? '<details><summary>' + rest.length + ' earlier change' + (rest.length > 1 ? 's' : '') + '</summary>'
+          + rest.map(changeLine).join('') + '</details>'
+        : '';
+      return '<tr>'
+        + '<td class="tno">' + esc(ticketLabel(t)) + '</td>'
+        // The board deep-links on externalId (its own ticket id). A manual
+        // ticket without one cannot be opened that way, so it stays plain text
+        // rather than becoming a link that goes nowhere.
+        + '<td>' + (t.externalId
+          ? '<a href="/?ticket=' + encodeURIComponent(t.externalId) + '" title="Open on the board">' + esc(t.subject || '(no subject)') + '</a>'
+          : esc(t.subject || '(no subject)')) + '</td>'
+        + '<td class="status">' + esc(t.status || '-') + '</td>'
+        + '<td class="count">' + t.eventCount + '</td>'
+        + '<td class="when">' + esc(formatDate(t.lastAt)) + '</td>'
+        + '<td>' + first + more + '</td>'
+        + '</tr>';
+    }
+
+    function agentCard(agent, query) {
+      let tickets = agent.tickets;
+      if (query) {
+        const q = query.toLowerCase();
+        // An agent matched by code keeps all of its tickets - "show me what SFA
+        // did" should not also filter the ticket list by "sfa".
+        if (!agent.code.toLowerCase().includes(q)) {
+          tickets = tickets.filter(t => String(t.subject || '').toLowerCase().includes(q)
+            || String(t.number || '').includes(q)
+            || String(t.ticketId).includes(q));
+          if (!tickets.length) return '';
+        }
+      }
+      const codeClass = 'agent-code' + (agent.kind === 'cs' ? ' cs' : '') + (agent.known ? '' : ' unknown');
+      const head = '<div class="agent-head">'
+        + '<span class="' + codeClass + '">' + esc(agent.code) + '</span>'
+        + '<span class="agent-stat"><strong>' + tickets.length + '</strong> ticket' + (tickets.length === 1 ? '' : 's') + ' updated</span>'
+        + '<span class="agent-stat"><strong>' + agent.eventCount + '</strong> update' + (agent.eventCount === 1 ? '' : 's') + '</span>'
+        + '<span class="agent-stat muted">' + (agent.lastActivityAt ? 'last ' + esc(formatDate(agent.lastActivityAt)) : 'no activity in this window') + '</span>'
+        + (agent.known ? '' : '<span class="agent-stat muted">not on the current roster</span>')
+        + '</div>';
+      if (!tickets.length) {
+        return '<section class="card">' + head + '<div class="agent-quiet">No ticket updates in this window.</div></section>';
+      }
+      return '<section class="card">' + head
+        + '<div class="scroll-x"><table><thead><tr>'
+        + '<th>Ticket</th><th>Subject</th><th>Status</th><th>Updates</th><th>Last update</th><th>Most recent change</th>'
+        + '</tr></thead><tbody>'
+        + tickets.map(ticketRow).join('')
+        + '</tbody></table></div></section>';
+    }
+
+    function render() {
+      const content = document.getElementById('content');
+      if (!current) return;
+      const scope = document.getElementById('scope').value;
+      const query = document.getElementById('q').value.trim();
+      const blocks = [];
+
+      if (current.truncated) {
+        blocks.push('<div class="notice">This window hit the 5000-event cap, so the oldest activity in it is not shown. Narrow the window for a complete picture.</div>');
+      }
+
+      const sections = [];
+      if (scope !== 'cs') sections.push(['Support agents', current.support]);
+      if (scope !== 'support') sections.push(['CS agents', current.cs]);
+
+      for (const [title, agents] of sections) {
+        const cards = agents.map(a => agentCard(a, query)).filter(Boolean);
+        blocks.push('<div class="section-title">' + esc(title) + ' (' + cards.length + ')</div>');
+        blocks.push(cards.length ? cards.join('') : '<div class="card"><div class="empty">Nothing matches that filter.</div></div>');
+      }
+
+      content.innerHTML = blocks.join('');
     }
 
     async function loadAudit() {
       const content = document.getElementById('content');
-      content.innerHTML = '<div class="empty">Loading audit log...</div>';
+      const summary = document.getElementById('summary');
+      content.innerHTML = '<div class="empty">Loading activity...</div>';
+
+      const days = document.getElementById('days').value;
+      const includeSync = document.getElementById('includeSync').checked ? '1' : '';
 
       try {
-        const res = await fetch('/api/audit/tickets?limit=200', {
+        const res = await fetch('/api/audit/agent-activity?days=' + encodeURIComponent(days) + (includeSync ? '&includeSync=1' : ''), {
           credentials: 'same-origin'
         });
 
         const data = await res.json();
 
         if (!res.ok) {
-          throw new Error(data.error || 'Could not load audit log');
+          throw new Error(data.error || 'Could not load activity');
         }
 
-        const events = data.events || [];
+        current = data;
+        summary.textContent = data.totals.events + ' update'
+          + (data.totals.events === 1 ? '' : 's')
+          + ' across ' + data.totals.tickets + ' ticket' + (data.totals.tickets === 1 ? '' : 's')
+          + ' in the last ' + data.days + ' days'
+          + (data.includeSync ? ', mail-sync changes included' : ', agent changes only')
+          + '. Read at ' + formatDate(data.generatedAt) + '.';
 
-        if (!events.length) {
-          content.innerHTML = '<div class="empty">No ticket audit events yet.</div>';
+        if (!data.totals.events) {
+          content.innerHTML = '<div class="card"><div class="empty">No ticket updates in this window.</div></div>';
           return;
         }
 
-        content.innerHTML = \`
-          <table>
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Ticket</th>
-                <th>Action</th>
-                <th>Old</th>
-                <th>New</th>
-                <th>User</th>
-              </tr>
-            </thead>
-            <tbody>
-              \${events.map(event => \`
-                <tr>
-                  <td>\${esc(formatDate(event.createdAt))}</td>
-                  <td>
-                    <strong>\${esc(event.ticket?.subject || 'Ticket #' + event.ticketId)}</strong>
-                    <div class="muted">ID: \${esc(event.ticketId)}</div>
-                  </td>
-                  <td><span class="pill">\${esc(event.eventType)}</span></td>
-                  <td>\${esc(event.oldValue || '-')}</td>
-                  <td>\${esc(event.newValue || '-')}</td>
-                  <td>\${esc(formatUser(event.user))}</td>
-                </tr>
-              \`).join('')}
-            </tbody>
-          </table>
-        \`;
+        render();
       } catch (error) {
-        content.innerHTML = '<div class="empty">' + esc(error.message || 'Could not load audit log') + '</div>';
+        summary.textContent = '';
+        content.innerHTML = '<div class="card"><div class="empty">' + esc(error.message || 'Could not load activity') + '</div></div>';
       }
     }
 
     document.getElementById('refreshBtn').addEventListener('click', loadAudit);
+    document.getElementById('days').addEventListener('change', loadAudit);
+    document.getElementById('includeSync').addEventListener('change', loadAudit);
+    document.getElementById('scope').addEventListener('change', render);
+    document.getElementById('q').addEventListener('input', render);
     loadAudit();
   </script>
 </body>
@@ -5708,6 +6214,77 @@ app.patch('/api/hubspot/tickets/:ticketId/status', requireAuth, async (req, res)
   }
 });
 
+// Is this attachment a picture? contentType is the primary signal, but plenty
+// of mail clients (and every "save as attachment" path through a scanner or a
+// phone) send a perfectly good PNG as application/octet-stream. A body that
+// references the attachment by cid: is asking for it to be drawn as an image
+// either way, so fall back to the filename extension rather than dropping it.
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|bmp|webp|tiff?|svg|ico|heic|heif)$/i;
+function isImageAttachment(a) {
+  const type = String(a?.contentType || '').toLowerCase();
+  if (type.startsWith('image/')) return true;
+  if (type && type !== 'application/octet-stream' && type !== 'binary/octet-stream') return false;
+  return IMAGE_EXT_RE.test(String(a?.name || ''));
+}
+
+// Guessed content type for the data: URL when Graph gave us a useless one, so
+// the browser is not asked to render "application/octet-stream" as a picture.
+function imageMimeFor(a) {
+  const type = String(a?.contentType || '').toLowerCase();
+  if (type.startsWith('image/')) return type;
+  const ext = String(a?.name || '').match(IMAGE_EXT_RE)?.[1]?.toLowerCase();
+  if (!ext) return 'image/*';
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'svg') return 'image/svg+xml';
+  if (ext === 'tif' || ext === 'tiff') return 'image/tiff';
+  if (ext === 'ico') return 'image/x-icon';
+  return `image/${ext}`;
+}
+
+// Every image attachment on a message, following Graph's paging.
+//
+// A reply chain carries a full signature per hop, and a Quinta signature alone
+// is a logo plus a video banner plus four social icons. Three replies deep and
+// the message is past 20 attachments before the client has pasted a single
+// screenshot - so the old single page of 25, sliced to 20, dropped the tail.
+// A dropped attachment is not a missing extra: it is a cid: the body still
+// references, i.e. a broken image in the middle of the rendered mail. Page
+// until Graph runs out, with a hard cap so a pathological thread cannot pin
+// the request or blow the JSON response up unboundedly.
+const MAX_IMAGE_ATTACHMENTS = 60;
+async function fetchMessageImageAttachments(mailbox, msgId, req) {
+  const out = [];
+  // No $select on purpose: the default fileAttachment representation already
+  // carries contentBytes, and narrowing the projection is the kind of thing
+  // that quietly drops it. contentBytes is the bulk of the payload anyway, so
+  // the projection bought nothing and was one more way to lose the bytes.
+  let next = `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=50`;
+  for (let page = 0; page < 6 && next && out.length < MAX_IMAGE_ATTACHMENTS; page++) {
+    const data = await graphGetResilient(next, req);
+    for (const a of Array.isArray(data?.value) ? data.value : []) {
+      // itemAttachment (a forwarded mail) and referenceAttachment (a OneDrive
+      // link) carry no bytes at all - nothing to inline.
+      if (!a?.contentBytes || !isImageAttachment(a)) continue;
+      out.push({
+        id: a.id || '',
+        name: a.name || 'image',
+        contentType: imageMimeFor(a),
+        size: a.size || 0,
+        isInline: !!a.isInline,
+        contentId: String(a.contentId || '').replace(/^<|>$/g, ''),
+        dataUrl: `data:${imageMimeFor(a)};base64,${a.contentBytes}`
+      });
+      if (out.length >= MAX_IMAGE_ATTACHMENTS) break;
+    }
+    // graphGet takes a path under /v1.0; nextLink is absolute.
+    const link = String(data?.['@odata.nextLink'] || '');
+    next = link.startsWith('https://graph.microsoft.com/v1.0')
+      ? link.slice('https://graph.microsoft.com/v1.0'.length)
+      : '';
+  }
+  return out;
+}
+
 app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
   try {
     const { tool, args } = req.body || {};
@@ -5725,36 +6302,47 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
     }
 
     if (tool.includes('read_resource')) {
-      const token = await graphDelegatedToken(req);
       const rawUri = args?.uri || '';
       const idMatch = rawUri.match(/mail:\/\/\/messages\/([^?]+)/);
       const msgId = idMatch?.[1];
       const ownerMatch = rawUri.match(/[?&]owner=([^&]+)/);
       const mailbox = ownerMatch?.[1] ? decodeURIComponent(ownerMatch[1]) : SUPPORT_MAILBOX;
       if (!msgId) return res.status(400).json({ isError: true, error: 'missing_message_id' });
-      const msg = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=body,bodyPreview,hasAttachments`, token);
+      const msg = await graphGetResilient(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=body,bodyPreview,hasAttachments`, req);
+      // hasAttachments is false when a message carries ONLY inline images.
+      // Graph documents this ("this property doesn't include inline
+      // attachments") and prescribes parsing the body for cid: references
+      // instead. Pasting a screenshot into an Outlook message is exactly that
+      // case, which is why screenshots sent to the helpdesk never rendered:
+      // the fetch below was skipped, so every cid: img in the body stayed
+      // pointing at a scheme the browser cannot resolve.
+      const bodyContent = String(msg?.body?.content || '');
+      // src= covers <img> and Word's <v:imagedata>; background= covers table
+      // backgrounds. Anchored on the attribute name so a link whose query
+      // string happens to contain "cid:" doesn't trigger a pointless fetch.
+      const referencesCid = /(?:src|background)\s*=\s*["']?\s*cid:/i.test(bodyContent);
       let imageAttachments = [];
-      if (msg?.hasAttachments) {
-        const at = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=25&$select=id,name,contentType,size,isInline,contentId,contentBytes`, token);
-        imageAttachments = (Array.isArray(at?.value) ? at.value : [])
-          .filter(a => String(a?.contentType || '').toLowerCase().startsWith('image/') && a?.contentBytes)
-          .slice(0, 20)
-          .map(a => ({
-            id: a.id || '',
-            name: a.name || 'image',
-            contentType: a.contentType || 'image/*',
-            size: a.size || 0,
-            isInline: !!a.isInline,
-            contentId: String(a.contentId || '').replace(/^<|>$/g, ''),
-            dataUrl: `data:${a.contentType || 'image/*'};base64,${a.contentBytes}`
-          }));
+      let imagesError = '';
+      if (msg?.hasAttachments || referencesCid) {
+        // Never fatal. The body is already in hand, and this second call is the
+        // fragile one: it fires for nearly every message now that cid: refs
+        // trigger it, it moves megabytes of base64, and it is the first thing
+        // Graph throttles. Letting it throw meant a 429 on the pictures threw
+        // away the whole message and the modal fell back to the flattened
+        // bodyPreview - all formatting gone, no images, and no hint why.
+        try {
+          imageAttachments = await fetchMessageImageAttachments(mailbox, msgId, req);
+        } catch (err) {
+          imagesError = String(err?.message || err).slice(0, 200);
+        }
       }
       return res.json({
         isError: false,
         structuredContent: {
           body: { content: msg?.body?.content || '', contentType: msg?.body?.contentType || 'text' },
           bodyPreview: msg?.bodyPreview || '',
-          imageAttachments
+          imageAttachments,
+          imagesError
         }
       });
     }

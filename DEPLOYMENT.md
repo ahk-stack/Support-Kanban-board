@@ -156,6 +156,44 @@ HUBSPOT_REDIRECT_URI=https://YOUR_DOMAIN/auth/hubspot/callback
 
 After production deploy, run `node seed-admin.js` once if your hosting platform does not run it automatically.
 
+## Tickets open with no formatting and no images
+
+Symptom: opening a ticket shows one run-together paragraph of plain text, no
+inline pictures, and the board otherwise works normally.
+
+That is the Microsoft 365 connection failing, not a rendering bug. The board
+itself (tickets, notes, assignment, SLA, KPIs) is served from our own database
+and keeps working, so only the message body - which is fetched live from Graph -
+disappears. Since the last change the modal says which failure it hit and offers
+the action that fixes that particular one; before that it silently fell back to
+the flattened `bodyPreview`.
+
+Check the credential first:
+
+```bash
+npm run check:m365
+```
+
+* **`invalid_client` / AADSTS7000215 / AADSTS7000222** - the app's own client
+  secret is wrong or expired. Reconnecting Outlook in the app cannot fix this.
+  Azure portal -> App registrations -> this app -> Certificates & secrets ->
+  New client secret -> copy the **Value** column into `M365_CLIENT_SECRET` and
+  restart.
+
+  `M365_CLIENT_SECRET` must be the secret **Value**, never the **Secret ID**.
+  Azure shows both next to each other and only the Value is a credential. The ID
+  is a GUID, so a 36-character hex-and-dashes value is always wrong - the server
+  now says so at boot, and `npm run check:m365` refuses it outright. Client
+  secrets also expire (6, 12 or 24 months), which is the usual way this breaks
+  on a system that had been working.
+
+* **`invalid_grant` / AADSTS70008x** - the secret is fine and the stored refresh
+  token has expired or been revoked. Sign in again at `/auth/microsoft/start`.
+
+* **HTTP 429/503/504** - Graph throttling. The server already retries these with
+  backoff, and the pictures are fetched separately so a throttled attachment
+  call no longer discards the whole message.
+
 ## Important security note
 
 The uploaded ZIP contained a `.env` file. Rotate the Neon password and any Microsoft/HubSpot secrets before production deployment.

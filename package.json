@@ -10,6 +10,7 @@
     "backup:list": "powershell -ExecutionPolicy Bypass -File .\\scripts\\backup-list.ps1",
     "release:snapshot": "powershell -ExecutionPolicy Bypass -File .\\scripts\\release-snapshot.ps1",
     "check": "node --check server.js",
+    "check:m365": "node scripts/check-m365.js",
     "translate:serve": "docker compose -f docker/libretranslate.compose.yml up -d",
     "translate:stop": "docker compose -f docker/libretranslate.compose.yml down",
     "db:generate": "prisma generate",

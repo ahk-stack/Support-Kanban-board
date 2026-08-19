@@ -2344,10 +2344,43 @@ header {
   width: min(980px, 96vw);
 }
 
+/* Mail is authored at whatever width the sender's client used - a signature
+   table or a pasted screenshot is routinely wider than this modal - so the body
+   scrolls sideways inside itself.
+   overflow-x: scroll already reserved the axis, but the bar itself was
+   effectively invisible: WebKit hides overlay scrollbars until they are used,
+   and the page's generic thin scrollbar styling gave no track to see when idle.
+   A wide mail therefore looked simply cut off. Same always-visible treatment as
+   .kpi-scroll-x, which exists for exactly this reason. */
 #em-body {
   overflow-x: scroll;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(var(--slate-400-rgb), .85) rgba(var(--slate-200-rgb), .55);
+}
+#em-body::-webkit-scrollbar {
+  height: 12px;
+  width: 12px;
+}
+#em-body::-webkit-scrollbar-track {
+  background: rgba(var(--slate-200-rgb), .55);
+  border-radius: 999px;
+}
+#em-body::-webkit-scrollbar-thumb {
+  background: rgba(var(--slate-400-rgb), .9);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+#em-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--slate-500-rgb), .95);
+  background-clip: padding-box;
+}
+/* The horizontal bar sits at the bottom edge of the scroll box, so the sheet
+   needs to clear it rather than sit under it. */
+#em-body > div:last-child {
+  margin-bottom: 4px;
 }
 
 #em-body > div {
@@ -2361,25 +2394,134 @@ header {
   max-width: none;
 }
 
-/* Raw email HTML injected into #em-body carries its own inline color/background
-   styles from whatever mail client composed it - those win over our page CSS
-   by specificity, so in dark mode some threads render illegible (e.g. black
-   text on our now-dark background) while others happen to be fine. Force a
-   single, always-readable text color and strip any inline background so
-   every thread reads the same regardless of the source email's own styling. */
-[data-theme="dark"] #em-body,
-[data-theme="dark"] #em-body * {
-  color: var(--text) !important;
-  background-color: transparent !important;
+/* Raw email HTML carries its own inline color/background styles from whatever
+   client composed it, all authored against a white page. Those win over our
+   CSS by specificity, so on a dark background some threads came out illegible
+   (black text on near-black) - which is why this used to force one flat text
+   color over everything and strip every background.
+   That fixed legibility by discarding the message's actual appearance: brand
+   colors, colored headings, highlighted warnings, colored table cells and
+   striped tables all collapsed into the same gray. So put the mail on a white
+   sheet instead - the way Outlook and Gmail both present a message in dark
+   mode. It needs no overrides at all, and what the agent reads is what the
+   client sent. Only our own chrome around it stays themed. */
+.email-body-content {
+  background: #ffffff;
+  color: #0f172a;
+  border-radius: 10px;
+  padding: 14px 16px;
 }
-[data-theme="dark"] #em-body a {
-  color: var(--sky-400) !important;
+[data-theme="dark"] .email-body-content {
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+[data-theme="dark"] #em-body {
+  color: var(--text);
 }
 
 #em-body img {
   max-width: none;
   height: auto;
   border-radius: 8px;
+}
+
+/* Stands in for a picture the browser could not fetch - a signature image on a
+   host that is gone or behind auth. Reads as a note about that one image, which
+   the browser's broken-image glyph does not: that reads as a broken ticket. */
+/* Our own widgets that sit inside the white sheet cannot use the theme's
+   surface tokens - in dark mode those resolve to dark-on-white. Fixed
+   light-surface values instead, matching the light theme's palette. */
+.email-body-content .email-image-attachments { border-top-color: #e2e8f0; }
+.email-body-content .email-image-attachment {
+  background: #ffffff;
+  border-color: #e2e8f0;
+  color: #0f172a;
+}
+.email-body-content .email-image-attachment img { background: #f8fafc; }
+.email-body-content .email-image-attachment span { color: #64748b; }
+.email-body-content .email-image-missing {
+  border-color: #cbd5e1;
+  color: #64748b !important;
+}
+
+.email-image-missing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--muted) !important;
+  vertical-align: middle;
+}
+.email-image-missing::before { content: "\1F5BC"; font-style: normal; }
+
+/* Says why the content below is not the message as it was sent. Deliberately
+   loud and deliberately persistent - a toast would be gone by the time the
+   agent finished reading the mangled copy it was warning about. The !important
+   colors are for the dark-mode blanket rule below, which otherwise flattens
+   every descendant of #em-body to one text color and no background. */
+.email-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--amber-500);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.10) !important;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text) !important;
+}
+.email-notice-text { font-weight: 600; min-width: 220px; flex: 1; }
+.email-notice-text code {
+  display: block;
+  margin-top: 3px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 500;
+  word-break: break-all;
+  color: var(--muted) !important;
+}
+.email-notice-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.email-notice-actions .btn-out { font-size: 11px; padding: 3px 10px; text-decoration: none; }
+
+.email-preview-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted) !important;
+  margin-bottom: 5px;
+}
+/* pre-wrap, so the little structure a flattened preview still has survives. */
+.email-preview-text {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* The dark-mode blanket rule above flattens every descendant of #em-body, so
+   the loading state has to state its own colors or it degrades to a dull ring
+   on a dull panel with no words to say what is happening. */
+#em-body .loading {
+  height: 120px;
+  background: transparent;
+}
+#em-body .spinner {
+  border-color: var(--border-strong);
+  border-top-color: var(--primary);
+}
+#em-body .loading-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted) !important;
 }
 
 .email-image-attachments {
@@ -3814,7 +3956,7 @@ th {
     </div>
 
     <input type="hidden" id="current-user" value="YOU" />
-<a class="audit-board-btn" href="/audit/tickets" title="View ticket audit log">
+<a class="audit-board-btn" href="/audit/tickets" title="Which tickets each Support agent and each CS updated, and what they changed">
   Audit Log
 </a>
     <div class="account-menu">
@@ -8189,7 +8331,12 @@ function trCardControlsHtml(id){
   // after the cache is written), but the button must render regardless.
   const shown=trShown.has(id)&&!!entry;
   const busy=trBusy.has(id);
-  const label=trShortCode(entry?entry.targetLang:trPreferredLang());
+  // Spelled out until it is doing something. A globe next to a two-letter code
+  // is the smallest thing in a footer that also carries Jira, HubSpot, Open,
+  // Edit, Duplicate, Archive and the assignment dropdown - agents were not
+  // finding it. Once a translation is on screen the language code alone is the
+  // useful label, and the button is filled in so it reads as active.
+  const label=shown||busy?trShortCode(entry?entry.targetLang:trPreferredLang()):'Translate';
   const title=busy
     ?'Translating...'
     :(shown
@@ -8893,34 +9040,117 @@ function handleTicketDeepLink(){
   url.searchParams.delete('ticket');
   history.replaceState({},'',url.toString());
 }
+// A cid: reference and the attachment it points at agree far less often than
+// the format implies. Outlook writes `cid:image001.png@01DA1234.5678ABCD` into
+// the body while Graph reports contentId `image001.png` (or the reverse, or
+// only the filename, or the same cid twice across a reply chain). Index every
+// spelling we can derive - full contentId, contentId without its @domain
+// suffix, and the filename - so a lookup succeeds on whichever one the body
+// happens to use. First writer wins per key, which keeps the topmost (newest)
+// signature's copy when a thread repeats the same image at every hop.
+function trIndexInlineImages(list){
+  const byKey=new Map();
+  const add=(k,x)=>{const key=String(k||'').replace(/^<|>$/g,'').trim().toLowerCase();if(key&&!byKey.has(key))byKey.set(key,x);};
+  list.forEach(x=>{
+    if(!x.dataUrl)return;
+    add(x.contentId,x);
+    add(String(x.contentId||'').split('@')[0],x);
+    add(x.name,x);
+  });
+  return byKey;
+}
+
+// Remote images in a signature (a CDN behind auth, a host that is simply gone,
+// a tracking pixel) cannot be made to load from here. Leaving the element
+// renders the browser's broken-image glyph, which reads as "this ticket is
+// broken" rather than "that decoration is unavailable" - so replace anything
+// that fails with a quiet, honest chip. Images declared 3px or smaller are
+// spacers and tracking pixels: those just go.
+function emReplaceBrokenImage(img){
+  if(!img.isConnected&&!img.parentNode)return;
+  const w=Number(img.getAttribute('width'))||img.clientWidth||0;
+  const h=Number(img.getAttribute('height'))||img.clientHeight||0;
+  if((w&&w<=3)||(h&&h<=3)){img.remove();return;}
+  const chip=document.createElement('span');
+  chip.className='email-image-missing';
+  chip.textContent=img.alt?`Image unavailable: ${img.alt}`:'Image unavailable';
+  chip.title='This picture is hosted outside the mail and could not be loaded. Open in Outlook to see it.';
+  img.replaceWith(chip);
+}
+
+// The parser starts fetching as soon as a src is set, so an image can already
+// have failed before the error listener above was attached to it. Sweep once
+// after the body is on the page for anything that finished loading with no
+// pixels, which is exactly what a failed load looks like after the fact.
+function emSweepBrokenImages(root){
+  root.querySelectorAll('img').forEach(img=>{
+    if(img.complete&&img.naturalWidth===0)emReplaceBrokenImage(img);
+  });
+}
+
 function renderEmailBodyWithImages(body,images){
   const list=Array.isArray(images)?images:[];
-  const inlineByCid=new Map(list.filter(x=>x.isInline&&x.contentId&&x.dataUrl).map(x=>[String(x.contentId).replace(/^<|>$/g,'').toLowerCase(),x]));
+  // Keyed on contentId alone, not on isInline: what decides whether an image
+  // belongs in the body is the body referencing its cid, and Outlook does send
+  // cid-referenced images with isInline unset.
+  const inlineByCid=trIndexInlineImages(list);
   const used=new Set();
   const wrap=document.createElement('div');
-  wrap.innerHTML=`<div style="overflow-wrap:break-word">${body}</div>`;
+  // email-body-content is the white sheet the mail is rendered on - see its CSS
+  // for why the message is never recolored to match the app's theme.
+  wrap.innerHTML=`<div class="email-body-content" style="overflow-wrap:break-word">${body}</div>`;
   wrap.querySelectorAll('script,style,iframe,object,embed,form').forEach(el=>el.remove());
   wrap.querySelectorAll('a').forEach(a=>{a.target='_blank';a.rel='noopener noreferrer';});
+  // A cid: table/cell background can never resolve either, and unlike an <img>
+  // it fails silently - drop the attribute so the mail's own colors apply.
+  wrap.querySelectorAll('[background^="cid:" i]').forEach(el=>el.removeAttribute('background'));
   wrap.querySelectorAll('img').forEach(img=>{
-    const src=String(img.getAttribute('src')||'');
+    const src=String(img.getAttribute('src')||'').trim();
     const cid=src.match(/^cid:(.+)$/i)?.[1]?.replace(/^<|>$/g,'').toLowerCase();
-    if(cid&&inlineByCid.has(cid)){
-      const found=inlineByCid.get(cid);
+    if(cid){
+      // A cid: src is only meaningful inside the mail store - a browser can
+      // never fetch it. Either we swap in the bytes, or we drop the element:
+      // leaving it renders a broken-image icon and hides the fact that the
+      // picture is available in the gallery below.
+      const found=inlineByCid.get(cid)||inlineByCid.get(cid.split('@')[0]);
+      if(!found){
+        // Nothing to swap in - the bytes never came back from the mail store.
+        // An unlabelled one is signature decoration (a divider, a social icon,
+        // a spacer) and is better gone than mentioned; one that carries alt
+        // text is something the sender meant to say, so leave a chip rather
+        // than silently shrink their message.
+        if(img.alt.trim())emReplaceBrokenImage(img);
+        else img.remove();
+        return;
+      }
       img.src=found.dataUrl;
       img.alt=img.alt||found.name||'Email image';
       used.add(found.id||found.contentId||found.dataUrl);
+    }else if(location.protocol==='https:'&&/^http:\/\//i.test(src)){
+      // The board is served over TLS, so a plain-http image in a signature is
+      // blocked as mixed content before the request is even made - a broken
+      // icon with no way for the agent to tell why. Ask for the same URL over
+      // TLS; hosts that only speak http fail the load and are handled below.
+      img.src='https://'+src.slice('http://'.length);
     }
     img.loading='lazy';
     img.decoding='async';
+    img.addEventListener('error',()=>emReplaceBrokenImage(img),{once:true});
   });
-  const visible=list.filter(x=>x.dataUrl&&!used.has(x.id||x.contentId||x.dataUrl)&&!x.isInline);
+  // Anything not placed into the body goes to the gallery - keyed on what was
+  // actually substituted, not on isInline. Outlook marks a pasted screenshot
+  // inline whether or not the body ends up referencing its cid, and filtering
+  // on the flag made those images vanish from the ticket entirely.
+  const visible=list.filter(x=>x.dataUrl&&!used.has(x.id||x.contentId||x.dataUrl));
   if(visible.length){
     const gallery=document.createElement('div');
     gallery.className='email-image-attachments';
     gallery.innerHTML=visible.map(x=>`<a class="email-image-attachment" href="${esc(x.dataUrl)}" target="_blank" rel="noopener noreferrer"><img src="${esc(x.dataUrl)}" alt="${esc(x.name||'Email image')}" loading="lazy" decoding="async"><span>${esc(x.name||'Email image')}</span></a>`).join('');
     wrap.firstElementChild.appendChild(gallery);
   }
-  return wrap.innerHTML;
+  // The node, not its innerHTML: the error handlers above are the whole point
+  // and a string round-trip would drop every one of them.
+  return wrap.firstElementChild;
 }
 
 async function openEmailModal(ticket){
@@ -8967,22 +9197,162 @@ async function openEmailModal(ticket){
     trAutoTranslateBody(id);
     return;
   }
-  document.getElementById('em-body').innerHTML='<div class="loading"><div class="spinner"></div></div>';
   const ol=document.getElementById('em-outlook');ol.onclick=email.webLink?()=>window.open(email.webLink,'_blank'):null;ol.style.display=email.webLink?'':'none';
   document.getElementById('email-modal').classList.add('open');
   const uri=(email.uri||`mail:///messages/${email.id}`).split('?')[0]+'?owner='+encodeURIComponent(SUPPORT_BOX);
   if(!hasCowork){document.getElementById('em-body').innerHTML=`<p style="color:var(--slate-500);font-style:italic">Outlook content preview is only available in MCP mode.</p>`;return;}
+  await loadEmailBody(ticket,uri);
+}
+
+/* The message body, fetched from Outlook and rendered as the client composed
+   it. Split out of openEmailModal so the failure path can offer a Retry that
+   re-runs exactly this, rather than making the agent close and reopen the
+   ticket. Guards on the modal still showing the same ticket: a slow fetch must
+   not paint its body over whichever ticket the agent has moved on to. */
+async function loadEmailBody(ticket,uri){
+  const{email,id}=ticket;
+  const host=document.getElementById('em-body');
+  host.innerHTML='<div class="loading"><div class="spinner"></div><span class="loading-label">Loading the message from Outlook...</span></div>';
   const res=await window.cowork.callMcpTool(READ_TOOL,{uri});
-  if(res.isError){document.getElementById('em-body').innerHTML=`<p style="color:var(--slate-500);font-style:italic">${esc(email.summary||'No preview.')}</p>`;return;}
+  if(emTrState.ticketId!==id)return;
+  if(res.isError){renderEmailLoadFailure(ticket,uri,res.error);return;}
   const sc=res.structuredContent;let body='',images=[];
-  if(sc){body=sc.body?.content||sc.bodyPreview||sc.preview||'';if((sc.body?.contentType||'').toLowerCase()==='html'){body=body.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<a /gi,'<a target="_blank" ');}else body=body.replace(/\n/g,'<br>');}
+  let isHtml=false;
+  if(sc){
+    body=sc.body?.content||sc.bodyPreview||sc.preview||'';
+    isHtml=(sc.body?.contentType||'').toLowerCase()==='html';
+    if(isHtml){body=body.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<a /gi,'<a target="_blank" ');}
+    // Plain-text mail: <br> per newline is not enough on its own, because runs
+    // of spaces and blank lines are the only structure a text mail has. The
+    // pre-wrap wrapper below keeps them.
+    else body=`<div style="white-space:pre-wrap">${esc(body)}</div>`;
+  }
   if(sc&&Array.isArray(sc.imageAttachments))images=sc.imageAttachments;
-  if(!body){const raw=(res.content||[]).map(c=>c.text||'').join('');body=raw?raw.replace(/\n/g,'<br>'):'<em style="color:var(--slate-400)">No content.</em>';}
-  document.getElementById('em-body').innerHTML=renderEmailBodyWithImages(body,images);
+  if(!body){const raw=(res.content||[]).map(c=>c.text||'').join('');body=raw?`<div style="white-space:pre-wrap">${esc(raw)}</div>`:'<em style="color:var(--slate-400)">No content.</em>';}
+  const rendered=renderEmailBodyWithImages(body,images);
+  // The pictures are a separate Graph call and it is the one that gets
+  // throttled. It no longer takes the body down with it, but the agent still
+  // has to be told that what they are looking at is missing its images. The
+  // notice goes beside the white sheet, not on it, so it stays themed.
+  if(sc?.imagesError){
+    host.replaceChildren(emailNoticeEl({
+      tone:'warn',
+      text:'The message loaded but its images did not.',
+      detail:sc.imagesError,
+      onRetry:()=>loadEmailBody(ticket,uri),
+      webLink:email.webLink
+    }),rendered);
+  }else{
+    host.replaceChildren(rendered);
+  }
+  emSweepBrokenImages(rendered);
   // The body only exists now, so this is the first moment it can be translated.
   // If the agent already chose to read this ticket in another language, follow
   // through without making them ask again.
   trAutoTranslateBody(id);
+}
+
+/* What to say, and what to offer, for the failure that actually happened. The
+   distinction matters because Retry is the wrong button for most of these:
+   nothing about clicking it again fixes an expired credential, and offering it
+   invites an agent to sit there clicking while the mailbox stays unreachable.
+     - the app's own secret is wrong/expired: nobody in this UI can fix it, so
+       say who can. Reconnecting will not help and is not offered.
+     - consent died / never connected: signing in to Outlook again does fix it.
+     - throttled, gateway, network: Retry is exactly right.
+   The raw reason is always printed underneath either way - it is what turned a
+   day of guessing at "no images" into a one-line diagnosis. */
+function emailFailureCopy(error){
+  const e=String(error||'').toLowerCase();
+  if(e.includes('m365_client_secret_invalid')||e.includes('aadsts7000215')||e.includes('aadsts7000222')){
+    return{text:"Outlook is refusing this app's credentials, so no message body or image can be loaded. An admin has to renew the app secret in Azure - reconnecting will not help.",reconnect:false,retryable:false};
+  }
+  if(e.includes('m365_reauth_required')||e.includes('m365_not_connected')||e.includes('graph_refresh_error')||e.includes('invalid_grant')){
+    return{text:'The Outlook connection has expired, so this message could not be loaded. Reconnect to bring back formatting and images.',reconnect:true,retryable:true};
+  }
+  if(e.includes('graph_error_401')||e.includes('graph_error_403')){
+    return{text:'Outlook rejected the request for this message. The connection may need re-authorising.',reconnect:true,retryable:true};
+  }
+  if(e.includes('graph_error_404')){
+    return{text:'This message is no longer in the helpdesk mailbox - it was moved or deleted, so its formatting and images cannot be loaded.',reconnect:false,retryable:false};
+  }
+  if(e.includes('graph_error_429')||e.includes('graph_error_503')||e.includes('graph_error_504')||e.includes('proxy_error')){
+    return{text:'Outlook is rate limiting or briefly unavailable, so this message could not be loaded. Retrying usually works.',reconnect:false,retryable:true};
+  }
+  return{text:'Could not load this message from Outlook, so its formatting and images are not available.',reconnect:false,retryable:true};
+}
+
+/* A strip above the body saying what went wrong and offering the two things
+   that can actually help. Not a toast: the agent needs it to stay on screen
+   next to the content it is qualifying. */
+function emailNoticeEl({tone,text,detail,onRetry,webLink,reconnect}){
+  const el=document.createElement('div');
+  el.className=`email-notice${tone==='warn'?' warn':''}`;
+  const msg=document.createElement('div');
+  msg.className='email-notice-text';
+  msg.textContent=text;
+  if(detail){
+    const code=document.createElement('code');
+    code.textContent=detail;
+    msg.appendChild(code);
+  }
+  el.appendChild(msg);
+  const actions=document.createElement('div');
+  actions.className='email-notice-actions';
+  if(reconnect){
+    const link=document.createElement('a');
+    link.className='btn-primary';
+    link.href='/auth/microsoft/start';
+    link.textContent='Reconnect Outlook';
+    actions.appendChild(link);
+  }
+  if(onRetry){
+    const retry=document.createElement('button');
+    retry.className='btn-out';
+    retry.textContent='Retry';
+    retry.addEventListener('click',()=>{retry.disabled=true;retry.textContent='Retrying...';onRetry();});
+    actions.appendChild(retry);
+  }
+  if(webLink){
+    const open=document.createElement('a');
+    open.className='btn-out';
+    open.href=webLink;open.target='_blank';open.rel='noopener noreferrer';
+    open.textContent='Open in Outlook';
+    actions.appendChild(open);
+  }
+  el.appendChild(actions);
+  return el;
+}
+
+/* The read failed outright. The old behaviour here was the worst of the
+   options: it printed email.summary - the flattened bodyPreview, one italic
+   run-together line with every paragraph, table and image stripped - with
+   nothing to say it was not the message. Agents read that as "this is how the
+   ticket came in" and answered against a mangled copy. Say what happened, and
+   label the preview as the preview. */
+function renderEmailLoadFailure(ticket,uri,error){
+  const{email}=ticket;
+  const host=document.getElementById('em-body');
+  const wrap=document.createElement('div');
+  wrap.style.overflowWrap='break-word';
+  const copy=emailFailureCopy(error);
+  wrap.appendChild(emailNoticeEl({
+    tone:'warn',
+    text:copy.text,
+    detail:String(error||'unknown error'),
+    reconnect:copy.reconnect,
+    onRetry:copy.retryable?()=>loadEmailBody(ticket,uri):null,
+    webLink:email.webLink
+  }));
+  const label=document.createElement('div');
+  label.className='email-preview-label';
+  label.textContent='Text preview only - not the message as it was sent';
+  wrap.appendChild(label);
+  const preview=document.createElement('div');
+  preview.className='email-preview-text';
+  preview.textContent=email.summary||'No preview available.';
+  wrap.appendChild(preview);
+  host.replaceChildren(wrap);
 }
 
 function renderThread(id){
@@ -9239,7 +9609,12 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
   const recentRes=await fetchMailboxWindow(isoDaysAgo(INITIAL_SYNC_DAYS));
   if(recentRes?.isError){
     const err=(recentRes?.error||'').toLowerCase();
-    if(err.includes('m365_not_connected')||err.includes('graph_refresh_error_')){
+    if(err.includes('m365_client_secret_invalid')||err.includes('aadsts7000215')||err.includes('aadsts7000222')){
+      // Offering "Connect now" here is worse than saying nothing: it is the
+      // app's own credential that Azure is rejecting, so the sign-in round trip
+      // ends exactly where it started and the real fix never gets made.
+      document.getElementById('fstats').textContent="Microsoft 365 rejected this app's credentials (expired or wrong client secret). An admin must renew it in Azure - until then, tickets cannot show their formatting or images.";
+    }else if(err.includes('m365_not_connected')||err.includes('m365_reauth_required')||err.includes('graph_refresh_error_')||err.includes('invalid_grant')){
       document.getElementById('fstats').innerHTML='Microsoft 365 mailbox is not connected. <a href=\"/auth/microsoft/start\" style=\"color:var(--indigo-600);font-weight:700;\">Connect now</a>';
     }else{
       document.getElementById('fstats').textContent='Mailbox sync error: '+(recentRes?.error||'unknown');
