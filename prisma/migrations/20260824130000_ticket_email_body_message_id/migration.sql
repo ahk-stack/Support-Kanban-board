@@ -1,0 +1,14 @@
+-- Which message the stored body actually is.
+--
+-- A ticket is a thread, not a message: when a reply arrives it is merged into
+-- the existing ticket, which keeps its externalId while its current message id
+-- moves to the newest reply. A body cache keyed on the ticket alone would
+-- therefore keep serving the first message in the thread and an agent would
+-- never see the reply that just came in - the ticket would look permanently
+-- out of date while appearing to work.
+--
+-- Storing the message id the body came from makes the cache self-invalidating,
+-- the same way TicketTranslation.sourceHash does: the id the ticket asks for
+-- stops matching the id that was stored, that counts as a miss, and the next
+-- open fetches the new message and replaces this row.
+ALTER TABLE "Ticket" ADD COLUMN "emailBodyMessageId" TEXT;

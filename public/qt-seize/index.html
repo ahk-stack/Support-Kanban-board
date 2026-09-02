@@ -6,278 +6,570 @@
   <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
   <title>QT Seize</title>
   <style>
+    /* QT Seize
+       ---------
+       Two-pane tool: the controls on the left, the image and its batch queue on
+       the right. Three things drive the styling here.
+
+       It is shown two ways. On its own at /qt-seize/, and inside an iframe on
+       the support board, which already draws a titled header and a Back button
+       around it. So the page's own header is hidden when it is framed (see
+       .app.embedded) - two stacked titles saying "QT Seize" was wasted vertical
+       space in the place with the least of it.
+
+       It follows the viewer's theme. The board it is embedded in has a dark
+       mode, and a white page in a dark frame is what gives away an iframe.
+       There is no theme toggle to read from in here, so prefers-color-scheme is
+       the signal, and every colour is a token defined in both.
+
+       The preview is the subject. Everything else is deliberately quiet: one
+       accent colour, hairline borders, and no shadow big enough to compete with
+       the image being worked on. */
     :root {
-      --bg: #f4f6f8;
+      color-scheme: light;
+      --bg: #f4f6fa;
+      --bg-soft: #eceff5;
       --panel: #ffffff;
-      --ink: #111827;
+      --panel-soft: #f8fafc;
+      --ink: #0f172a;
+      --ink-soft: #344054;
       --muted: #667085;
-      --border: #d9dde5;
+      --muted-light: #98a2b3;
+      --border: #e3e7ee;
+      --border-strong: #cdd4e0;
       --accent: #0f766e;
       --accent-dark: #0b5f59;
-      --accent-soft: #e9fbf6;
-      --blue: #2563eb;
+      --accent-ink: #ffffff;
+      --accent-soft: #e7faf5;
+      --accent-rgb: 15, 118, 110;
       --blue-soft: #eff6ff;
+      --blue-ink: #1e40af;
       --danger: #b42318;
+      --danger-soft: #fee4e2;
+      --shadow: 16, 24, 40;
+      --radius: 12px;
+      --radius-sm: 9px;
+      --radius-lg: 16px;
+      /* The checkerboard behind a transparent image. */
+      --checker: #e8ecf2;
     }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --bg: #0b1220;
+        --bg-soft: #131c2e;
+        --panel: #151f33;
+        --panel-soft: #1b2740;
+        --ink: #e8edf7;
+        --ink-soft: #c3cddf;
+        --muted: #93a0b8;
+        --muted-light: #6f7d95;
+        --border: #26324b;
+        --border-strong: #354463;
+        --accent: #2dd4bf;
+        --accent-dark: #14b8a6;
+        --accent-ink: #04201d;
+        --accent-soft: #10312e;
+        --accent-rgb: 45, 212, 191;
+        --blue-soft: #16233d;
+        --blue-ink: #93b4fc;
+        --danger: #fca5a5;
+        --danger-soft: #3b1a1a;
+        --shadow: 0, 0, 0;
+        --checker: #1a2438;
+      }
+    }
+
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
       min-height: 100vh;
       background: var(--bg);
       color: var(--ink);
       font-family: Inter, "Segoe UI", Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
     }
+
     .app {
       min-height: 100vh;
       display: grid;
       grid-template-rows: auto 1fr;
     }
+
+    /* Framed by the board, which supplies its own header. */
+    .app.embedded { min-height: 0; grid-template-rows: 1fr; }
+    .app.embedded > header { display: none; }
+    .app.embedded > main { padding-top: 16px; }
+
     header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      padding: 16px 20px;
+      padding: 15px 20px;
       border-bottom: 1px solid var(--border);
       background: var(--panel);
-      box-shadow: 0 1px 0 rgba(16, 24, 40, .03);
     }
-    h1 { margin: 0; font-size: 22px; letter-spacing: 0; }
-    .status { color: var(--muted); font-size: 13px; text-align: right; }
+
+    .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+
+    /* A mark rather than an icon font: one element, scales cleanly, and needs no
+       asset to load before the header looks finished. */
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      color: var(--accent-ink);
+      background: linear-gradient(140deg, var(--accent) 0%, var(--accent-dark) 100%);
+      box-shadow: 0 6px 14px rgba(var(--accent-rgb), .22);
+    }
+
+    .brand-mark svg { width: 18px; height: 18px; }
+
+    h1 {
+      margin: 0;
+      font-size: 19px;
+      font-weight: 800;
+      letter-spacing: -.01em;
+      line-height: 1.2;
+    }
+
+    .brand-sub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 1px;
+    }
+
+    .status {
+      color: var(--muted);
+      font-size: 12.5px;
+      font-weight: 600;
+      text-align: right;
+      min-width: 0;
+    }
+
+    .status.error { color: var(--danger); }
+
     main {
       display: grid;
-      grid-template-columns: 360px minmax(0, 1fr);
-      gap: 18px;
-      padding: 18px;
+      grid-template-columns: 340px minmax(0, 1fr);
+      gap: 16px;
+      padding: 16px 18px 20px;
       min-height: 0;
     }
+
     .panel {
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 8px;
-      box-shadow: 0 10px 28px rgba(16, 24, 40, .06);
+      border-radius: var(--radius-lg);
+      box-shadow: 0 1px 2px rgba(var(--shadow), .04);
     }
+
     .controls {
-      padding: 18px;
+      padding: 15px;
       display: grid;
-      gap: 15px;
+      gap: 14px;
       align-content: start;
+      /* Hug the fields instead of stretching the card to the stage's height -
+         stretched, it left a large empty area below the last control that read
+         as something missing. */
+      align-self: start;
     }
+
+    /* ---- Drop zone ---- */
+
     .drop {
-      min-height: 160px;
-      border: 1px dashed #aeb8c8;
-      border-radius: 8px;
+      min-height: 152px;
+      border: 1.5px dashed var(--border-strong);
+      border-radius: var(--radius);
       display: grid;
       place-items: center;
-      padding: 22px;
+      padding: 20px 18px;
       text-align: center;
       cursor: pointer;
-      background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-      transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease, background .16s ease;
+      background: var(--panel-soft);
+      transition: border-color .16s ease, background .16s ease, transform .16s ease;
     }
-    .drop:hover { border-color: #7f8da3; box-shadow: 0 8px 18px rgba(16, 24, 40, .08); }
-    .drop.dragging { border-color: var(--accent); background: #ecfdf9; transform: translateY(-1px); }
-    .drop strong { display: block; font-size: 17px; margin-bottom: 8px; }
-    .drop span, .note { color: var(--muted); font-size: 13px; line-height: 1.45; }
-    textarea, select, input[type="number"] {
+
+    .drop:hover { border-color: var(--accent); background: var(--accent-soft); }
+    .drop.dragging {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      transform: scale(1.01);
+      box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), .3);
+    }
+
+    .drop-mark {
+      width: 40px;
+      height: 40px;
+      margin: 0 auto 11px;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      color: var(--accent);
+      background: var(--accent-soft);
+      box-shadow: 0 0 0 1px rgba(var(--accent-rgb), .16);
+      transition: transform .16s ease;
+    }
+
+    .drop-mark svg { width: 19px; height: 19px; }
+    .drop:hover .drop-mark, .drop.dragging .drop-mark { transform: translateY(-2px); }
+    .drop.dragging .drop-mark { background: var(--panel); }
+
+    .drop strong { display: block; font-size: 14.5px; margin-bottom: 5px; }
+    .drop span, .note { color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+    /* ---- Fields ---- */
+
+    label, .field-label {
+      display: grid;
+      gap: 7px;
+      font-size: 10.5px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    select, input[type="number"], textarea {
       width: 100%;
-      resize: vertical;
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 10px 11px;
+      border-radius: var(--radius-sm);
+      padding: 9px 11px;
       font: inherit;
+      font-size: 13px;
+      font-weight: 600;
       color: var(--ink);
-      background: #fff;
+      background: var(--panel);
       outline: none;
       transition: border-color .15s ease, box-shadow .15s ease;
     }
-    textarea:focus, select:focus, input[type="number"]:focus {
+
+    select, input[type="number"] { min-height: 40px; resize: none; }
+    textarea { min-height: 74px; resize: vertical; }
+
+    select:focus, input[type="number"]:focus, textarea:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(15, 118, 110, .12);
+      box-shadow: 0 0 0 3.5px rgba(var(--accent-rgb), .15);
     }
-    textarea { min-height: 74px; }
-    select, input[type="number"] { min-height: 42px; resize: none; }
-    label {
-      display: grid;
-      gap: 7px;
-      font-size: 12px;
-      font-weight: 700;
-      color: #475467;
-    }
-    .field-label {
-      display: grid;
-      gap: 7px;
-      font-size: 12px;
-      font-weight: 700;
-      color: #475467;
-    }
-    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+    select:hover, input[type="number"]:hover { border-color: var(--border-strong); }
+
+    .custom-resolution { display: none; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .custom-resolution.open { display: grid; }
+
+    /* ---- Mode picker ---- */
+
+    .mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+
     .mode-option {
       position: relative;
       display: grid;
       gap: 4px;
-      min-height: 82px;
+      align-content: start;
+      min-height: 84px;
       padding: 11px 12px;
       border: 1px solid var(--border);
-      border-radius: 8px;
-      background: #fff;
+      border-radius: var(--radius-sm);
+      background: var(--panel);
       cursor: pointer;
-      transition: border-color .16s ease, box-shadow .16s ease, background .16s ease, transform .16s ease;
+      transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
     }
-    .mode-option:hover { transform: translateY(-1px); border-color: #b5becb; }
+
+    .mode-option:hover { border-color: var(--border-strong); background: var(--panel-soft); }
     .mode-option input { position: absolute; opacity: 0; pointer-events: none; }
-    .mode-option strong { font-size: 13px; color: var(--ink); display: flex; align-items: center; gap: 7px; }
-    .mode-option span { font-size: 12px; line-height: 1.35; color: var(--muted); font-weight: 500; }
+
+    .mode-option strong {
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--ink);
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    .mode-option span {
+      font-size: 11.5px;
+      line-height: 1.4;
+      color: var(--muted);
+      font-weight: 500;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
     .mode-dot {
       width: 9px;
       height: 9px;
+      flex: 0 0 auto;
       border-radius: 99px;
-      background: #cbd5e1;
-      box-shadow: 0 0 0 4px #f1f5f9;
+      background: var(--border-strong);
+      box-shadow: 0 0 0 3px var(--bg-soft);
+      transition: background .16s ease, box-shadow .16s ease;
     }
+
     .mode-option:has(input:checked) {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(15, 118, 110, .12);
       background: var(--accent-soft);
+      box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .13);
     }
-    .mode-option:has(input:checked) .mode-dot { background: var(--accent); box-shadow: 0 0 0 4px rgba(15, 118, 110, .14); }
-    .custom-resolution { display: none; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .custom-resolution.open { display: grid; }
+
+    .mode-option:has(input:checked) .mode-dot {
+      background: var(--accent);
+      box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .18);
+    }
+
+    .mode-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* ---- Buttons ---- */
+
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+
     button {
       border: 1px solid transparent;
-      border-radius: 8px;
-      min-height: 42px;
-      padding: 10px 12px;
+      border-radius: var(--radius-sm);
+      min-height: 40px;
+      padding: 10px 13px;
       font: inherit;
+      font-size: 13px;
       font-weight: 800;
       cursor: pointer;
-      transition: transform .14s ease, box-shadow .14s ease, background .14s ease, border-color .14s ease;
+      transition: background .14s ease, border-color .14s ease, box-shadow .14s ease, transform .1s ease, color .14s ease;
     }
-    button:disabled { opacity: .55; cursor: not-allowed; }
+
+    button:disabled { opacity: .5; cursor: not-allowed; }
     button:not(:disabled):active { transform: translateY(1px); }
-    .primary { background: var(--accent); color: #fff; box-shadow: 0 10px 18px rgba(15, 118, 110, .18); }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .primary {
+      background: var(--accent);
+      color: var(--accent-ink);
+      box-shadow: 0 6px 14px rgba(var(--accent-rgb), .22);
+    }
+
     .primary:hover:not(:disabled) { background: var(--accent-dark); }
-    .secondary { background: #fff; border-color: var(--border); color: #344054; }
-    .secondary:hover:not(:disabled) { border-color: #aeb8c8; box-shadow: 0 8px 16px rgba(16, 24, 40, .06); }
+    .primary:disabled { box-shadow: none; }
+
+    .secondary {
+      background: var(--panel);
+      border-color: var(--border);
+      color: var(--ink-soft);
+    }
+
+    .secondary:hover:not(:disabled) { border-color: var(--border-strong); background: var(--panel-soft); }
+
+    /* ---- Stage ---- */
+
     .stage {
       min-height: 0;
       display: grid;
       grid-template-rows: minmax(0, 1fr) auto auto;
       overflow: hidden;
     }
+
     .preview {
-      min-height: 360px;
+      min-height: 340px;
       display: grid;
       place-items: center;
       padding: 18px;
-      background-color: #f8fafc;
+      background-color: var(--bg-soft);
       background-image:
-        linear-gradient(45deg, #eef1f5 25%, transparent 25%),
-        linear-gradient(-45deg, #eef1f5 25%, transparent 25%),
-        linear-gradient(45deg, transparent 75%, #eef1f5 75%),
-        linear-gradient(-45deg, transparent 75%, #eef1f5 75%);
-      background-size: 26px 26px;
-      background-position: 0 0, 0 13px, 13px -13px, -13px 0;
+        linear-gradient(45deg, var(--checker) 25%, transparent 25%),
+        linear-gradient(-45deg, var(--checker) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, var(--checker) 75%),
+        linear-gradient(-45deg, transparent 75%, var(--checker) 75%);
+      background-size: 24px 24px;
+      background-position: 0 0, 0 12px, 12px -12px, -12px 0;
     }
+
     .preview img {
       width: min(100%, 1100px);
       max-height: 56vh;
       object-fit: contain;
-      background: #101828;
-      border-radius: 8px;
-      box-shadow: 0 18px 42px rgba(16, 24, 40, .20);
+      border-radius: var(--radius-sm);
+      box-shadow: 0 14px 34px rgba(var(--shadow), .22), 0 0 0 1px rgba(var(--shadow), .06);
     }
+
     .empty {
-      width: min(100%, 780px);
+      width: min(100%, 720px);
       aspect-ratio: 16 / 9;
-      border: 1px solid var(--border);
-      border-radius: 8px;
+      /* 16/9 of a wide stage is enormous, and an empty box the size of the
+         window is not a friendlier empty state than a sensible one. */
+      max-height: 300px;
+      border: 1px dashed var(--border-strong);
+      border-radius: var(--radius);
       display: grid;
       place-items: center;
       color: var(--muted);
-      background: rgba(255,255,255,.74);
+      font-size: 13px;
+      background: var(--panel);
       text-align: center;
       padding: 20px;
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,.6);
     }
-    /* Queue / batch list */
+
+    /* ---- Batch queue ---- */
+
     .queue {
       border-top: 1px solid var(--border);
-      background: #fff;
-      max-height: 210px;
+      background: var(--panel);
+      max-height: 216px;
       overflow: auto;
       padding: 10px 12px;
       display: grid;
-      gap: 8px;
+      gap: 7px;
     }
+
     .queue:empty { display: none; }
+
     .q-item {
       display: grid;
-      grid-template-columns: 52px 1fr auto;
+      grid-template-columns: 52px minmax(0, 1fr) auto auto;
       align-items: center;
       gap: 11px;
-      padding: 7px 8px;
+      padding: 7px 9px;
       border: 1px solid var(--border);
-      border-radius: 8px;
-      background: #fff;
+      border-radius: var(--radius-sm);
+      background: var(--panel);
       cursor: pointer;
+      transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
     }
-    .q-item.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(15,118,110,.12); }
+
+    .q-item:hover { border-color: var(--border-strong); background: var(--panel-soft); }
+
+    .q-item.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      box-shadow: 0 0 0 2.5px rgba(var(--accent-rgb), .13);
+    }
+
     .q-thumb {
-      width: 52px; height: 40px;
+      width: 52px;
+      height: 40px;
       object-fit: cover;
-      border-radius: 5px;
-      background: #101828;
+      border-radius: 6px;
+      background: var(--bg-soft);
       border: 1px solid var(--border);
     }
+
     .q-info { min-width: 0; }
-    .q-name { font-size: 12.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .q-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
-    .q-badge { font-size: 11px; font-weight: 800; padding: 3px 8px; border-radius: 99px; white-space: nowrap; }
-    .q-badge.pending { background: #f1f5f9; color: #64748b; }
-    .q-badge.working { background: var(--blue-soft); color: #1e40af; }
-    .q-badge.done { background: var(--accent-soft); color: var(--accent-dark); }
-    .q-badge.error { background: #fee4e2; color: var(--danger); }
-    .q-remove {
-      border: none; background: transparent; color: var(--muted);
-      font-size: 16px; line-height: 1; min-height: 0; padding: 4px 6px; font-weight: 900;
+
+    .q-name {
+      font-size: 12.5px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .q-remove:hover { color: var(--danger); }
+
+    .q-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .q-badge {
+      font-size: 10.5px;
+      font-weight: 800;
+      padding: 3px 9px;
+      border-radius: 99px;
+      white-space: nowrap;
+      border: 1px solid transparent;
+    }
+
+    .q-badge.pending { background: var(--bg-soft); color: var(--muted); border-color: var(--border); }
+    .q-badge.working { background: var(--blue-soft); color: var(--blue-ink); }
+    .q-badge.done { background: var(--accent-soft); color: var(--accent-dark); border-color: rgba(var(--accent-rgb), .35); }
+    .q-badge.error { background: var(--danger-soft); color: var(--danger); }
+
+    .q-remove {
+      border: none;
+      background: transparent;
+      color: var(--muted-light);
+      font-size: 17px;
+      line-height: 1;
+      min-height: 0;
+      padding: 3px 6px;
+      font-weight: 900;
+      border-radius: 7px;
+    }
+
+    .q-remove:hover { color: var(--danger); background: var(--danger-soft); }
+
     .meta {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      padding: 12px 14px;
+      padding: 11px 14px;
       border-top: 1px solid var(--border);
       color: var(--muted);
-      font-size: 13px;
-      background: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--panel);
     }
+
+    /* The output size is the one number worth reading twice before pressing
+       Generate, so it gets to look like a value rather than a caption. */
+    #outputMeta {
+      font-variant-numeric: tabular-nums;
+      color: var(--ink-soft);
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      padding: 3px 10px;
+      white-space: nowrap;
+    }
+
     .error { color: var(--danger); }
-    @media (max-width: 900px) {
-      header, main { padding: 14px; }
-      main { grid-template-columns: 1fr; }
+
+    @media (max-width: 980px) {
+      main { grid-template-columns: 1fr; padding: 14px; }
+      header { padding: 13px 14px; align-items: flex-start; flex-direction: column; gap: 8px; }
       .status { text-align: left; }
-      header { align-items: flex-start; flex-direction: column; }
       .preview img { max-height: 44vh; }
+      .preview { min-height: 240px; }
     }
   </style>
 </head>
 <body>
   <div class="app">
     <header>
-      <h1>QT Seize</h1>
-      <div class="status" id="status">Expand or resize one or many images to a chosen size.</div>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9"></path>
+            <path d="M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9"></path>
+            <path d="M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15"></path>
+            <path d="M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"></path>
+          </svg>
+        </span>
+        <div>
+          <h1>QT Seize</h1>
+          <div class="brand-sub">Expand or resize images to a chosen frame</div>
+        </div>
+      </div>
+      <div class="status" id="status">Waiting for images.</div>
     </header>
     <main>
       <section class="panel controls">
         <div class="drop" id="drop">
           <input id="file" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
           <div>
-            <strong>Drop one or more images</strong>
-            <span>PNG, JPG, or WebP. Add several to batch-process them with the same settings.</span>
+            <span class="drop-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 16V4"></path><path d="m7.5 8.5 4.5-4.5 4.5 4.5"></path>
+                <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"></path>
+              </svg>
+            </span>
+            <strong>Drop images here</strong>
+            <span>PNG, JPG or WebP &mdash; or click to browse. Add several to batch-process them with the same settings.</span>
           </div>
         </div>
         <div class="field-label">Output mode
@@ -318,7 +610,7 @@
           <button class="secondary" id="download" type="button" disabled>Download</button>
         </div>
         <button class="secondary" id="reset" type="button">Clear all</button>
-        <div class="note" id="details">Expand fills the frame from the photo. Resize fits the original into the selected size. Download asks where to save.</div>
+        <div class="note" id="details">Download asks where to save. With several images queued it offers a folder and writes them all into it.</div>
       </section>
       <section class="panel stage">
         <div class="preview" id="preview"><div class="empty">Upload one or more images to start.</div></div>
@@ -328,6 +620,16 @@
     </main>
   </div>
   <script>
+    /* The support board embeds this page in an iframe under its own titled
+       header and Back button, so a second "QT Seize" heading inside the frame is
+       duplicate chrome in the view with the least room to spare. Detected here
+       rather than passed in as a query parameter, so the board's <iframe src>
+       needs to know nothing about it. */
+    if (window.self !== window.top) {
+      document.querySelector('.app')?.classList.add('embedded');
+      document.title = 'QT Seize (embedded)';
+    }
+
     // Each queue entry: { id, file, name, sourceUrl, w, h, resultUrl, status }
     const state = { items: [], activeId: null, seq: 0 };
 

@@ -1,6 +1,10 @@
 require('dotenv/config');
 
-const bcrypt = require('bcrypt');
+// bcryptjs, not the native bcrypt: server.js verifies every login with
+// bcryptjs, so using it here too means one bcrypt implementation instead of
+// two (the native one needs a compiler at install time). The formats are
+// interchangeable - bcryptjs reads the $2b$ hashes this script wrote before.
+const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
 const { PrismaPg } = require('@prisma/adapter-pg');
 

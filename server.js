@@ -6,6 +6,7 @@ const session = require('express-session');
 const pgSession = require('connect-pg-simple')(session);
 const { Pool } = require('pg');
 const rateLimit = require('express-rate-limit');
+const compression = require('compression');
 const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
@@ -16,6 +17,11 @@ const PORT = Number(process.env.PORT || 3000);
 const DATA_PATH = path.join(__dirname, 'data', 'board-state.json');
 const TOKEN_STORE_PATH = path.join(__dirname, 'data', 'oauth-tokens.json');
 const VERSIONS_DIR = path.join(__dirname, 'versions');
+// Server-rendered pages live here rather than in public/: public/ is mounted
+// at /assets behind requireAuth only, so an admin-only page (audit-tickets)
+// sitting there would be fetchable by any signed-in agent. Keeping them out
+// of the static mount means the route's own guard is the only way in.
+const VIEWS_DIR = path.join(__dirname, 'views');
 const AVATAR_UPLOAD_DIR = path.join(__dirname, 'public', 'uploads', 'avatars');
 const MAX_BACKUPS = Number(process.env.STATE_BACKUP_KEEP || 50);
 const BACKUP_MIN_INTERVAL_MS = Number(process.env.STATE_BACKUP_MIN_INTERVAL_MS || 60_000);
@@ -66,8 +72,119 @@ if (M365_SECRET_LOOKS_LIKE_ID) {
 // calls that function - Resolved notifications go through the Power Automate
 // webhook instead. Requesting them anyway forced an admin-consent prompt for
 // permissions the app never actually uses.
-const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared').trim();
+// Mail.Send / Mail.Send.Shared were added when replying moved into the board.
+// Shared is the one that matters: the reply is drafted on the message where it
+// lives, in the helpdesk mailbox, which is not the connected identity's own -
+// Mail.Send alone would send from the connected user instead and 403 on the
+// helpdesk draft. An existing connection consented before this line will not
+// carry them, so /api/reply/from-addresses reports the gap and the composer
+// says to reconnect Outlook rather than failing at send time.
+const M365_SCOPES = String(process.env.M365_SCOPES || 'offline_access openid profile email User.Read Mail.Read Mail.Read.Shared Mail.Send Mail.Send.Shared').trim();
+const M365_CAN_SEND_MAIL = /\bMail\.Send\b/i.test(M365_SCOPES);
+/* Sending mail without holding a credential that can send mail.
+
+   MAIL_WEBHOOK_URL is a Power Automate "When an HTTP request is received"
+   trigger whose flow does the actual Outlook send on its own connection. When
+   it is set, the board never asks Graph to send anything: it POSTs what should
+   go out and the flow sends it.
+
+   Why that is worth a second code path. A delegated Mail.Send token in this
+   process can send as the connected identity and as every mailbox Exchange
+   grants it Send As on - so whatever leaks with it is "mail as us", and the
+   board also inherits the "last person to connect owns the sending identity"
+   problem. The flow URL leaks as "post one JSON body into one flow": it cannot
+   read a mailbox, cannot change the From the flow is built with, and is revoked
+   by regenerating the trigger rather than by a tenant-wide consent change. The
+   trade is that the flow is the authority on the From address, and that its
+   failures arrive as an HTTP status rather than a Graph error.
+
+   Graph is still used for reading - bodies, attachments, the quoted original.
+   This replaces the send leg only, and only when configured. Unset, everything
+   behaves exactly as it did. */
+const MAIL_WEBHOOK_URL = String(process.env.MAIL_WEBHOOK_URL || process.env.REPLY_WEBHOOK_URL || '').trim();
+const CAN_SEND_MAIL = M365_CAN_SEND_MAIL || !!MAIL_WEBHOOK_URL;
+if (MAIL_WEBHOOK_URL) console.log('[mail] MAIL_WEBHOOK_URL is set - replies and feedback mail are sent by that flow, not by Graph.');
+
+/* One body shape for every kind of mail the board sends through the flow.
+
+   `kind` is what the flow switches on, and `mailbox`/`messageId` are what let
+   it thread a reply: a Power Automate "Reply to email (V3)" on that message id
+   keeps the conversation's real headers, which is the one thing a plain
+   "Send an email (V2)" cannot reproduce. A flow that only implements sending
+   still works - it just answers in a new thread. */
+async function sendMailViaFlow({ kind, from, mailbox, messageId, to, cc, subject, bodyHtml, replyTo, ticketId, actor }) {
+  if (!MAIL_WEBHOOK_URL) throw new Error('mail_webhook_not_configured');
+  const addresses = list => (Array.isArray(list) ? list : [])
+    .map(r => (typeof r === 'string' ? r : r?.emailAddress?.address))
+    .map(normalizeEmailAddress)
+    .filter(Boolean);
+  const to_ = addresses(to);
+  const cc_ = addresses(cc);
+  const payload = {
+    kind: kind || 'support_kanban_mail',
+    from: from || '',
+    mailbox: mailbox || '',
+    messageId: messageId || '',
+    ticketId: ticketId || '',
+    subject: subject || '',
+    bodyHtml: bodyHtml || '',
+    to: to_,
+    cc: cc_,
+    replyTo: addresses(replyTo),
+    // The same recipients as semicolon-separated strings, because that is what
+    // the Outlook actions in Power Automate take - otherwise every flow needs
+    // a join() expression somebody has to get right in the designer.
+    toLine: to_.join(';'),
+    ccLine: cc_.join(';'),
+    reporter: actor?.label || '',
+    sentBy: actor?.email || ''
+  };
+  if (!to_.length) throw new Error('missing_recipients');
+  try {
+    await postJson(MAIL_WEBHOOK_URL, payload);
+  } catch (error) {
+    // postJson reports webhook_error_<status>; renamed so the composer's error
+    // map can tell a mail-flow failure from a Teams webhook failure.
+    throw new Error(String(error?.message || error).replace(/^webhook_error_/, 'mail_flow_error_'));
+  }
+  return { to: to_, cc: cc_, subject: payload.subject };
+}
 const SUPPORT_MAILBOX = String(process.env.SUPPORT_MAILBOX || 'helpdesk@quinta.im').trim().toLowerCase();
+/* The mailbox the board sends its own mail from.
+
+   Two kinds of mail leave this board and they do not belong in the same
+   mailbox. A reply to a client must come from SUPPORT_MAILBOX: it is the
+   address they have been corresponding with, and the only one whose reply keeps
+   the thread's real headers. But a password reset and a feedback report are the
+   board talking to its own team - putting those in the helpdesk mailbox's Sent
+   Items mixes internal plumbing into a client-facing correspondence record, and
+   sending them as "whichever agent last connected Outlook" means the From
+   address on a password reset changes depending on who signed in last week.
+
+   Set this to a mailbox of the board's own - kanban@quinta.im - and that stops
+   being true. Unset, transactional mail sends as the connected identity exactly
+   as it did.
+
+   On the Graph path this mailbox needs Send As granted to the connected
+   identity, unless the board is connected as that mailbox itself, in which case
+   it needs nothing. On the flow path the flow's own connection decides, and
+   this is passed as `from` for it to honour. */
+const KANBAN_MAILBOX = normalizeEmailForDb(process.env.KANBAN_MAILBOX || '') || '';
+if (KANBAN_MAILBOX) console.log(`[mail] board-owned mail (password resets, feedback) sends from ${KANBAN_MAILBOX}`);
+// Extra addresses a reply may claim to be from, on top of the two the board
+// works out by itself: the helpdesk mailbox (always allowed - it is where the
+// thread lives) and the signed-in agent's own mailbox. Use this for shared
+// aliases nobody's account is named after. Every address here still needs Send
+// As granted to the connected identity in Exchange, or Graph rejects the send.
+// Configured rather than free-text so a typo, or a deliberate attempt to reply
+// as someone else, cannot leave the board.
+const REPLY_FROM_ADDRESSES = (() => {
+  const configured = String(process.env.REPLY_FROM_ADDRESSES || '')
+    .split(/[,;\s]+/)
+    .map(value => value.trim().toLowerCase())
+    .filter(value => value.includes('@'));
+  return [...new Set([SUPPORT_MAILBOX, ...configured])];
+})();
 const CONFIGURED_APP_BASE_URL = String(process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
 const APP_BASE_URL = String(CONFIGURED_APP_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, '');
 // Teams "Resolved" alerts always link to prod, regardless of which
@@ -192,6 +309,22 @@ app.use(helmet({
     }
   }
 }));
+// Nothing here was compressed before, and the payloads are large: measured
+// locally, /api/tickets goes 12.1MB -> 510KB, /api/state 1.5MB -> 140KB, and
+// index.html (which carries the whole app inline, and is served no-store, so
+// every page load pays full price) 494KB -> 127KB.
+// text/event-stream is excluded explicitly: /api/events is a long-lived SSE
+// stream, and buffering it would stall live board updates instead of merely
+// making them slower. It already sets Cache-Control: no-transform (which
+// compression honours), so this filter is a second, more obvious guard that
+// survives someone editing those headers later.
+app.use(compression({
+  filter: (req, res) => {
+    const type = String(res.getHeader('Content-Type') || '');
+    if (type.includes('text/event-stream')) return false;
+    return compression.filter(req, res);
+  }
+}));
 app.use(express.json({ limit: '25mb' }));
 // Needed for the OAuth consent form POST and the token endpoint, which per
 // RFC 6749 is submitted as application/x-www-form-urlencoded.
@@ -218,6 +351,42 @@ function isAuthed(req) { return req.session && req.session.authenticated === tru
 function requireAuth(req, res, next) { return isAuthed(req) ? next() : res.status(401).json({ error: 'unauthorized' }); }
 function isAdminRole(role) { return role === 'admin' || role === 'owner'; }
 function isOwnerRole(role) { return role === 'owner'; }
+// The two decisions that are CS's to make, named once so the client's hidden
+// buttons and the server's enforcement cannot drift apart.
+//
+// Closing a ticket for good (Confirm resolved) and choosing which support agent
+// owns it are review decisions: support does the work and moves the card to
+// Resolved, CS is who signs it off and who hands it out. Support agents used to
+// be able to do both - the resolved-review buttons appeared for whoever the
+// ticket's CS field happened to name, and the assign menu opened for the
+// assignee themselves, so an agent could confirm their own work and pass a
+// ticket on without CS ever seeing it.
+function isCsRole(role) { return normalizeRole(role) === 'cs'; }
+
+/* Which team someone is on, which is NOT simply their stored role.
+
+   Seven of the CS agents' accounts (JAT, JFC, RKH, SKE, TBR, VPO, WPH) still
+   carry the legacy `agent` role, which normalizeRole maps to 'support'. Reading
+   the role alone would therefore have taken Confirm resolved away from half the
+   CS team the moment this restriction shipped, which is why the check the board
+   used before this looked at the trigram and ignored the role entirely.
+
+   So both are consulted: the roster settles it for anyone on it, and the role
+   covers accounts whose username is not an agent trigram at all. Fix the stored
+   roles and this keeps working unchanged. */
+function effectiveTeam(role, username) {
+  const normalized = normalizeRole(role);
+  if (isAdminRole(normalized)) return 'admin';
+  const code = String(username || '').trim().toUpperCase();
+  if (normalized === 'cs' || CS_AGENT_CODES.has(code)) return 'cs';
+  if (SUPPORT_AGENT_CODES.has(code)) return 'support';
+  return normalized === 'cs' ? 'cs' : 'support';
+}
+function canConfirmResolution(role, username) {
+  const team = effectiveTeam(role, username);
+  return team === 'cs' || team === 'admin';
+}
+function canAssignSupportAgent(role, username) { return canConfirmResolution(role, username); }
 function requireAdmin(req, res, next) {
   if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
   if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
@@ -1101,9 +1270,98 @@ function medianOf(values) {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-async function safeWriteState(state) {
+/* The board is saved as one blob, so a role restriction has to be applied to
+   the blob rather than to a route. This strips the two CS-only decisions out of
+   an incoming save when the person saving is not CS, leaving the rest of their
+   save intact.
+
+   Hiding the buttons in the client is presentation only: the same save endpoint
+   accepts any state a tab cares to post, so a support agent's tab (or a stale
+   one, or curl) could still write confirmedAt or move a ticket to another
+   agent. This is where that is actually refused.
+
+   What is deliberately still allowed for support:
+   - moving a ticket into Resolved. Support finishes the work; CS signs it off.
+   - the FIRST assignment of a ticket that has nobody on it, because that is the
+     client's auto-assign for a newly ingested ticket and every open tab runs
+     it, not a person handing work around. Only changing an existing assignment
+     is CS's call. */
+function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
+  const role = normalizeRole(actor?.role) || 'support';
+  const username = actor?.username || '';
+  const refused = [];
+  const isMap = (value) => !!value && typeof value === 'object';
+
+  if (!canConfirmResolution(role, username)) {
+    const currentMeta = isMap(currentState.ticketResolutionMeta) ? currentState.ticketResolutionMeta : {};
+    const incomingMeta = isMap(nextState.ticketResolutionMeta) ? nextState.ticketResolutionMeta : {};
+    Object.keys(incomingMeta).forEach((ticketId) => {
+      const before = isMap(currentMeta[ticketId]) ? currentMeta[ticketId] : {};
+      const after = isMap(incomingMeta[ticketId]) ? incomingMeta[ticketId] : {};
+      const claims = ['confirmedAt', 'confirmedBy', 'sentBackAt', 'sentBackBy', 'sendBackNote']
+        .filter(field => after[field] !== undefined && after[field] !== before[field]);
+      if (!claims.length) return;
+      // Keep whatever CS already recorded, drop what this save tried to add.
+      incomingMeta[ticketId] = { ...after };
+      claims.forEach((field) => {
+        if (before[field] === undefined) delete incomingMeta[ticketId][field];
+        else incomingMeta[ticketId][field] = before[field];
+      });
+      refused.push({ field: 'ticketResolutionMeta', id: ticketId, claims });
+    });
+
+    // The archive stamp Confirm resolved writes alongside the meta. Without
+    // this the ticket would still vanish off the board, which is the visible
+    // half of confirming it.
+    const currentArchived = isMap(currentState.ticketArchived) ? currentState.ticketArchived : {};
+    const incomingArchived = isMap(nextState.ticketArchived) ? nextState.ticketArchived : {};
+    Object.keys(incomingArchived).forEach((ticketId) => {
+      const entry = incomingArchived[ticketId];
+      if (String(entry?.reason || '') !== 'resolved_confirmed') return;
+      // Already archived this way by someone who was allowed to: this save is
+      // just carrying it back, not claiming it.
+      if (String(currentArchived[ticketId]?.reason || '') === 'resolved_confirmed') return;
+      if (currentArchived[ticketId]) incomingArchived[ticketId] = currentArchived[ticketId];
+      else delete incomingArchived[ticketId];
+      refused.push({ field: 'ticketArchived', id: ticketId, claims: ['resolved_confirmed'] });
+    });
+  }
+
+  if (!canAssignSupportAgent(role, username)) {
+    const currentAssignee = isMap(currentState.ticketAssignee) ? currentState.ticketAssignee : {};
+    const incomingAssignee = isMap(nextState.ticketAssignee) ? nextState.ticketAssignee : {};
+    Object.keys(incomingAssignee).forEach((ticketId) => {
+      const before = String(currentAssignee[ticketId] || '').trim();
+      const after = String(incomingAssignee[ticketId] || '').trim();
+      if (!before || before === after) return;
+      incomingAssignee[ticketId] = currentAssignee[ticketId];
+      // manualSupportOverride and ticketAssignmentMode describe the assignment
+      // and are merged on its clock, so a refused reassignment must not leave
+      // its "a human chose this" flag behind - that flag is what stops the
+      // company/workload pass from ever correcting the ticket again.
+      ['manualSupportOverride', 'ticketAssignmentMode'].forEach((field) => {
+        const incoming = isMap(nextState[field]) ? nextState[field] : null;
+        if (!incoming || !Object.prototype.hasOwnProperty.call(incoming, ticketId)) return;
+        const current = isMap(currentState[field]) ? currentState[field] : {};
+        if (Object.prototype.hasOwnProperty.call(current, ticketId)) incoming[ticketId] = current[ticketId];
+        else delete incoming[ticketId];
+      });
+      refused.push({ field: 'ticketAssignee', id: ticketId, claims: [after] });
+    });
+  }
+
+  if (refused.length) {
+    console.warn(`[permissions] dropped ${refused.length} CS-only change(s) from a ${effectiveTeam(role, username)} save by ${actor?.username || 'unknown'}: ${refused.slice(0, 5).map(r => `${r.field}/${r.id}`).join(', ')}`);
+  }
+  return refused;
+}
+
+async function safeWriteState(state, actor = null) {
   const nextState = (state && typeof state === 'object') ? state : {};
   const currentState = safeReadState();
+  // Before any merging, so a refused field is merged from the current state
+  // like any other value this save did not touch.
+  const refusedChanges = actor ? applyRolePermissionsToStateWrite(currentState, nextState, actor) : [];
   const currentMeta = currentState._meta || {};
   const incomingMeta = nextState._meta || {};
   const incomingVersion = Number(incomingMeta.clientVersion || 0);
@@ -1281,7 +1539,7 @@ async function safeWriteState(state) {
     backupCreated = true;
   }
 
-  return { saved: true, partial: isStale, backupCreated, state: finalState };
+  return { saved: true, partial: isStale, backupCreated, refused: refusedChanges, state: finalState };
 }
 async function hydrateStateFromDatabase(baseState = {}) {
   const state = (baseState && typeof baseState === 'object') ? JSON.parse(JSON.stringify(baseState)) : {};
@@ -1294,6 +1552,50 @@ async function hydrateStateFromDatabase(baseState = {}) {
     orderBy: { createdAt: 'desc' }
   });
   if (!tickets.length) return state;
+
+  /* When the database's idea of the assignee is allowed to win.
+
+     This used to be gated on Ticket.updatedAt, which is @updatedAt - a
+     whole-row modification time. It is bumped by every write to the row for any
+     reason at all: a status change, a comment, a HubSpot id, a Jira key, and -
+     since the message body is cached on the ticket - the first time anybody
+     opens the mail. None of those are assignment changes, but each one pushed
+     updatedAt past the board's ticketAssigneeTouchedAt and so handed the row's
+     assignedAgent the right to overwrite a newer assignment made on the board.
+     That is the "assignment went back on its own, minutes later" report: assign
+     a ticket, open it (or let anyone touch it), and the next board load
+     re-imposed whichever agent Postgres still had.
+
+     So ask for the time the assignment itself last changed. Every writer of
+     that column - the board save and the MCP patch endpoint - records a
+     ticket_assignedAgent_changed event through auditTicketChanges, so the most
+     recent one of those IS the assignment clock. A ticket with no such event
+     has never been reassigned since it was created, so its creation time is the
+     right answer for it.
+
+     The board's column (status) was gated the same way and had the same
+     defect, so both clocks are read here.
+
+     One groupBy for the whole board rather than a query per ticket. */
+  let lastAssignChangeAt = new Map();
+  let lastStatusChangeAt = new Map();
+  try {
+    const fieldEvents = await prisma.ticketEvent.groupBy({
+      by: ['ticketId', 'eventType'],
+      where: { eventType: { in: ['ticket_assignedAgent_changed', 'ticket_status_changed'] } },
+      _max: { createdAt: true }
+    });
+    fieldEvents.forEach((row) => {
+      const at = new Date(row._max?.createdAt || 0).getTime() || 0;
+      const target = row.eventType === 'ticket_status_changed' ? lastStatusChangeAt : lastAssignChangeAt;
+      if (at > (target.get(row.ticketId) || 0)) target.set(row.ticketId, at);
+    });
+  } catch (error) {
+    // Losing the clocks must not lose the board. Empty maps mean every ticket
+    // falls back to its creation time, which is the conservative direction: the
+    // board's own value keeps winning rather than being overwritten.
+    console.error('Ticket field clock lookup failed:', error?.message || error);
+  }
 
   const existingTickets = Array.isArray(state.allTickets) ? state.allTickets : [];
   const ticketsById = new Map(
@@ -1353,24 +1655,34 @@ async function hydrateStateFromDatabase(baseState = {}) {
 
     ticketsById.set(externalId, mergedTicket);
     seenIds.add(externalId);
-    const dbTouchedAt = new Date(ticket.updatedAt || ticket.createdAt || Date.now()).getTime();
+    const createdAtMs = new Date(ticket.createdAt || 0).getTime() || 0;
+    // Same reasoning as the assignment clock below: Ticket.updatedAt says the
+    // row changed, not that the column did, so caching a message body or
+    // writing a Jira key used to let the database's stale status pull a ticket
+    // back into the column it had been dragged out of.
+    const dbStatusAt = lastStatusChangeAt.get(ticket.id) || createdAtMs;
     const currentTouchedAt = Number(state.ticketStageTouchedAt[externalId] || 0);
-    if (dbTouchedAt >= currentTouchedAt || !state.ticketState[externalId]) {
+    if (dbStatusAt >= currentTouchedAt || !state.ticketState[externalId]) {
       state.ticketState[externalId] = normalizeDbStatusForBoard(ticket.status);
-      state.ticketStageTouchedAt[externalId] = dbTouchedAt;
+      state.ticketStageTouchedAt[externalId] = dbStatusAt;
     } else {
       state.ticketStageTouchedAt[externalId] = currentTouchedAt;
     }
     if (ticket.priority) state.ticketPriority[externalId] = ticket.priority;
     if (ticket.category) state.ticketCategory[externalId] = ticket.category;
-    // Same timestamp gate as the stage a few lines up. Taking the DB value
-    // unconditionally meant every /api/state read re-imposed whatever assignee
-    // Postgres last saw, undoing a newer assignment held in the JSON state.
+    // Same idea as the stage gate a few lines up, but on the assignment's own
+    // clock rather than the row's - see the note where lastAssignChangeAt is
+    // built for why dbTouchedAt is the wrong question to ask here.
     const assignTouchedAt = Number(state.ticketAssigneeTouchedAt[externalId] || 0);
-    if (dbTouchedAt >= assignTouchedAt) {
+    const dbAssignedAt = lastAssignChangeAt.get(ticket.id) || createdAtMs;
+    if (dbAssignedAt >= assignTouchedAt) {
       if (ticket.assignedAgent) state.ticketAssignee[externalId] = ticket.assignedAgent;
       if (ticket.csAgent) state.ticketCSOwner[externalId] = ticket.csAgent;
-      if (ticket.assignedAgent || ticket.csAgent) state.ticketAssigneeTouchedAt[externalId] = dbTouchedAt;
+      // The assignment's own clock, not the row's. Stamping the JSON with the
+      // row modification time inflated it - it is always >= the real
+      // assignment time - which then made the board's copy look newer than it
+      // was and let it reject a genuinely later change from the MCP endpoint.
+      if (ticket.assignedAgent || ticket.csAgent) state.ticketAssigneeTouchedAt[externalId] = dbAssignedAt;
     }
     if (ticket.assignedAgent || ticket.csAgent) state.ticketAssignmentMode[externalId] = 'support';
     if (ticket.senderEmail) state.ticketClientEmail[externalId] = ticket.senderEmail;
@@ -1478,6 +1790,50 @@ async function graphGet(pathname, token) {
   return graphRequest(pathname, token);
 }
 
+// A GET that wants bytes, not JSON. graphRequest returns null for any response
+// that is not application/json, which is exactly what an attachment's /$value is
+// - so it needs its own path. Used to serve one inline image at a time instead
+// of carrying every image on a message as base64 through the JSON body.
+async function graphGetBinary(pathname, token) {
+  const res = await fetch(`https://graph.microsoft.com/v1.0${pathname}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`graph_error_${res.status}:${txt.slice(0, 400)}`);
+  }
+  return {
+    buffer: Buffer.from(await res.arrayBuffer()),
+    contentType: String(res.headers.get('content-type') || '')
+  };
+}
+
+// The binary sibling of graphGetResilient - same 401-refresh and 429/503/504
+// backoff, because an image request is throttled by the same per-mailbox budget
+// as everything else and a burst of opened tickets is exactly what trips it.
+async function graphGetBinaryResilient(pathname, req) {
+  let token = await graphDelegatedToken(req);
+  let refreshed = false;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await graphGetBinary(pathname, token);
+    } catch (err) {
+      const status = graphErrorStatus(err);
+      if (status === 401 && !refreshed) {
+        refreshed = true;
+        const tokens = await resolveStoredM365Tokens(req);
+        token = (await refreshStoredM365Tokens(tokens, req)).accessToken;
+        continue;
+      }
+      if ((status === 429 || status === 503 || status === 504) && attempt < 2) {
+        await new Promise(r => setTimeout(r, 700 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // graphRequest throws `graph_error_<status>:<body>`; this is the status back out.
 function graphErrorStatus(err) {
   return Number(String(err?.message || '').match(/^graph_error_(\d{3})/)?.[1]) || 0;
@@ -1516,28 +1872,55 @@ async function graphGetResilient(pathname, req) {
   }
 }
 
-async function graphSendPasswordResetEmail(recipientEmail, resetUrl) {
-  const token = await graphDelegatedTokenFromStore();
+/* The reset mail, by whichever leg this deployment has.
+
+   This is the one mail nobody can work around when it fails: an agent locked
+   out of the board cannot ask the board to let them in. It used to go only
+   through /me/sendMail on the stored Outlook connection, so a broken client
+   secret or a token without Mail.Send took password recovery down with
+   everything else Graph-backed. The flow needs neither. */
+/* Whose sendMail endpoint board-owned mail goes through.
+
+   /me is the connected identity, which can always send as itself and so needs
+   no grant at all - the safe default, and what this did before KANBAN_MAILBOX
+   existed. Naming a mailbox instead needs Send As on it, or the board to be
+   connected as it. */
+function boardSendMailPath() {
+  return KANBAN_MAILBOX ? `/users/${encodeURIComponent(KANBAN_MAILBOX)}/sendMail` : '/me/sendMail';
+}
+
+async function sendPasswordResetEmail(recipientEmail, resetUrl) {
+  const subject = 'Reset your Support Kanban password';
   const html = [
     '<div style="font-family:Segoe UI,Arial,sans-serif;color:#0f172a;line-height:1.5;">',
     '<h2 style="margin:0 0 12px;">Reset your Support Kanban password</h2>',
     '<p>We received a request to reset your password.</p>',
     `<p><a href="${escapeHtml(resetUrl)}" style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;padding:10px 14px;border-radius:8px;font-weight:700;">Change password</a></p>`,
+    // The link in text as well: some clients strip the styled anchor, and a
+    // reset mail whose only button is gone is a reset mail that failed.
+    `<p style="font-size:12px;color:#667085;">Or paste this into your browser:<br>${escapeHtml(resetUrl)}</p>`,
     '<p>This link expires in 1 hour. If you did not request it, you can ignore this email.</p>',
     '</div>'
   ].join('');
-  await graphRequest('/me/sendMail', token, {
+
+  if (MAIL_WEBHOOK_URL) {
+    await sendMailViaFlow({ kind: 'support_kanban_password_reset', from: KANBAN_MAILBOX, to: [recipientEmail], subject, bodyHtml: html });
+    return 'flow';
+  }
+  const token = await graphDelegatedTokenFromStore();
+  await graphRequest(boardSendMailPath(), token, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       message: {
-        subject: 'Reset your Support Kanban password',
+        subject,
         body: { contentType: 'HTML', content: html },
         toRecipients: [{ emailAddress: { address: recipientEmail } }]
       },
       saveToSentItems: true
     })
   });
+  return 'graph';
 }
 
 async function postJson(url, payload) {
@@ -1897,11 +2280,77 @@ function cleanHighlightedText(s) {
   return stripHtml(String(s || '').replace(/<\/?span[^>]*>/gi, ''));
 }
 
+/* The projection, and why the property name is spelled the long way.
+
+   An attachments collection is typed as microsoft.graph.attachment, and the
+   base type carries id, name, contentType, size and isInline - but NOT
+   contentId, which belongs to the fileAttachment subtype. Asking for it
+   unqualified made Graph reject the entire request:
+
+     BadRequest: Parsing OData Select and Expand failed: Could not find a
+     property named 'contentId' on type 'microsoft.graph.attachment'.
+
+   which threw before a single image was listed, so every picture on every
+   message failed and the modal said the images could not be loaded. A derived
+   property has to be qualified with the type that declares it. */
+const ATTACHMENT_SELECT_BASE = '$select=id,name,contentType,size,isInline';
+const ATTACHMENT_SELECT = `${ATTACHMENT_SELECT_BASE},microsoft.graph.fileAttachment/contentId`;
+// Whether this tenant accepts that qualified projection. Set false the first
+// time it is refused, so one 400 is the whole cost rather than one per page of
+// one attachment listing of every ticket anybody opens.
+let attachmentSelectSupported = true;
+
+/* Lists one page of attachments, and never lets the projection be the reason a
+   message has no pictures.
+
+   The projection is worth having: without it Graph returns contentBytes for
+   every attachment, so a reply chain full of signatures is 10-20MB of base64
+   pulled into this process to be thrown away. But correctness comes first, so a
+   400 falls back to the unprojected listing - which is the representation known
+   to be complete - and remembers not to try the projection again. */
+// Drops $select from a Graph URL whatever form it is in. A literal string
+// replace would have worked on the URL built here and quietly failed on a
+// nextLink, where Graph echoes the query back percent-encoded (%24select) - and
+// a failed strip means retrying the request that just failed.
+function stripSelect(pathname) {
+  const [path, query = ''] = String(pathname || '').split('?');
+  const kept = query.split('&').filter(part => part && !/^(%24|\$)select=/i.test(part));
+  return kept.length ? `${path}?${kept.join('&')}` : path;
+}
+
+async function fetchAttachmentPage(pathname, req) {
+  const unprojected = stripSelect(pathname);
+  if (!attachmentSelectSupported) return graphGetResilient(unprojected, req);
+  try {
+    return await graphGetResilient(pathname, req);
+  } catch (error) {
+    if (graphErrorStatus(error) !== 400) throw error;
+    attachmentSelectSupported = false;
+    console.warn('[attachments] Graph refused the projected attachment listing, falling back to the full one:', String(error?.message || error).slice(0, 200));
+    return graphGetResilient(unprojected, req);
+  }
+}
+
 async function graphGetMessageWithAttachments(token, mailbox, msgId) {
   const msg = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=id,subject,body,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,webLink,hasAttachments`, token);
   let attachments = [];
   if (msg?.hasAttachments) {
-    const at = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=15&$select=id,name,contentType,size,isInline,contentBytes`, token);
+    // contentBytes, like contentId, is declared on fileAttachment rather than on
+    // the base attachment type this collection is typed as, so it has to be
+    // qualified - unqualified, Graph rejects the whole request with
+    // "Could not find a property named 'contentBytes' on type
+    // 'microsoft.graph.attachment'" and Debug Expert sees no attachments at
+    // all. Falling back to the unprojected listing keeps it working on a tenant
+    // that will not project it either; here that costs nothing extra, since
+    // this caller wants the bytes anyway.
+    const attachmentPath = `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=15`;
+    let at = null;
+    try {
+      at = await graphGet(`${attachmentPath}&${ATTACHMENT_SELECT_BASE},microsoft.graph.fileAttachment/contentBytes`, token);
+    } catch (error) {
+      if (graphErrorStatus(error) !== 400) throw error;
+      at = await graphGet(attachmentPath, token);
+    }
     attachments = Array.isArray(at?.value) ? at.value : [];
   }
   const attachmentFindings = [];
@@ -2611,11 +3060,19 @@ app.post('/auth/forgot-password', passwordResetLimiter, async (req, res) => {
     `;
 
     try {
-      await graphSendPasswordResetEmail(email, resetUrl);
+      await sendPasswordResetEmail(email, resetUrl);
     } catch (mailError) {
       await prisma.$executeRaw`DELETE FROM "PasswordResetToken" WHERE "tokenHash" = ${tokenHash}`;
       console.error('Password reset email failed:', mailError);
-      return res.status(500).json({ error: 'send_email_failed' });
+      /* Which leg failed, so the login page can name the right fix. "Reconnect
+         Microsoft 365" is useless advice on a deployment that sends through a
+         flow, and someone locked out of the board cannot read the server log to
+         find that out. */
+      return res.status(500).json({
+        error: 'send_email_failed',
+        sendVia: MAIL_WEBHOOK_URL ? 'flow' : 'graph',
+        detail: String(mailError?.message || mailError).slice(0, 200)
+      });
     }
 
     return res.json({ ok: true });
@@ -3135,706 +3592,7 @@ app.get('/api/jira/issues', requireAuth, async (req, res) => {
   }
 });
 app.get('/profile', requireAuth, (req, res) => {
-  return res.type('html').send(`
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
-  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
-  <title>Profile - Support Kanban</title>
-  <style>
-    :root {
-      --bg: #f8fafc;
-      --card: #ffffff;
-      --text: #0f172a;
-      --muted: #64748b;
-      --border: #e2e8f0;
-      --primary: #2563eb;
-      --primary-dark: #1d4ed8;
-      --danger: #dc2626;
-    }
-
-    * {
-      box-sizing: border-box;
-    }
-
-    body {
-      margin: 0;
-      font-family: Inter, Arial, sans-serif;
-      background:
-        radial-gradient(circle at top left, rgba(37,99,235,.14), transparent 32%),
-        radial-gradient(circle at bottom right, rgba(14,165,233,.12), transparent 30%),
-        var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-    }
-
-    .topbar {
-      height: 68px;
-      background: rgba(15, 23, 42, .96);
-      color: white;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 28px;
-      box-shadow: 0 10px 30px rgba(15,23,42,.18);
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      font-size: 18px;
-      font-weight: 800;
-    }
-
-    .brand-mark {
-      width: 36px;
-      height: 36px;
-      border-radius: 12px;
-      background: white;
-      color: #0f172a;
-      display: grid;
-      place-items: center;
-      font-weight: 900;
-    }
-
-    .nav {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-    }
-
-    .nav a,
-    .nav button {
-      border: 1px solid rgba(255,255,255,.18);
-      background: rgba(255,255,255,.06);
-      color: white;
-      padding: 9px 13px;
-      border-radius: 11px;
-      text-decoration: none;
-      cursor: pointer;
-      font-size: 14px;
-      transition: background .15s ease, transform .15s ease;
-    }
-
-    .nav a:hover,
-    .nav button:hover {
-      background: rgba(255,255,255,.13);
-      transform: translateY(-1px);
-    }
-
-    .wrap {
-      max-width: 940px;
-      margin: 42px auto;
-      padding: 0 20px;
-    }
-
-    .profile-card {
-      background: rgba(255,255,255,.92);
-      backdrop-filter: blur(18px);
-      border: 1px solid rgba(226,232,240,.9);
-      border-radius: 24px;
-      overflow: hidden;
-      box-shadow: 0 24px 70px rgba(15,23,42,.12);
-    }
-
-    .hero {
-      padding: 34px;
-      background:
-        linear-gradient(135deg, rgba(15,23,42,.98), rgba(37,99,235,.92) 54%, rgba(20,184,166,.86));
-      color: white;
-      display: flex;
-      align-items: center;
-      gap: 22px;
-    }
-
-    .avatar-picker {
-      position: relative;
-      width: 92px;
-      height: 92px;
-      flex: 0 0 auto;
-      border: 0;
-      padding: 0;
-      border-radius: 999px;
-      background: transparent;
-      cursor: pointer;
-    }
-
-    .avatar-ring {
-      position: absolute;
-      inset: -5px;
-      border-radius: inherit;
-      background: conic-gradient(from 140deg, #ffffff, #93c5fd, #5eead4, #ffffff);
-      opacity: .96;
-    }
-
-    .avatar {
-      position: relative;
-      width: 100%;
-      height: 100%;
-      border-radius: inherit;
-      background:
-        radial-gradient(circle at 30% 22%, rgba(255,255,255,.36), transparent 30%),
-        linear-gradient(135deg, rgba(255,255,255,.24), rgba(255,255,255,.10));
-      border: 3px solid rgba(255,255,255,.96);
-      display: grid;
-      place-items: center;
-      color: white;
-      font-size: 38px;
-      font-weight: 900;
-      overflow: hidden;
-      box-shadow: 0 18px 38px rgba(15,23,42,.26);
-      transition: transform .16s ease, box-shadow .16s ease;
-    }
-
-    .avatar-picker:hover .avatar,
-    .avatar-picker:focus-visible .avatar {
-      transform: translateY(-1px) scale(1.02);
-      box-shadow: 0 22px 44px rgba(15,23,42,.32);
-    }
-
-    .avatar-action {
-      position: absolute;
-      right: -4px;
-      bottom: 2px;
-      min-width: 34px;
-      height: 34px;
-      border-radius: 999px;
-      border: 3px solid white;
-      background: #0f172a;
-      color: white;
-      display: grid;
-      place-items: center;
-      font-size: 16px;
-      line-height: 1;
-      box-shadow: 0 10px 22px rgba(15,23,42,.28);
-    }
-
-    .avatar-help {
-      margin-top: 10px;
-      color: rgba(255,255,255,.74);
-      font-size: 13px;
-    }
-
-    h1 {
-      margin: 0;
-      font-size: 30px;
-      line-height: 1.1;
-    }
-
-    .subtitle {
-      margin-top: 6px;
-      color: rgba(255,255,255,.86);
-      font-size: 14px;
-    }
-
-    .content {
-      padding: 28px 32px 32px;
-    }
-
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 14px;
-      margin-bottom: 22px;
-    }
-
-    .stat {
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      background: #fff;
-      padding: 16px;
-    }
-
-    .stat-label {
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: .04em;
-      margin-bottom: 8px;
-    }
-
-    .stat-value {
-      font-size: 16px;
-      font-weight: 800;
-      word-break: break-word;
-    }
-
-    .details {
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      overflow: hidden;
-      background: white;
-    }
-
-    .row {
-      display: grid;
-      grid-template-columns: 190px 1fr;
-      gap: 16px;
-      padding: 16px 18px;
-      border-bottom: 1px solid #f1f5f9;
-    }
-
-    .row:last-child {
-      border-bottom: 0;
-    }
-
-    .label {
-      color: var(--muted);
-      font-weight: 800;
-      font-size: 13px;
-    }
-
-    .value {
-      color: var(--text);
-      font-weight: 650;
-      word-break: break-word;
-    }
-
-    .form-input {
-      width: min(100%, 380px);
-      border: 1px solid #cbd5e1;
-      border-radius: 12px;
-      background: #f8fafc;
-      color: var(--text);
-      padding: 12px 14px;
-      font: inherit;
-      font-weight: 650;
-      outline: none;
-      transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
-    }
-
-    .form-input:focus {
-      border-color: var(--primary);
-      background: #fff;
-      box-shadow: 0 0 0 4px rgba(37,99,235,.12);
-    }
-
-    .avatar-upload-panel {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      flex-wrap: wrap;
-    }
-
-    .avatar-preview {
-      width: 62px;
-      height: 62px;
-      border-radius: 999px;
-      border: 2px solid #dbeafe;
-      background:
-        radial-gradient(circle at 30% 22%, rgba(255,255,255,.9), transparent 34%),
-        linear-gradient(135deg, #2563eb, #14b8a6);
-      color: white;
-      display: grid;
-      place-items: center;
-      font-size: 24px;
-      font-weight: 900;
-      overflow: hidden;
-      cursor: pointer;
-      box-shadow: 0 12px 26px rgba(37,99,235,.14);
-    }
-
-    .avatar-copy {
-      min-width: 210px;
-    }
-
-    .avatar-title {
-      font-weight: 850;
-      margin-bottom: 4px;
-    }
-
-    .avatar-note {
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 650;
-      line-height: 1.45;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: #ecfdf5;
-      color: #047857;
-      font-size: 13px;
-      font-weight: 800;
-    }
-
-    .actions {
-      margin-top: 24px;
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
-    .btn {
-      border: 0;
-      border-radius: 13px;
-      padding: 12px 16px;
-      font-weight: 800;
-      cursor: pointer;
-      text-decoration: none;
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 14px;
-      transition: transform .15s ease, box-shadow .15s ease;
-    }
-
-    .btn:hover {
-      transform: translateY(-1px);
-    }
-
-    .btn-primary {
-      background: var(--primary);
-      color: white;
-      box-shadow: 0 10px 20px rgba(37,99,235,.20);
-    }
-
-    .btn-primary:hover {
-      background: var(--primary-dark);
-    }
-
-    .btn-secondary {
-      background: #e2e8f0;
-      color: #0f172a;
-    }
-
-    .btn-danger {
-      background: #fee2e2;
-      color: #b91c1c;
-    }
-
-    .hidden {
-      display: none !important;
-    }
-
-    @media (max-width: 720px) {
-      .topbar {
-        padding: 0 16px;
-      }
-
-      .nav {
-        gap: 6px;
-      }
-
-      .nav a,
-      .nav button {
-        padding: 8px 9px;
-      }
-
-      .hero {
-        padding: 24px;
-        align-items: flex-start;
-      }
-
-      .grid {
-        grid-template-columns: 1fr;
-      }
-
-      .row {
-        grid-template-columns: 1fr;
-        gap: 6px;
-      }
-    }
-  </style>
-</head>
-<body>
-  <header class="topbar">
-    <div class="brand">
-      <div class="brand-mark">Q</div>
-      <span>Support Kanban</span>
-    </div>
-
-    <div class="nav">
-      <a href="/">Board</a>
-      <a id="adminTopLink" class="hidden" href="/admin/users">Users</a>
-      <button id="logoutTopBtn" type="button">Logout</button>
-    </div>
-  </header>
-
-  <main class="wrap">
-    <section class="profile-card">
-      <div class="hero">
-        <button class="avatar-picker" id="avatarPicker" type="button" aria-label="Change profile picture">
-          <span class="avatar-ring" aria-hidden="true"></span>
-          <span class="avatar" id="avatar">?</span>
-          <span class="avatar-action" aria-hidden="true">&#128247;</span>
-        </button>
-        <input id="avatarInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" />
-        <div>
-          <h1 id="profileTitle">Profile</h1>
-          <div class="subtitle" id="profileSubtitle">Loading account details...</div>
-          <div class="avatar-help">Click your photo to upload a new image.</div>
-        </div>
-      </div>
-
-      <div class="content">
-        <div class="grid">
-          <div class="stat">
-            <div class="stat-label">Username</div>
-            <div class="stat-value" id="statUsername">-</div>
-          </div>
-
-          <div class="stat">
-            <div class="stat-label">Role</div>
-            <div class="stat-value" id="statRole">-</div>
-          </div>
-
-          <div class="stat">
-            <div class="stat-label">Session</div>
-            <div class="stat-value"><span class="badge">Active</span></div>
-          </div>
-        </div>
-
-        <div class="details">
-          <div class="row">
-            <div class="label">User ID</div>
-            <div class="value" id="userId">-</div>
-          </div>
-
-          <div class="row">
-            <div class="label">Username</div>
-            <div class="value" id="username">-</div>
-          </div>
-
-          <div class="row">
-            <div class="label">Role</div>
-            <div class="value" id="role">-</div>
-          </div>
-
-          <div class="row">
-            <div class="label">Environment</div>
-            <div class="value">Support Kanban Web App</div>
-          </div>
-
-          <div class="row">
-            <div class="label">Password</div>
-            <div class="value">
-              <input id="newPassword" class="form-input" type="password" placeholder="Leave blank to keep current password" autocomplete="new-password" />
-            </div>
-          </div>
-
-          <div class="row">
-            <div class="label">Profile picture</div>
-            <div class="value">
-              <div class="avatar-upload-panel">
-                <button class="avatar-preview" id="avatarPreview" type="button">?</button>
-                <div class="avatar-copy">
-                  <div class="avatar-title">Profile photo</div>
-                  <div class="avatar-note">PNG, JPG, or WebP. Your selected image appears here before saving.</div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="row">
-            <div class="label">Claude connector</div>
-            <div class="value">
-              <div id="mcpTokenStatus" style="font-size:13px;color:var(--muted);margin-bottom:8px;">Loading...</div>
-              <div id="mcpTokenReveal" class="hidden" style="margin-bottom:8px;">
-                <input id="mcpTokenValue" class="form-input" type="text" readonly style="font-family:monospace;font-size:12px;" />
-                <div style="font-size:12px;color:var(--muted);margin-top:4px;">Copy this now - it will not be shown again. Paste it as the Bearer token when adding the Support Kanban connector in Claude.</div>
-              </div>
-              <button class="btn btn-secondary" id="mcpGenerateBtn" type="button">Generate token</button>
-              <button class="btn btn-danger hidden" id="mcpRevokeBtn" type="button">Revoke token</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="actions">
-          <a class="btn btn-primary" href="/">&larr; Back to board</a>
-          <a id="manageUsersBtn" class="btn btn-secondary hidden" href="/admin/users">Manage users</a>
-          <button class="btn btn-secondary" id="saveProfileBtn" type="button">Save profile</button>
-          <button class="btn btn-danger" id="logoutBtn" type="button">Logout</button>
-        </div>
-      </div>
-    </section>
-  </main>
-
-  <script>
-    let selectedAvatarBase64 = null;
-    let currentInitial = '?';
-
-    function setText(id, value) {
-      const el = document.getElementById(id);
-      if (el) el.textContent = value || '-';
-    }
-
-    function setAvatarImage(url, initial) {
-      const el = document.getElementById('avatar');
-      if (!el) return;
-      if (url) {
-        el.style.backgroundImage = 'url(' + url + ')';
-        el.style.backgroundSize = 'cover';
-        el.style.backgroundPosition = 'center';
-        el.textContent = '';
-      } else {
-        el.style.backgroundImage = '';
-        el.textContent = initial;
-      }
-    }
-
-    function setAvatarPreview(url) {
-      const el = document.getElementById('avatarPreview');
-      if (!el) return;
-      if (url) {
-        el.style.backgroundImage = 'url(' + url + ')';
-        el.style.backgroundSize = 'cover';
-        el.style.backgroundPosition = 'center';
-        el.textContent = '';
-      } else {
-        el.style.backgroundImage = '';
-        el.textContent = currentInitial;
-      }
-    }
-
-    async function logout() {
-      await fetch('/auth/logout', {
-        method: 'POST',
-        credentials: 'same-origin'
-      }).catch(() => null);
-
-      window.location.href = '/login';
-    }
-
-    async function loadProfile() {
-      const res = await fetch('/auth/me', {
-        credentials: 'same-origin'
-      });
-
-      if (!res.ok) {
-        window.location.href = '/login';
-        return;
-      }
-
-      const data = await res.json();
-      const user = data.user || {};
-
-      const username = user.username || 'User';
-      const role = user.role || 'user';
-      const initial = String(username).charAt(0).toUpperCase();
-      currentInitial = initial;
-
-      setText('avatar', initial);
-      setAvatarImage(user.avatarUrl, initial);
-      setAvatarPreview(user.avatarUrl);
-      setText('profileTitle', username);
-      setText('profileSubtitle', 'Signed in as ' + role);
-      setText('userId', String(user.id || '-'));
-      setText('username', username);
-      setText('role', role);
-      setText('statUsername', username);
-      setText('statRole', role);
-
-      if (role === 'admin' || role === 'owner') {
-        document.getElementById('manageUsersBtn')?.classList.remove('hidden');
-        document.getElementById('adminTopLink')?.classList.remove('hidden');
-      }
-    }
-
-    function openAvatarPicker() {
-      document.getElementById('avatarInput')?.click();
-    }
-
-    document.getElementById('avatarPicker')?.addEventListener('click', openAvatarPicker);
-    document.getElementById('avatarPreview')?.addEventListener('click', openAvatarPicker);
-
-    document.getElementById('avatarInput')?.addEventListener('change', async (event) => {
-      const file = event.target.files?.[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = reader.result;
-        if (!result || typeof result !== 'string') return;
-        selectedAvatarBase64 = result;
-        setAvatarPreview(result);
-      };
-      reader.readAsDataURL(file);
-    });
-
-    document.getElementById('saveProfileBtn')?.addEventListener('click', async () => {
-      const password = document.getElementById('newPassword')?.value.trim();
-      const payload = {};
-      if (password) payload.password = password;
-      if (selectedAvatarBase64 !== null) payload.avatarBase64 = selectedAvatarBase64;
-      if (!Object.keys(payload).length) {
-        alert('Nothing to save. Change your password or upload a profile picture first.');
-        return;
-      }
-      const res = await fetch('/api/profile', {
-        method: 'PATCH',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const result = await res.json();
-      if (!res.ok) {
-        alert(result.error || 'Unable to update profile.');
-        return;
-      }
-      const username = result.user?.username || 'User';
-      const initial = String(username).charAt(0).toUpperCase();
-      setAvatarImage(result.user?.avatarUrl, initial);
-      setAvatarPreview(result.user?.avatarUrl);
-      selectedAvatarBase64 = null;
-      if (document.getElementById('newPassword')) document.getElementById('newPassword').value = '';
-      alert('Profile updated successfully.');
-    });
-
-    document.getElementById('logoutBtn')?.addEventListener('click', logout);
-    document.getElementById('logoutTopBtn')?.addEventListener('click', logout);
-
-    async function loadMcpTokenStatus() {
-      const res = await fetch('/api/mcp/token', { credentials: 'same-origin' });
-      const data = await res.json().catch(() => ({}));
-      const statusEl = document.getElementById('mcpTokenStatus');
-      const revokeBtn = document.getElementById('mcpRevokeBtn');
-      if (data.token) {
-        const when = new Date(data.token.createdAt).toLocaleDateString();
-        statusEl.textContent = 'Active token created ' + when + (data.token.lastUsedAt ? ', last used ' + new Date(data.token.lastUsedAt).toLocaleString() : ', not used yet');
-        revokeBtn?.classList.remove('hidden');
-      } else {
-        statusEl.textContent = 'No active token. Generate one to connect Claude to the Support Kanban board.';
-        revokeBtn?.classList.add('hidden');
-      }
-    }
-
-    document.getElementById('mcpGenerateBtn')?.addEventListener('click', async () => {
-      if (document.getElementById('mcpRevokeBtn') && !document.getElementById('mcpRevokeBtn').classList.contains('hidden')) {
-        if (!confirm('Generating a new token will revoke your current one and disconnect any Claude connector using it. Continue?')) return;
-      }
-      const res = await fetch('/api/mcp/token', { method: 'POST', credentials: 'same-origin' });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        alert(data.error || 'Unable to generate token.');
-        return;
-      }
-      document.getElementById('mcpTokenValue').value = data.token;
-      document.getElementById('mcpTokenReveal')?.classList.remove('hidden');
-      loadMcpTokenStatus();
-    });
-
-    document.getElementById('mcpRevokeBtn')?.addEventListener('click', async () => {
-      if (!confirm('Revoke your Claude connector token? Any connected Claude sessions will stop working until you generate a new one.')) return;
-      await fetch('/api/mcp/token', { method: 'DELETE', credentials: 'same-origin' });
-      document.getElementById('mcpTokenReveal')?.classList.add('hidden');
-      loadMcpTokenStatus();
-    });
-
-    loadProfile();
-    loadMcpTokenStatus();
-  </script>
-</body>
-</html>
-  `);
+  res.type('html').sendFile(path.join(VIEWS_DIR, 'profile.html'));
 });
 
 app.get('/api/admin/users', requireAdmin, async (req, res) => {
@@ -3988,82 +3746,191 @@ app.delete('/api/tickets/:externalId/duplicate', requireAuth, async (req, res) =
     return res.status(500).json({ error: String(error.message || error) });
   }
 });
+// The stored copy of a message body, and the route that stores it.
+//
+// Opening a ticket called Graph every time, for every agent, for a message
+// that does not change. The client now asks here first and only falls back to
+// Graph on a miss, then posts what it got back. So the first open of a ticket
+// costs what it always did and every later open costs nothing - and once a
+// body is here the ticket keeps showing it even when Graph is throttled,
+// re-authenticating, or refusing the app's credentials outright.
+//
+// Bodies are big, so they live behind their own route rather than riding along
+// on the board's ticket list: prismaClient.js omits the columns globally and
+// this is the one place that opts back in.
+const EMAIL_BODY_MAX_CHARS = Number(process.env.EMAIL_BODY_MAX_CHARS || 1_000_000);
+
+app.get('/api/tickets/:externalId/body', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const ticket = await prisma.ticket.findUnique({
+      where: { externalId },
+      select: { emailBody: true, emailBodyType: true, emailBodyImages: true, emailBodyAt: true, emailBodyMessageId: true }
+    });
+    // A ticket with no row here yet, and a ticket the board has never pushed to
+    // the database, are the same answer to the caller: nothing stored, go and
+    // fetch it. Not a 404 - the ticket may be perfectly real and simply new.
+    if (!ticket?.emailBody) return res.json({ cached: false });
+    // A ticket is a thread. When a reply is merged in, the ticket keeps its
+    // externalId but the message it now points at changes, and the stored body
+    // is then the wrong message rather than an old copy of the right one. The
+    // caller says which message it wants; a mismatch is a miss, so the reply
+    // gets fetched and replaces this row. Callers that ask for no particular
+    // message still get whatever is stored.
+    const wanted = String(req.query.messageId || '').trim();
+    if (wanted && ticket.emailBodyMessageId && wanted !== ticket.emailBodyMessageId) {
+      return res.json({ cached: false, reason: 'stale_message' });
+    }
+    return res.json({
+      cached: true,
+      body: ticket.emailBody,
+      contentType: ticket.emailBodyType || 'html',
+      images: Array.isArray(ticket.emailBodyImages) ? ticket.emailBodyImages : [],
+      cachedAt: ticket.emailBodyAt,
+      messageId: ticket.emailBodyMessageId
+    });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.put('/api/tickets/:externalId/body', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const body = String(req.body?.body || '');
+    if (!body.trim()) return res.status(400).json({ error: 'empty_body' });
+    // An outsized body is not stored rather than stored truncated: half a
+    // message that looks whole is worse than falling back to the live fetch,
+    // which still works and still shows all of it.
+    if (body.length > EMAIL_BODY_MAX_CHARS) return res.json({ ok: false, reason: 'too_large', limit: EMAIL_BODY_MAX_CHARS });
+    const contentType = String(req.body?.contentType || 'html').toLowerCase() === 'text' ? 'text' : 'html';
+    const messageId = String(req.body?.messageId || '').trim() || null;
+    // Metadata only. Anything carrying bytes is dropped here as well as at the
+    // source, so a future caller cannot quietly put megabytes of base64 back
+    // into the row that was deliberately emptied of them.
+    const images = (Array.isArray(req.body?.images) ? req.body.images : [])
+      .slice(0, 100)
+      .map(a => ({
+        id: String(a?.id || ''),
+        name: String(a?.name || 'image').slice(0, 300),
+        contentType: String(a?.contentType || '').slice(0, 100),
+        contentId: String(a?.contentId || '').slice(0, 300)
+      }))
+      .filter(a => a.id);
+    // updateMany, not update: a board ticket that has never been synced has no
+    // row, and that is a no-op here rather than a 500. The body is worth
+    // storing when there is somewhere to put it, and never worth failing an
+    // open over.
+    const result = await prisma.ticket.updateMany({
+      where: { externalId },
+      data: { emailBody: body, emailBodyType: contentType, emailBodyImages: images, emailBodyAt: new Date(), emailBodyMessageId: messageId }
+    });
+    return res.json({ ok: true, stored: result.count > 0 });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+// Shared by /api/tickets/kpis and /api/tickets/kpis/drilldown so the two
+// endpoints can never quietly drift apart on who is allowed to see what -
+// accessWhere carries the CS/support/admin scoping, and a drilldown built
+// from a second, hand-copied version of that logic would be one edit away
+// from leaking tickets outside a user's permitted scope.
+const KPI_TICKET_SELECT = {
+  id: true,
+  externalId: true,
+  displayNumber: true,
+  subject: true,
+  status: true,
+  priority: true,
+  category: true,
+  assignedAgent: true,
+  csAgent: true,
+  companyName: true,
+  senderEmail: true,
+  jiraTicketKey: true,
+  duplicateOfExternalId: true,
+  createdAt: true,
+  updatedAt: true,
+  resolvedAt: true
+};
+async function loadKpiWorkingSet(req) {
+  const bounds = kpiDateBounds(req.query.range);
+  const role = normalizeRole(req.session.role) || 'support';
+  const username = String(req.session.username || '').trim().toUpperCase();
+  const team = String(req.query.team || 'all').trim().toLowerCase();
+  const agent = String(req.query.agent || 'all').trim().toUpperCase();
+  const company = String(req.query.company || 'all').trim();
+  const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
+
+  const baseWhere = {
+    NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
+  };
+  if (company && company !== 'all') baseWhere.companyName = company;
+  if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
+
+  const accessWhere = {};
+  if (role === 'cs') accessWhere.csAgent = username;
+  else if (role === 'support') accessWhere.assignedAgent = username;
+  else if (agent && agent !== 'ALL') {
+    if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
+    else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
+    else accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }];
+  } else if (team === 'cs') {
+    accessWhere.csAgent = { in: Array.from(CS_AGENT_CODES) };
+  } else if (team === 'support') {
+    accessWhere.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
+  }
+  const rangeWhere = {
+    OR: [
+      { createdAt: { gte: bounds.start, lte: bounds.end } },
+      { updatedAt: { gte: bounds.start, lte: bounds.end } },
+      { resolvedAt: { gte: bounds.start, lte: bounds.end } }
+    ]
+  };
+  const statusWhere = { AND: [baseWhere, accessWhere] };
+  const where = { AND: [baseWhere, accessWhere, rangeWhere] };
+
+  const tickets = await prisma.ticket.findMany({
+    where,
+    select: KPI_TICKET_SELECT,
+    orderBy: [{ createdAt: 'desc' }]
+  });
+  const statusTickets = await prisma.ticket.findMany({
+    where: statusWhere,
+    select: KPI_TICKET_SELECT
+  });
+  const scopedTicketsAll = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
+
+  // Duplicates are held back from every figure that counts work. They are
+  // still real tickets sitting on the board, so they are reported on their
+  // own rather than quietly dropped: "12 resolved, 3 of them duplicates" is
+  // the honest version of what used to read as "15 resolved".
+  const isDuplicate = t => !!t.duplicateOfExternalId;
+  const duplicatesOpen = statusTickets.filter(isDuplicate);
+  const duplicatesInRange = scopedTicketsAll.filter(isDuplicate);
+  const scopedTickets = scopedTicketsAll.filter(t => !isDuplicate(t));
+  const workTickets = statusTickets.filter(t => !isDuplicate(t));
+
+  return { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
+}
+function kpiDrilldownRow(t, detail) {
+  return {
+    ticketNumber: t.displayNumber ? `#${String(t.displayNumber).padStart(4, '0')}` : null,
+    externalId: t.externalId,
+    subject: t.subject || '(no subject)',
+    company: t.companyName || 'Unknown',
+    agent: t.assignedAgent || 'Unassigned',
+    priority: t.priority || 'Normal',
+    status: normalizeDbStatusForBoard(t.status),
+    jira: t.jiraTicketKey || null,
+    detail: detail || null
+  };
+}
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const bounds = kpiDateBounds(req.query.range);
-    const role = normalizeRole(req.session.role) || 'support';
-    const username = String(req.session.username || '').trim().toUpperCase();
-    const team = String(req.query.team || 'all').trim().toLowerCase();
-    const agent = String(req.query.agent || 'all').trim().toUpperCase();
-    const company = String(req.query.company || 'all').trim();
-    const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
-
-    const baseWhere = {
-      NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
-    };
-    if (company && company !== 'all') baseWhere.companyName = company;
-    if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
-
-    const accessWhere = {};
-    if (role === 'cs') accessWhere.csAgent = username;
-    else if (role === 'support') accessWhere.assignedAgent = username;
-    else if (agent && agent !== 'ALL') {
-      if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
-      else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
-      else accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }];
-    } else if (team === 'cs') {
-      accessWhere.csAgent = { in: Array.from(CS_AGENT_CODES) };
-    } else if (team === 'support') {
-      accessWhere.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
-    }
-    const rangeWhere = {
-      OR: [
-        { createdAt: { gte: bounds.start, lte: bounds.end } },
-        { updatedAt: { gte: bounds.start, lte: bounds.end } },
-        { resolvedAt: { gte: bounds.start, lte: bounds.end } }
-      ]
-    };
-    const statusWhere = { AND: [baseWhere, accessWhere] };
-    const where = { AND: [baseWhere, accessWhere, rangeWhere] };
-
-    const kpiSelect = {
-      id: true,
-      externalId: true,
-      displayNumber: true,
-      subject: true,
-      status: true,
-      priority: true,
-      category: true,
-      assignedAgent: true,
-      csAgent: true,
-      companyName: true,
-      senderEmail: true,
-      jiraTicketKey: true,
-      duplicateOfExternalId: true,
-      createdAt: true,
-      updatedAt: true,
-      resolvedAt: true
-    };
-    const tickets = await prisma.ticket.findMany({
-      where,
-      select: kpiSelect,
-      orderBy: [{ createdAt: 'desc' }]
-    });
-    const statusTickets = await prisma.ticket.findMany({
-      where: statusWhere,
-      select: kpiSelect
-    });
-    const scopedTicketsAll = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
-
-    // Duplicates are held back from every figure that counts work. They are
-    // still real tickets sitting on the board, so they are reported on their
-    // own rather than quietly dropped: "12 resolved, 3 of them duplicates" is
-    // the honest version of what used to read as "15 resolved".
-    const isDuplicate = t => !!t.duplicateOfExternalId;
-    const duplicatesOpen = statusTickets.filter(isDuplicate);
-    const duplicatesInRange = scopedTicketsAll.filter(isDuplicate);
-    const scopedTickets = scopedTicketsAll.filter(t => !isDuplicate(t));
-    const workTickets = statusTickets.filter(t => !isDuplicate(t));
+    const { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -4162,6 +4029,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const resolvedInRange = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res');
     const resolveShiftHours = [];
     const resolveWallHours = [];
+    const breachedRows = [];
     let slaMet = 0;
     let slaBreached = 0;
     let slaUnmeasured = 0;
@@ -4170,7 +4038,21 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const owner = String(ticket.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
       if (!agentRows[owner]) agentRows[owner] = emptyAgentRow(owner);
       if (snapshot.state === 'met') { slaMet++; agentRows[owner].slaMet++; }
-      else if (snapshot.state === 'breached') { slaBreached++; agentRows[owner].slaBreached++; }
+      else if (snapshot.state === 'breached') {
+        slaBreached++; agentRows[owner].slaBreached++;
+        breachedRows.push({
+          ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+          externalId: ticket.externalId,
+          subject: ticket.subject || '(no subject)',
+          company: ticket.companyName || 'Unknown',
+          agent: ticket.assignedAgent || 'Unassigned',
+          priority: ticket.priority || 'Normal',
+          status: normalizeDbStatusForBoard(ticket.status),
+          targetHours: snapshot.targetHours,
+          overdueHours: hoursFromMs(snapshot.overdueMs),
+          jira: ticket.jiraTicketKey || null
+        });
+      }
       else slaUnmeasured++;
       if (snapshot.state === 'met' || snapshot.state === 'breached') {
         resolveShiftHours.push(hoursFromMs(snapshot.shiftMs));
@@ -4178,6 +4060,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       }
       resolveWallHours.push(hoursFromMs(snapshot.wallMs));
     }
+    breachedRows.sort((a, b) => b.overdueHours - a.overdueHours);
     const slaMeasured = slaMet + slaBreached;
 
     // A ticket that went back out of Resolved is work that was called done and
@@ -4248,6 +4131,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         backlogOpen: openWorkTickets.length
       },
       overdueRows: overdueRows.slice(0, 25),
+      breachedRows: breachedRows.slice(0, 25),
       duplicateRows: duplicatesInRange.slice(0, 25).map(t => ({
         ticketNumber: t.displayNumber ? `#${String(t.displayNumber).padStart(4, '0')}` : null,
         externalId: t.externalId,
@@ -4283,6 +4167,85 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Read ticket KPIs failed:', error);
     return res.status(500).json({ error: 'read_ticket_kpis_failed' });
+  }
+});
+// Every number on the KPI dashboard can be clicked to see the tickets behind
+// it. Fetched on demand rather than folded into /api/tickets/kpis, which is
+// polled every 60s - a card nobody clicks (most of them, most of the time)
+// should not cost a full ticket list on every poll.
+const KPI_STATUS_CATEGORIES = new Set(['new', 'inp', 'wus', 'dft', 'wct', 'res']);
+app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
+  try {
+    const category = String(req.query.category || '').trim();
+    const { bounds, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen } = await loadKpiWorkingSet(req);
+    const now = Date.now();
+    let rows;
+
+    if (KPI_STATUS_CATEGORIES.has(category)) {
+      rows = workTickets
+        .filter(t => normalizeDbStatusForBoard(t.status) === category)
+        .map(t => kpiDrilldownRow(t));
+    } else if (category === 'ticketsWithCs') {
+      rows = scopedTickets
+        .filter(t => String(t.csAgent || '').trim())
+        .map(t => kpiDrilldownRow(t, t.csAgent));
+    } else if (category === 'jiraLinked') {
+      rows = workTickets.filter(t => t.jiraTicketKey).map(t => kpiDrilldownRow(t, t.jiraTicketKey));
+    } else if (category === 'duplicates') {
+      rows = duplicatesOpen.map(t => kpiDrilldownRow(t, 'Duplicate'));
+    } else if (category === 'created') {
+      rows = scopedTickets.filter(t => isDateInBounds(t.createdAt, bounds)).map(t => kpiDrilldownRow(t));
+    } else if (category === 'resolved') {
+      rows = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').map(t => kpiDrilldownRow(t));
+    } else if (category === 'overdue' || category === 'atRisk' || category === 'oldestOpen') {
+      const openSnapshots = workTickets
+        .filter(t => normalizeDbStatusForBoard(t.status) !== 'res')
+        .map(t => ({ t, snapshot: ticketSlaSnapshot(t, now) }));
+      if (category === 'overdue') {
+        rows = openSnapshots.filter(x => x.snapshot.state === 'overdue')
+          .sort((a, b) => b.snapshot.overdueMs - a.snapshot.overdueMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.overdueMs) + 'h overdue'));
+      } else if (category === 'atRisk') {
+        rows = openSnapshots.filter(x => x.snapshot.state === 'at_risk')
+          .sort((a, b) => b.snapshot.shiftMs - a.snapshot.shiftMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+      } else {
+        rows = openSnapshots.sort((a, b) => b.snapshot.wallMs - a.snapshot.wallMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+      }
+    } else if (category === 'slaMet' || category === 'slaBreached' || category === 'slaMeasured') {
+      // 'slaMeasured' is both cards that describe the met+breached set from a
+      // different angle - the "SLA met" percentage and the average resolve
+      // time are each computed over the exact same tickets, so their
+      // drilldown should show that same combined set, not just one half of it.
+      const resolvedSnapshots = scopedTickets
+        .filter(t => normalizeDbStatusForBoard(t.status) === 'res')
+        .map(t => ({ t, snapshot: ticketSlaSnapshot(t, now) }));
+      const wantStates = category === 'slaMet' ? ['met'] : category === 'slaBreached' ? ['breached'] : ['met', 'breached'];
+      rows = resolvedSnapshots.filter(x => wantStates.includes(x.snapshot.state))
+        .sort((a, b) => b.snapshot.overdueMs - a.snapshot.overdueMs)
+        .map(({ t, snapshot }) => kpiDrilldownRow(t, snapshot.state === 'met' ? 'Met SLA' : `Missed by ${hoursFromMs(snapshot.overdueMs)}h`));
+    } else if (category === 'reopened') {
+      const events = await prisma.ticketEvent.findMany({
+        where: {
+          eventType: 'ticket_status_changed',
+          oldValue: 'Resolved',
+          NOT: [{ newValue: 'Resolved' }],
+          createdAt: { gte: bounds.start, lte: bounds.end },
+          ticket: { AND: [baseWhere, accessWhere, { duplicateOfExternalId: null }] }
+        },
+        select: { ticket: { select: KPI_TICKET_SELECT } },
+        orderBy: [{ createdAt: 'desc' }]
+      }).catch(() => []);
+      rows = events.filter(e => e.ticket).map(e => kpiDrilldownRow(e.ticket, 'Reopened'));
+    } else {
+      return res.status(400).json({ error: 'unknown_drilldown_category' });
+    }
+
+    return res.json({ category, total: rows.length, rows: rows.slice(0, 200) });
+  } catch (error) {
+    console.error('Read KPI drilldown failed:', error);
+    return res.status(500).json({ error: 'read_kpi_drilldown_failed' });
   }
 });
 app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
@@ -4614,464 +4577,7 @@ app.get('/api/audit/agent-activity', requireAdmin, async (req, res) => {
 });
 
 app.get('/audit/tickets', requireAdmin, (req, res) => {
-  return res.type('html').send(`
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
-  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
-  <title>Ticket Activity by Agent</title>
-  <style>
-    body {
-      margin: 0;
-      font-family: Inter, Arial, sans-serif;
-      background: #f5f7fb;
-      color: #0f172a;
-    }
-
-    header {
-      background: #0f172a;
-      color: white;
-      padding: 18px 24px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    header a {
-      color: white;
-      text-decoration: none;
-      border: 1px solid rgba(255,255,255,.2);
-      padding: 8px 12px;
-      border-radius: 10px;
-    }
-
-    main {
-      padding: 24px;
-      max-width: 1320px;
-      margin: 0 auto;
-    }
-
-    .card {
-      background: white;
-      border: 1px solid #e2e8f0;
-      border-radius: 18px;
-      box-shadow: 0 12px 34px rgba(15,23,42,.08);
-      overflow: hidden;
-      margin-bottom: 18px;
-    }
-
-    .toolbar {
-      padding: 16px;
-      border-bottom: 1px solid #e2e8f0;
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: flex-end;
-      flex-wrap: wrap;
-    }
-
-    .controls { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-    .control { display: flex; flex-direction: column; gap: 4px; }
-    .control label {
-      font-size: 10px;
-      font-weight: 800;
-      text-transform: uppercase;
-      letter-spacing: .05em;
-      color: #64748b;
-    }
-    select, input[type="search"] {
-      font: inherit;
-      font-size: 13px;
-      padding: 7px 10px;
-      border: 1px solid #cbd5e1;
-      border-radius: 10px;
-      background: white;
-      color: #0f172a;
-    }
-    input[type="search"] { min-width: 210px; }
-    .check { flex-direction: row; align-items: center; gap: 6px; padding-bottom: 8px; }
-    .check label { text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 600; color: #334155; }
-
-    button {
-      border: 0;
-      background: #4f46e5;
-      color: white;
-      padding: 10px 14px;
-      border-radius: 10px;
-      font-weight: 800;
-      cursor: pointer;
-    }
-
-    /* Every wide table scrolls sideways inside its own card rather than pushing
-       the page wider. The track is kept permanently visible: WebKit hides
-       overlay scrollbars until they are used, and on a table that is only
-       slightly too wide that reads as "there is nothing more to see". */
-    .scroll-x {
-      overflow-x: auto;
-      overflow-y: hidden;
-      -webkit-overflow-scrolling: touch;
-      scrollbar-width: thin;
-      scrollbar-color: #94a3b8 #eef2f7;
-      padding-bottom: 2px;
-    }
-    .scroll-x::-webkit-scrollbar { height: 12px; }
-    .scroll-x::-webkit-scrollbar-track { background: #eef2f7; border-radius: 999px; }
-    .scroll-x::-webkit-scrollbar-thumb {
-      background: #94a3b8;
-      border-radius: 999px;
-      border: 3px solid transparent;
-      background-clip: padding-box;
-    }
-    .scroll-x::-webkit-scrollbar-thumb:hover { background: #64748b; background-clip: padding-box; }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      /* A width:100% table shrinks to its container and would never overflow,
-         so the wrapper above would have nothing to scroll. This is the floor
-         that hands the overflow to it. */
-      min-width: 940px;
-    }
-
-    th, td {
-      padding: 11px 14px;
-      border-bottom: 1px solid #e2e8f0;
-      text-align: left;
-      font-size: 13px;
-      vertical-align: top;
-    }
-
-    th {
-      background: #f8fafc;
-      color: #64748b;
-      text-transform: uppercase;
-      font-size: 11px;
-      letter-spacing: .04em;
-      white-space: nowrap;
-    }
-
-    tbody tr:hover { background: #fbfdff; }
-
-    .muted {
-      color: #64748b;
-    }
-
-    .pill {
-      display: inline-block;
-      padding: 4px 8px;
-      border-radius: 999px;
-      background: #eef2ff;
-      color: #4338ca;
-      font-weight: 800;
-      font-size: 11px;
-    }
-    .pill.sync { background: #f1f5f9; color: #64748b; }
-
-    .empty {
-      padding: 40px;
-      text-align: center;
-      color: #94a3b8;
-    }
-
-    /* Agent header: the code first and large, because the page is scanned by
-       agent, and the two counts next to it because they are what gets compared. */
-    .agent-head {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      padding: 14px 16px;
-      border-bottom: 1px solid #e2e8f0;
-      flex-wrap: wrap;
-    }
-    .agent-code {
-      font-size: 15px;
-      font-weight: 900;
-      letter-spacing: .04em;
-      background: #0f172a;
-      color: white;
-      padding: 6px 12px;
-      border-radius: 10px;
-    }
-    .agent-code.cs { background: #0d9488; }
-    .agent-code.unknown { background: #b45309; }
-    .agent-stat { font-size: 12px; color: #334155; }
-    .agent-stat strong { font-size: 15px; color: #0f172a; }
-    .agent-quiet { padding: 14px 16px; color: #94a3b8; font-size: 13px; }
-
-    .section-title {
-      margin: 26px 4px 10px;
-      font-size: 12px;
-      font-weight: 900;
-      text-transform: uppercase;
-      letter-spacing: .08em;
-      color: #64748b;
-    }
-
-    .tno { font-weight: 800; white-space: nowrap; }
-    .status { white-space: nowrap; font-weight: 700; font-size: 11px; color: #475569; }
-    .when { white-space: nowrap; color: #475569; }
-    .count { text-align: right; font-weight: 800; white-space: nowrap; }
-
-    /* The change list. <details> rather than a JS accordion: the summary line
-       is the useful default and the full history is one click away without any
-       state to keep. */
-    details summary {
-      cursor: pointer;
-      font-size: 12px;
-      color: #4338ca;
-      font-weight: 700;
-    }
-    .change {
-      display: flex;
-      gap: 8px;
-      align-items: baseline;
-      flex-wrap: wrap;
-      padding: 4px 0;
-      font-size: 12px;
-      border-top: 1px dashed #e8edf5;
-    }
-    .change:first-child { border-top: 0; }
-    .change .arrow { color: #94a3b8; }
-    .change .val { font-weight: 700; }
-    .change .by { color: #64748b; }
-    .notice {
-      margin: 0 0 18px;
-      padding: 10px 14px;
-      border: 1px solid #f59e0b;
-      border-left-width: 4px;
-      border-radius: 10px;
-      background: #fffbeb;
-      font-size: 12.5px;
-    }
-  </style>
-</head>
-<body>
-  <header>
-    <strong>Ticket Activity by Agent</strong>
-    <div style="display:flex;gap:10px;">
-      <a href="/">Board</a>
-      <a href="/profile">Profile</a>
-    </div>
-  </header>
-
-  <main>
-    <section class="card">
-      <div class="toolbar">
-        <div>
-          <strong>Which tickets each agent updated</strong>
-          <div class="muted" style="font-size:12px;margin-top:3px;" id="summary">Loading...</div>
-        </div>
-        <div class="controls">
-          <div class="control">
-            <label for="days">Window</label>
-            <select id="days">
-              <option value="7">Last 7 days</option>
-              <option value="30" selected>Last 30 days</option>
-              <option value="90">Last 90 days</option>
-              <option value="180">Last 180 days</option>
-            </select>
-          </div>
-          <div class="control">
-            <label for="scope">Show</label>
-            <select id="scope">
-              <option value="both" selected>Support and CS</option>
-              <option value="support">Support only</option>
-              <option value="cs">CS only</option>
-            </select>
-          </div>
-          <div class="control">
-            <label for="q">Filter</label>
-            <input type="search" id="q" placeholder="Agent code, ticket no. or subject" autocomplete="off">
-          </div>
-          <div class="control check">
-            <input type="checkbox" id="includeSync">
-            <label for="includeSync">Include mail-sync changes</label>
-          </div>
-          <button id="refreshBtn">Refresh</button>
-        </div>
-      </div>
-    </section>
-
-    <div id="content">
-      <div class="empty">Loading activity...</div>
-    </div>
-  </main>
-
-  <script>
-    function esc(value) {
-      return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
-    }
-
-    function formatDate(value) {
-      if (!value) return '-';
-      return new Date(value).toLocaleString();
-    }
-
-    // Last loaded payload, so changing the filter or the scope re-renders
-    // without a round trip. Only Window and Include-mail-sync change what the
-    // server has to send.
-    let current = null;
-
-    function ticketLabel(t) {
-      if (t.number) return '#' + String(t.number).padStart(4, '0');
-      return 'ID ' + t.ticketId;
-    }
-
-    function changeLine(c) {
-      const from = c.from ? '<span class="val">' + esc(c.from) + '</span>' : '<span class="muted">empty</span>';
-      const to = c.to ? '<span class="val">' + esc(c.to) + '</span>' : '<span class="muted">empty</span>';
-      // Created and Note added have no meaningful "from", so they read as a
-      // single value rather than a transition.
-      const body = (c.type === 'ticket_created' || c.type === 'comment_added')
-        ? to
-        : from + ' <span class="arrow">&rarr;</span> ' + to;
-      // actor is the agent the board says did it; account is the login whose
-      // save carried it. They differ for auto-assign and cross-tab writes, and
-      // when they do, both are worth seeing.
-      const who = [c.actor ? 'by ' + esc(c.actor) : null, c.account ? '(' + esc(c.account) + ')' : null, c.source ? esc(c.source) : null]
-        .filter(Boolean).join(' ');
-      return '<div class="change">'
-        + '<span class="pill' + (c.sync ? ' sync' : '') + '">' + esc(c.label) + '</span>'
-        + '<span>' + body + '</span>'
-        + '<span class="by">' + esc(formatDate(c.at)) + (who ? ' ' + who : '') + '</span>'
-        + '</div>';
-    }
-
-    function ticketRow(t) {
-      const first = t.changes.length ? changeLine(t.changes[0]) : '';
-      const rest = t.changes.slice(1);
-      const more = rest.length
-        ? '<details><summary>' + rest.length + ' earlier change' + (rest.length > 1 ? 's' : '') + '</summary>'
-          + rest.map(changeLine).join('') + '</details>'
-        : '';
-      return '<tr>'
-        + '<td class="tno">' + esc(ticketLabel(t)) + '</td>'
-        // The board deep-links on externalId (its own ticket id). A manual
-        // ticket without one cannot be opened that way, so it stays plain text
-        // rather than becoming a link that goes nowhere.
-        + '<td>' + (t.externalId
-          ? '<a href="/?ticket=' + encodeURIComponent(t.externalId) + '" title="Open on the board">' + esc(t.subject || '(no subject)') + '</a>'
-          : esc(t.subject || '(no subject)')) + '</td>'
-        + '<td class="status">' + esc(t.status || '-') + '</td>'
-        + '<td class="count">' + t.eventCount + '</td>'
-        + '<td class="when">' + esc(formatDate(t.lastAt)) + '</td>'
-        + '<td>' + first + more + '</td>'
-        + '</tr>';
-    }
-
-    function agentCard(agent, query) {
-      let tickets = agent.tickets;
-      if (query) {
-        const q = query.toLowerCase();
-        // An agent matched by code keeps all of its tickets - "show me what SFA
-        // did" should not also filter the ticket list by "sfa".
-        if (!agent.code.toLowerCase().includes(q)) {
-          tickets = tickets.filter(t => String(t.subject || '').toLowerCase().includes(q)
-            || String(t.number || '').includes(q)
-            || String(t.ticketId).includes(q));
-          if (!tickets.length) return '';
-        }
-      }
-      const codeClass = 'agent-code' + (agent.kind === 'cs' ? ' cs' : '') + (agent.known ? '' : ' unknown');
-      const head = '<div class="agent-head">'
-        + '<span class="' + codeClass + '">' + esc(agent.code) + '</span>'
-        + '<span class="agent-stat"><strong>' + tickets.length + '</strong> ticket' + (tickets.length === 1 ? '' : 's') + ' updated</span>'
-        + '<span class="agent-stat"><strong>' + agent.eventCount + '</strong> update' + (agent.eventCount === 1 ? '' : 's') + '</span>'
-        + '<span class="agent-stat muted">' + (agent.lastActivityAt ? 'last ' + esc(formatDate(agent.lastActivityAt)) : 'no activity in this window') + '</span>'
-        + (agent.known ? '' : '<span class="agent-stat muted">not on the current roster</span>')
-        + '</div>';
-      if (!tickets.length) {
-        return '<section class="card">' + head + '<div class="agent-quiet">No ticket updates in this window.</div></section>';
-      }
-      return '<section class="card">' + head
-        + '<div class="scroll-x"><table><thead><tr>'
-        + '<th>Ticket</th><th>Subject</th><th>Status</th><th>Updates</th><th>Last update</th><th>Most recent change</th>'
-        + '</tr></thead><tbody>'
-        + tickets.map(ticketRow).join('')
-        + '</tbody></table></div></section>';
-    }
-
-    function render() {
-      const content = document.getElementById('content');
-      if (!current) return;
-      const scope = document.getElementById('scope').value;
-      const query = document.getElementById('q').value.trim();
-      const blocks = [];
-
-      if (current.truncated) {
-        blocks.push('<div class="notice">This window hit the 5000-event cap, so the oldest activity in it is not shown. Narrow the window for a complete picture.</div>');
-      }
-
-      const sections = [];
-      if (scope !== 'cs') sections.push(['Support agents', current.support]);
-      if (scope !== 'support') sections.push(['CS agents', current.cs]);
-
-      for (const [title, agents] of sections) {
-        const cards = agents.map(a => agentCard(a, query)).filter(Boolean);
-        blocks.push('<div class="section-title">' + esc(title) + ' (' + cards.length + ')</div>');
-        blocks.push(cards.length ? cards.join('') : '<div class="card"><div class="empty">Nothing matches that filter.</div></div>');
-      }
-
-      content.innerHTML = blocks.join('');
-    }
-
-    async function loadAudit() {
-      const content = document.getElementById('content');
-      const summary = document.getElementById('summary');
-      content.innerHTML = '<div class="empty">Loading activity...</div>';
-
-      const days = document.getElementById('days').value;
-      const includeSync = document.getElementById('includeSync').checked ? '1' : '';
-
-      try {
-        const res = await fetch('/api/audit/agent-activity?days=' + encodeURIComponent(days) + (includeSync ? '&includeSync=1' : ''), {
-          credentials: 'same-origin'
-        });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-          throw new Error(data.error || 'Could not load activity');
-        }
-
-        current = data;
-        summary.textContent = data.totals.events + ' update'
-          + (data.totals.events === 1 ? '' : 's')
-          + ' across ' + data.totals.tickets + ' ticket' + (data.totals.tickets === 1 ? '' : 's')
-          + ' in the last ' + data.days + ' days'
-          + (data.includeSync ? ', mail-sync changes included' : ', agent changes only')
-          + '. Read at ' + formatDate(data.generatedAt) + '.';
-
-        if (!data.totals.events) {
-          content.innerHTML = '<div class="card"><div class="empty">No ticket updates in this window.</div></div>';
-          return;
-        }
-
-        render();
-      } catch (error) {
-        summary.textContent = '';
-        content.innerHTML = '<div class="card"><div class="empty">' + esc(error.message || 'Could not load activity') + '</div></div>';
-      }
-    }
-
-    document.getElementById('refreshBtn').addEventListener('click', loadAudit);
-    document.getElementById('days').addEventListener('change', loadAudit);
-    document.getElementById('includeSync').addEventListener('change', loadAudit);
-    document.getElementById('scope').addEventListener('change', render);
-    document.getElementById('q').addEventListener('input', render);
-    loadAudit();
-  </script>
-</body>
-</html>
-  `);
+  res.type('html').sendFile(path.join(VIEWS_DIR, 'audit-tickets.html'));
 });
 
 app.get('/api/tickets/:id', requireAuth, async (req, res) => {
@@ -5694,7 +5200,7 @@ app.post('/api/state', requireAuth, async (req, res) => {
   const state = req.body || {};
   // Snapshot before the write so we can broadcast just what actually changed.
   const beforeState = safeReadState();
-  const result = await safeWriteState(state);
+  const result = await safeWriteState(state, { role: req.session.role, username: req.session.username });
   let ticketDb = { count: 0 };
   try {
     ticketDb = await upsertBoardTicketsToDatabase(result.state || state, req);
@@ -5718,6 +5224,28 @@ app.post('/api/state', requireAuth, async (req, res) => {
     // origin lets the sending tab ignore its own echo, so a patch in flight
     // can't roll back an edit the user made in the meantime.
     const origin = String(state?._meta?.clientId || '') || null;
+    /* Who a patched assignment is actually attributable to.
+
+       A patch carries the MERGED post-write state, which is the point - it
+       self-heals a stale tab. But it means some values in it are not this
+       session's doing: the per-ticket timestamp merge, or the database
+       reconciliation in hydrateStateFromDatabase, decided them. Stamping the
+       whole patch with the saving session's username made every receiving tab
+       record that person as the agent responsible, which is how a CS agent's
+       initials ended up on a support reassignment they never made and are not
+       even offered the controls to make.
+
+       So say it per change: byActor is set only when this session's payload
+       actually asked for the value that won. Anything else is the server's
+       reconciliation and is attributed to no one. */
+    const requestedAssignee = (state.ticketAssignee && typeof state.ticketAssignee === 'object') ? state.ticketAssignee : {};
+    changes.forEach((change) => {
+      if (!change || change.field !== 'ticketAssignee') return;
+      const key = String(change.id);
+      const asked = Object.prototype.hasOwnProperty.call(requestedAssignee, key)
+        && String(requestedAssignee[key] || '') === String(change.value || '');
+      change.byActor = asked ? actor : null;
+    });
     if (overflow) {
       liveRev = sseBroadcast('board_reload', { reason: 'patch_overflow', actor });
     } else if (changes.length || added.length || removed.length) {
@@ -6252,27 +5780,69 @@ function imageMimeFor(a) {
 // until Graph runs out, with a hard cap so a pathological thread cannot pin
 // the request or blow the JSON response up unboundedly.
 const MAX_IMAGE_ATTACHMENTS = 60;
+
+// Metadata only. The bytes are fetched one image at a time from
+// /api/message-image, and this is the change that makes pictures show up at all.
+//
+// The previous version listed attachments and read contentBytes out of the
+// listing. That has two problems, and the second one is why a pasted screenshot
+// rendered as nothing:
+//
+//   * every image on the message was base64'd into this route's JSON response.
+//     A reply chain with signatures is routinely 10-20MB of base64 - held in
+//     Node's heap for the length of the request, sent to the browser, and kept
+//     alive in the DOM as data: URLs for as long as the modal is open. Three
+//     agents opening three tickets was most of a pod's memory.
+//   * an attachment whose contentBytes is absent from the listing was silently
+//     dropped, and a dropped attachment is a cid: the body still references -
+//     which the renderer then removes, leaving the message with no picture and
+//     nothing saying one was missing. Whether the listing carries the bytes is
+//     not something this code can guarantee; /attachments/{id}/$value always
+//     returns them.
+//
+// So the listing is projected down to what the cid lookup needs (which also
+// makes it small and quick enough to stop being the call Graph throttles), and
+// an image is only "an image" by its own declared type or filename - not by
+// whether its bytes happened to travel with the listing.
 async function fetchMessageImageAttachments(mailbox, msgId, req) {
   const out = [];
-  // No $select on purpose: the default fileAttachment representation already
-  // carries contentBytes, and narrowing the projection is the kind of thing
-  // that quietly drops it. contentBytes is the bulk of the payload anyway, so
-  // the projection bought nothing and was one more way to lose the bytes.
-  let next = `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments?$top=50`;
+  const base = `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments`;
+  const SELECT = ATTACHMENT_SELECT;
+  let next = `${base}?$top=50&${SELECT}`;
   for (let page = 0; page < 6 && next && out.length < MAX_IMAGE_ATTACHMENTS; page++) {
-    const data = await graphGetResilient(next, req);
-    for (const a of Array.isArray(data?.value) ? data.value : []) {
+    let data = await fetchAttachmentPage(next, req);
+    let items = Array.isArray(data?.value) ? data.value : [];
+    // A projection that comes back with nothing to identify the attachments by
+    // is useless for cid matching, and the unprojected representation is the one
+    // that is known to be complete. Cheap insurance against a tenant or a
+    // future Graph version that treats $select on attachments differently.
+    if (items.length && items.every(a => !a?.contentId && !a?.name)) {
+      data = await graphGetResilient(stripSelect(next), req);
+      items = Array.isArray(data?.value) ? data.value : [];
+    }
+    // A fileAttachment that came back without a contentId is not necessarily a
+    // real attachment without one: it can also be this projection quietly
+    // dropping it. Only worth saying once, and only when there is a cid to
+    // match - a genuine file attachment has no contentId and never needed one.
+    if (attachmentSelectSupported && items.some(a => a?.isInline && !a?.contentId)) {
+      console.warn('[attachments] an inline attachment came back with no contentId - cid matching will fall back to filename');
+    }
+    for (const a of items) {
       // itemAttachment (a forwarded mail) and referenceAttachment (a OneDrive
-      // link) carry no bytes at all - nothing to inline.
-      if (!a?.contentBytes || !isImageAttachment(a)) continue;
+      // link) have no bytes to serve, and no id-addressable $value.
+      const type = String(a?.['@odata.type'] || '').toLowerCase();
+      if (type && !type.includes('fileattachment')) continue;
+      if (!a?.id || !isImageAttachment(a)) continue;
       out.push({
-        id: a.id || '',
+        id: a.id,
         name: a.name || 'image',
         contentType: imageMimeFor(a),
-        size: a.size || 0,
+        size: Number(a.size || 0),
         isInline: !!a.isInline,
         contentId: String(a.contentId || '').replace(/^<|>$/g, ''),
-        dataUrl: `data:${imageMimeFor(a)};base64,${a.contentBytes}`
+        // Served by us, from Graph, one request per picture: the browser caches
+        // it, lazy-loads it, and never holds a second base64 copy of it.
+        url: `/api/message-image/${encodeURIComponent(a.id)}?msg=${encodeURIComponent(msgId)}`
       });
       if (out.length >= MAX_IMAGE_ATTACHMENTS) break;
     }
@@ -6284,6 +5854,987 @@ async function fetchMessageImageAttachments(mailbox, msgId, req) {
   }
   return out;
 }
+
+// One inline image, streamed from the mail store.
+//
+// The mailbox is not a parameter. This route turns an id in a URL into a read
+// from Graph with the agent's delegated token, and letting the caller name the
+// mailbox would make it a general-purpose mail reader for anything that token
+// can see. The board only ever renders the helpdesk mailbox, which is what
+// read_resource defaults to, so that is what this serves.
+app.get('/api/message-image/:attachmentId', requireAuth, async (req, res) => {
+  const attachmentId = String(req.params.attachmentId || '');
+  const msgId = String(req.query.msg || '');
+  if (!attachmentId || !msgId) return res.status(400).json({ error: 'missing_message_or_attachment' });
+  try {
+    const mailbox = SUPPORT_MAILBOX;
+    const { buffer, contentType } = await graphGetBinaryResilient(
+      `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}/attachments/${encodeURIComponent(attachmentId)}/$value`,
+      req
+    );
+    // Graph's own type when it gave us a usable one, since it read the real
+    // attachment; ours is a guess from the filename.
+    const type = contentType.startsWith('image/') ? contentType : (String(req.query.type || '') || 'application/octet-stream');
+    res.set('Content-Type', type.startsWith('image/') ? type : 'application/octet-stream');
+    // A mail attachment never changes, so this can be cached hard - but only by
+    // the agent's own browser. It is somebody's mail.
+    res.set('Cache-Control', 'private, max-age=86400, immutable');
+    res.set('Content-Disposition', 'inline');
+    // Belt and braces for the one type here that can carry script: an SVG
+    // attachment is served as bytes, never executed in the board's origin.
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+    return res.send(buffer);
+  } catch (err) {
+    const status = graphErrorStatus(err);
+    console.error(`Inline image fetch failed (${status || 'no status'}):`, String(err?.message || err).slice(0, 200));
+    return res.status(status === 404 ? 404 : 502).json({ error: 'image_unavailable', status: status || 0 });
+  }
+});
+
+/* ======================== Replying from the board =========================
+
+   An agent used to have to open the message in Outlook to answer it, which
+   meant leaving the board, finding the thread, and remembering which mailbox
+   to answer from. This is that reply, sent from here.
+
+   Threading is why this drafts through Graph's createReply rather than just
+   composing a new mail with a "Re:" subject: createReply produces a draft that
+   already carries the conversation id, In-Reply-To and References headers and
+   the quoted original, so the client's mail app files the answer under the
+   thread they started instead of opening a second one. The agent's text is
+   injected above that quote, exactly where Outlook would put it.
+
+   The draft is created on the message where it lives - the helpdesk mailbox -
+   not in the connected identity's own mailbox, which is what Mail.Send.Shared
+   is for.
+
+   The From address is the agent's own mailbox, the helpdesk, or anything in
+   REPLY_FROM_ADDRESSES, and is validated per request against that list - see
+   resolveReplyIdentity, which also explains why being on the list is not the
+   same as Exchange permitting it. Sending as an address the connected identity
+   has no Send As right on fails at Graph, and that error is passed back rather
+   than swallowed, because "it said it sent and the client never got it" is the
+   one outcome worth being loud about. */
+const REPLY_BODY_MAX_CHARS = Number(process.env.REPLY_BODY_MAX_CHARS || 100_000);
+const MAX_REPLY_RECIPIENTS = 25;
+// Sending mail is not a read: a loop, a double-click, or a bad retry here
+// reaches real clients. Deliberately much tighter than the read endpoints.
+const replyLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 40, standardHeaders: true, legacyHeaders: false });
+
+function normalizeEmailAddress(value) {
+  const address = String(value || '').trim().toLowerCase();
+  // Deliberately loose - Exchange is the authority on what it will accept, and
+  // this only needs to reject what is obviously not an address at all.
+  return /^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+$/.test(address) ? address : '';
+}
+
+function toGraphRecipients(value) {
+  const list = Array.isArray(value) ? value : String(value || '').split(/[,;]/);
+  const addresses = [...new Set(list.map(normalizeEmailAddress).filter(Boolean))].slice(0, MAX_REPLY_RECIPIENTS);
+  return addresses.map(address => ({ emailAddress: { address } }));
+}
+
+// The agent types plain text; the mail goes out as HTML because the quoted
+// original below it is HTML. Escaped first, so a client's own address or an
+// angle-bracketed quote in the reply cannot become markup.
+function replyTextToHtml(text) {
+  const escaped = escapeHtml(String(text || '').replace(/\r\n/g, '\n'));
+  const paragraphs = escaped.split(/\n{2,}/).map(block => block.replace(/\n/g, '<br>'));
+  return `<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#0f172a;">${paragraphs.map(p => `<p style="margin:0 0 12px;">${p}</p>`).join('')}</div>`;
+}
+
+// Put the reply above the quoted thread. createReply returns a whole HTML
+// document, so this goes just inside <body> when there is one - prepending to
+// the document instead would put visible text before <html>, which some clients
+// render and others drop.
+function injectReplyIntoDraftHtml(draftHtml, replyHtml) {
+  const draft = String(draftHtml || '');
+  if (!draft.trim()) return replyHtml;
+  const bodyOpen = draft.match(/<body[^>]*>/i);
+  if (bodyOpen) {
+    const at = draft.indexOf(bodyOpen[0]) + bodyOpen[0].length;
+    return draft.slice(0, at) + replyHtml + draft.slice(at);
+  }
+  return replyHtml + draft;
+}
+
+/* Who this session may answer as.
+
+   Three sources, in the order the composer lists them:
+
+   - the agent's own mailbox. SFA signed in means sfa@quinta.im: read from their
+     Kanban account's email when it has one, and otherwise derived from the
+     trigram, which is what those mailboxes are named after. Only for trigram
+     logins - `admin`, `owner` and the full-name accounts are not mailboxes, and
+     guessing one would offer an address that does not exist.
+   - the helpdesk mailbox, which is where the thread already lives.
+   - anything in REPLY_FROM_ADDRESSES.
+
+   Being offered is not the same as being permitted, and this is the part worth
+   understanding. There is one Outlook connection for the whole board, so every
+   send is made by whichever identity last signed in to Microsoft here. That
+   identity can send as its own mailbox, and as any mailbox Exchange has granted
+   it Send As on - nothing else. So the connected identity is reported alongside
+   the list: the composer marks the address that is certain to work, and a
+   refusal can name the actual reason instead of a bare 403.
+
+   The way to make an agent's own address genuinely work is for that agent to
+   connect Outlook themselves - resolveStoredM365Tokens prefers the session's
+   own tokens, so their own mailbox then needs no grant at all. */
+function agentOwnMailboxes(user) {
+  const out = [];
+  const stored = normalizeEmailAddress(user?.email);
+  if (stored) out.push(stored);
+  const username = String(user?.username || '').trim().toLowerCase();
+  if (/^[a-z]{2,4}$/.test(username)) out.push(`${username}@${TEAMS_EMAIL_DOMAIN}`);
+  return [...new Set(out)];
+}
+
+async function resolveReplyIdentity(req) {
+  let connected = false;
+  let connectedAddress = '';
+  let connectedName = '';
+  let connectError = '';
+  try {
+    const token = await graphDelegatedToken(req);
+    // Whose mailbox the board is actually holding a token for. Cheap, and it is
+    // the difference between "pick any of these" and "this one will work".
+    const me = await graphGet('/me?$select=id,displayName,mail,userPrincipalName', token);
+    connectedAddress = normalizeEmailAddress(me?.mail) || normalizeEmailAddress(me?.userPrincipalName);
+    connectedName = String(me?.displayName || '');
+    connected = true;
+  } catch (error) {
+    connectError = String(error?.message || error).slice(0, 200);
+  }
+
+  let user = null;
+  if (req.session?.userId) {
+    user = await prisma.user
+      .findUnique({ where: { id: req.session.userId }, select: { username: true, email: true } })
+      .catch(() => null);
+  }
+  const own = agentOwnMailboxes(user || { username: req.session?.username });
+
+  const seen = new Set();
+  const addresses = [];
+  [...own, SUPPORT_MAILBOX, ...REPLY_FROM_ADDRESSES, connectedAddress].forEach((candidate) => {
+    const address = normalizeEmailAddress(candidate);
+    if (!address || seen.has(address)) return;
+    seen.add(address);
+    const isOwn = own.includes(address);
+    const isHelpdesk = address === SUPPORT_MAILBOX;
+    addresses.push({
+      address,
+      label: `${address}${isOwn ? ' (you)' : isHelpdesk ? ' (helpdesk)' : ''}`,
+      isOwn,
+      isHelpdesk,
+      isConnected: !!connectedAddress && address === connectedAddress,
+      // Only a reply drafted in the mailbox that holds the message keeps the
+      // thread's own headers - see sendTicketReply.
+      threaded: isHelpdesk
+    });
+  });
+
+  return { connected, connectedAddress, connectedName, connectError, addresses, own };
+}
+
+/* Sending the reply.
+
+   Two paths, because threading and the From address pull against each other.
+
+   From the helpdesk mailbox - the mailbox that holds the message - the reply is
+   drafted with Graph's createReply. That draft already carries the conversation
+   id, In-Reply-To and References and the quoted original, so the client's mail
+   app files the answer under the thread they started. This is the good path and
+   it is the default.
+
+   From any other mailbox, those headers cannot be reproduced: Graph will not
+   let a draft in one mailbox claim another mailbox's conversation, and
+   In-Reply-To is not a settable property. So createReply is still used, but
+   only to build the quoted body and work out who a reply goes to - then the
+   draft is thrown away and the mail is sent from the chosen mailbox with the
+   same "Re:" subject. Mail clients thread that on subject, which is weaker than
+   real references but is what a reply typed in Outlook from a personal mailbox
+   would do anyway. The composer says which of the two is about to happen.
+
+   Returns what was actually sent, so the caller never has to assume. */
+/* The pieces of a reply, read from the original message rather than drafted.
+
+   The Graph path below gets these for free from createReply. The flow path
+   cannot: createReply writes a draft into the helpdesk mailbox, and the whole
+   point of sending through a flow is that this process holds no mailbox write
+   right. So the same three things - the Re: subject, who the answer goes to,
+   and the quoted original - are worked out here from a plain read of the
+   message, which is the Mail.Read.Shared the board already has for showing
+   ticket bodies.
+
+   Reply-all is To: whoever wrote it, Cc: everyone else who was on it, minus our
+   own mailboxes - putting the helpdesk back on its own reply is how a support
+   inbox ends up answering itself. */
+async function buildReplyContextFromMessage(token, mailbox, messageId, { replyAll }) {
+  const select = 'subject,body,from,sender,replyTo,toRecipients,ccRecipients,sentDateTime';
+  const original = await graphGet(
+    `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}?$select=${select}`,
+    token
+  );
+  const addr = r => normalizeEmailAddress(r?.emailAddress?.address);
+  const ours = new Set([mailbox, ...REPLY_FROM_ADDRESSES]);
+  const author = (original?.replyTo || []).map(addr).filter(Boolean);
+  const from = addr(original?.from) || addr(original?.sender);
+  const to = [...new Set(author.length ? author : (from ? [from] : []))];
+  const cc = replyAll
+    ? [...new Set([...(original?.toRecipients || []), ...(original?.ccRecipients || [])].map(addr).filter(Boolean))]
+        .filter(address => !ours.has(address) && !to.includes(address))
+    : [];
+
+  const subject = String(original?.subject || '').trim();
+  const sentAt = original?.sentDateTime ? new Date(original.sentDateTime).toUTCString() : '';
+  const originalHtml = String(original?.body?.content || '');
+  // The same visual convention Outlook uses, because the client is about to
+  // read this in Outlook: a rule, who wrote it and when, then their message.
+  const quotedHtml = originalHtml
+    ? [
+        '<div style="border-top:1px solid #d0d5dd;margin:18px 0 10px;padding-top:10px;font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#667085;">',
+        from ? `<div><strong>From:</strong> ${escapeHtml(from)}</div>` : '',
+        sentAt ? `<div><strong>Sent:</strong> ${escapeHtml(sentAt)}</div>` : '',
+        subject ? `<div><strong>Subject:</strong> ${escapeHtml(subject)}</div>` : '',
+        '</div>',
+        original?.body?.contentType === 'text'
+          ? `<div style="white-space:pre-wrap;font-family:Segoe UI,Arial,sans-serif;font-size:13px;">${escapeHtml(originalHtml)}</div>`
+          : originalHtml
+      ].join('')
+    : '';
+
+  return {
+    subject: subject ? (/^re:/i.test(subject) ? subject : `Re: ${subject}`) : '',
+    to: to.map(address => ({ emailAddress: { address } })),
+    cc: cc.map(address => ({ emailAddress: { address } })),
+    quotedHtml
+  };
+}
+
+async function sendTicketReply({ req, token, from, messageId, to, cc, bodyText, subject, subjectHint, replyAll, ticketId }) {
+  const mailbox = SUPPORT_MAILBOX;
+  const replyHtml = replyTextToHtml(bodyText);
+  const sendFromHelpdesk = from === mailbox;
+
+  /* The flow path. No draft, no Graph send: the body is built here and the flow
+     puts it on the wire from its own Outlook connection.
+
+     `messageId` is passed on rather than used, because threading is the flow's
+     job here - a "Reply to email (V3)" on that id carries the conversation's
+     real headers, which nothing this process can do without a mailbox write
+     right. If the read below fails (no consent, message deleted) the reply
+     still goes: an unquoted answer that reaches the client beats a 502. */
+  if (MAIL_WEBHOOK_URL) {
+    let context = { subject: '', to: [], cc: [], quotedHtml: '' };
+    if (messageId && token) {
+      try {
+        context = await buildReplyContextFromMessage(token, mailbox, messageId, { replyAll: replyAll && !to.length });
+      } catch (error) {
+        console.warn('Reply context not read, sending unquoted:', String(error?.message || error).slice(0, 200));
+      }
+    }
+    const resolvedTo = to.length ? to : context.to;
+    const resolvedCc = cc.length ? cc : context.cc;
+    /* subjectHint is the board's own "Re: <ticket subject>", used only when the
+       mailbox read above could not supply the real one - which is exactly the
+       case a flow-only deployment is in. It is never allowed to override a
+       subject read from the message itself. */
+    const resolvedSubject = subject || context.subject || subjectHint || 'Support ticket update';
+    if (!resolvedTo.length) throw new Error('missing_recipients');
+    const sent = await sendMailViaFlow({
+      kind: 'support_kanban_reply',
+      from,
+      mailbox,
+      messageId: sendFromHelpdesk ? (messageId || '') : '',
+      // Passed so the flow's run history says which ticket a send belongs to;
+      // finding one send among hundreds is otherwise guesswork.
+      ticketId: ticketId || '',
+      to: resolvedTo,
+      cc: resolvedCc,
+      subject: resolvedSubject,
+      bodyHtml: context.quotedHtml ? injectReplyIntoDraftHtml(context.quotedHtml, replyHtml) : replyHtml
+    });
+    return {
+      // Only the flow can thread, and only on the mailbox that holds the
+      // message - claiming otherwise would put a promise in the composer that
+      // the client's mail app then breaks.
+      threaded: !!(messageId && sendFromHelpdesk),
+      via: 'flow',
+      subject: sent.subject,
+      to: sent.to,
+      cc: sent.cc
+    };
+  }
+
+  if (messageId && sendFromHelpdesk) {
+    // createReplyAll only when the agent asked for it AND did not name the
+    // recipients themselves - an explicit To list is an instruction, and
+    // quietly adding everyone else back to it would be a data leak.
+    const useReplyAll = replyAll && !to.length;
+    const draft = await graphRequest(
+      `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/${useReplyAll ? 'createReplyAll' : 'createReply'}`,
+      token,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+    );
+    const draftId = String(draft?.id || '');
+    if (!draftId) throw new Error('reply_draft_not_created');
+
+    const patch = { body: { contentType: 'HTML', content: injectReplyIntoDraftHtml(draft?.body?.content, replyHtml) } };
+    if (to.length) patch.toRecipients = to;
+    if (cc.length) patch.ccRecipients = cc;
+    if (subject) patch.subject = subject;
+
+    const patched = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}`, token, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch)
+    });
+    await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draftId)}/send`, token, { method: 'POST' });
+    return {
+      threaded: true,
+      subject: String(patched?.subject || draft?.subject || subject || ''),
+      to: (patch.toRecipients || draft?.toRecipients || []).map(r => r?.emailAddress?.address).filter(Boolean),
+      cc: (patch.ccRecipients || draft?.ccRecipients || []).map(r => r?.emailAddress?.address).filter(Boolean)
+    };
+  }
+
+  let quotedHtml = '';
+  let resolvedSubject = subject;
+  let resolvedTo = to;
+  let resolvedCc = cc;
+
+  if (messageId) {
+    const draft = await graphRequest(
+      `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/${replyAll && !to.length ? 'createReplyAll' : 'createReply'}`,
+      token,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+    );
+    quotedHtml = String(draft?.body?.content || '');
+    if (!resolvedSubject) resolvedSubject = String(draft?.subject || '');
+    if (!resolvedTo.length) resolvedTo = (draft?.toRecipients || []).filter(r => r?.emailAddress?.address);
+    if (!resolvedCc.length) resolvedCc = (draft?.ccRecipients || []).filter(r => r?.emailAddress?.address);
+    // The draft was only ever scaffolding. Leaving it behind would put a
+    // half-written reply in the helpdesk mailbox's Drafts for someone to find
+    // and wonder about, so it goes - and a failure to delete it must not fail
+    // a reply that is about to be sent perfectly well.
+    if (draft?.id) {
+      await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draft.id)}`, token, { method: 'DELETE' })
+        .catch(error => console.warn('Scaffold reply draft not deleted:', String(error?.message || error).slice(0, 160)));
+    }
+  }
+
+  if (!resolvedTo.length) throw new Error('missing_recipients');
+  if (!resolvedSubject) resolvedSubject = 'Support ticket update';
+
+  await graphRequest(`/users/${encodeURIComponent(from)}/sendMail`, token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: {
+        subject: resolvedSubject,
+        body: { contentType: 'HTML', content: quotedHtml ? injectReplyIntoDraftHtml(quotedHtml, replyHtml) : replyHtml },
+        toRecipients: resolvedTo,
+        ...(resolvedCc.length ? { ccRecipients: resolvedCc } : {})
+      },
+      saveToSentItems: true
+    })
+  });
+
+  return {
+    threaded: false,
+    subject: resolvedSubject,
+    to: resolvedTo.map(r => r?.emailAddress?.address).filter(Boolean),
+    cc: resolvedCc.map(r => r?.emailAddress?.address).filter(Boolean)
+  };
+}
+
+// Turns a Graph failure into something the composer can act on. 403 here is
+// almost always a missing grant rather than a bug, and which grant it is
+// depends on whose mailbox was being sent as.
+function replyErrorResponse(res, error, context = {}) {
+  const message = String(error?.message || error);
+  const status = graphErrorStatus(error);
+  if (message === 'missing_recipients') return res.status(400).json({ error: 'missing_recipients' });
+  if (message.startsWith('m365_not_connected')) return res.status(409).json({ error: 'm365_not_connected' });
+  if (message.startsWith('m365_reauth_required')) return res.status(409).json({ error: 'm365_reauth_required', detail: message });
+  if (message.startsWith('m365_client_secret_invalid')) return res.status(409).json({ error: 'm365_client_secret_invalid', detail: message });
+  if (status === 403) {
+    return res.status(403).json({
+      error: 'reply_send_forbidden',
+      from: context.from || null,
+      connectedAddress: context.connectedAddress || null,
+      detail: message.slice(0, 300)
+    });
+  }
+  if (status === 404) return res.status(404).json({ error: 'reply_message_not_found', detail: message.slice(0, 300) });
+  console.error('Ticket reply failed:', message.slice(0, 400));
+  return res.status(502).json({ error: 'reply_send_failed', detail: message.slice(0, 300) });
+}
+
+// Which addresses this board may reply from, and whether it can reply at all.
+// The client asks before showing the composer so it can say "reconnect Outlook"
+// up front instead of letting someone write a reply that cannot be sent.
+app.get('/api/reply/from-addresses', requireAuth, async (req, res) => {
+  const identity = await resolveReplyIdentity(req);
+  return res.json({
+    // A configured flow can send whether or not this board holds an Outlook
+    // token, which is the whole point of it.
+    canSend: MAIL_WEBHOOK_URL ? true : (identity.connected && M365_CAN_SEND_MAIL),
+    connected: identity.connected,
+    // Which leg actually puts the mail on the wire, so the composer can say
+    // "reconnect Outlook" only when reconnecting Outlook would help.
+    sendVia: MAIL_WEBHOOK_URL ? 'flow' : 'graph',
+    // False when the app's configured scopes never asked for Mail.Send. A
+    // connection made before that scope was added is indistinguishable from
+    // here (the token's own scopes are not inspected), so a send can still
+    // fail with a Graph 403 telling the agent to reconnect.
+    scopeConfigured: CAN_SEND_MAIL,
+    // The helpdesk mailbox stays the default: it is the sender the client has
+    // been corresponding with, and the only one whose reply keeps the thread's
+    // real headers.
+    defaultAddress: SUPPORT_MAILBOX,
+    helpdeskAddress: SUPPORT_MAILBOX,
+    connectedAddress: identity.connectedAddress || null,
+    connectedName: identity.connectedName || null,
+    connectError: identity.connectError || null,
+    addresses: identity.addresses.map(a => ({ ...a, isDefault: a.address === SUPPORT_MAILBOX }))
+  });
+});
+
+app.post('/api/tickets/:externalId/reply', requireAuth, replyLimiter, async (req, res) => {
+  const identity = await resolveReplyIdentity(req);
+  const from = normalizeEmailAddress(req.body?.from) || SUPPORT_MAILBOX;
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    const messageId = String(req.body?.messageId || '').trim();
+    const bodyText = String(req.body?.body || '').trim();
+    const replyAll = req.body?.replyAll !== false;
+    const subjectOverride = String(req.body?.subject || '').trim();
+    const subjectHint = String(req.body?.subjectHint || '').trim().slice(0, 300);
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    if (!bodyText) return res.status(400).json({ error: 'empty_reply' });
+    if (bodyText.length > REPLY_BODY_MAX_CHARS) return res.status(413).json({ error: 'reply_too_long' });
+
+    const allowed = identity.addresses.map(a => a.address);
+    if (!allowed.includes(from)) return res.status(403).json({ error: 'reply_from_not_allowed', allowed });
+
+    const to = toGraphRecipients(req.body?.to);
+    const cc = toGraphRecipients(req.body?.cc);
+    if (!messageId && !to.length) return res.status(400).json({ error: 'missing_recipients' });
+
+    /* With a flow configured the send itself needs no Graph token, so a missing
+       or expired Outlook connection must not block a reply. One is still asked
+       for, because reading the original message is what quotes it - and that
+       read failing only costs the quote. */
+    const token = MAIL_WEBHOOK_URL
+      ? await graphDelegatedToken(req).catch(() => null)
+      : await graphDelegatedToken(req);
+    const sent = await sendTicketReply({ req, token, from, messageId, to, cc, bodyText, subject: subjectOverride, subjectHint, replyAll, ticketId: externalId });
+
+    const actor = String(req.session.username || '').trim().toUpperCase() || null;
+    const ticketRow = await prisma.ticket.findUnique({ where: { externalId }, select: { id: true } }).catch(() => null);
+    if (ticketRow?.id) {
+      await createTicketAuditEvent({
+        ticketId: ticketRow.id,
+        userId: req.session.userId || null,
+        eventType: 'email_reply_sent',
+        newValue: from,
+        metadata: {
+          actor,
+          from,
+          to: sent.to,
+          cc: sent.cc,
+          threaded: sent.threaded,
+          via: sent.via || 'graph',
+          replyAll: !!(messageId && replyAll && !to.length),
+          messageId: messageId || null,
+          chars: bodyText.length
+        }
+      });
+    }
+
+    return res.json({ ok: true, from, to: sent.to, cc: sent.cc, subject: sent.subject || null, threaded: sent.threaded });
+  } catch (error) {
+    return replyErrorResponse(res, error, { from, connectedAddress: identity.connectedAddress });
+  }
+});
+
+/* Opening the ticket in Outlook when there is no Outlook mail to open.
+
+   Every ticket that came from the mailbox has a webLink and the button just
+   follows it. A ticket raised on the board by hand has no message at all, and
+   neither does one Graph never returned a link for - so the button used to
+   disappear, which is the wrong answer to "I want to deal with this in
+   Outlook". This creates the mail that is missing, as a draft, and hands back
+   its webLink for the board to open.
+
+   A draft rather than a sent mail on purpose: the agent asked to work in
+   Outlook, so what they get is an editable message with the ticket's subject,
+   client and description already in it, waiting in their Drafts. Nothing is
+   sent from here.
+
+   Where the draft is created is the From address the composer chose, which for
+   a manual ticket is usually the agent's own mailbox - and it has to be a
+   mailbox they can open, since the whole point is that the webLink lands
+   somewhere they can edit. A ticket that does have a message drafts a reply to
+   it in the helpdesk mailbox instead, so the thread is preserved. */
+app.post('/api/tickets/:externalId/outlook-draft', requireAuth, replyLimiter, async (req, res) => {
+  const identity = await resolveReplyIdentity(req);
+  const from = normalizeEmailAddress(req.body?.from) || SUPPORT_MAILBOX;
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    const messageId = String(req.body?.messageId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+
+    const allowed = identity.addresses.map(a => a.address);
+    if (!allowed.includes(from)) return res.status(403).json({ error: 'reply_from_not_allowed', allowed });
+
+    const token = await graphDelegatedToken(req);
+    const bodyText = String(req.body?.body || '').trim();
+    const draftHtml = bodyText ? replyTextToHtml(bodyText) : '';
+    let draft = null;
+    let mailbox = from;
+    let threaded = false;
+
+    if (messageId) {
+      // Reply to the real message, in the mailbox that holds it, so Outlook
+      // opens it as part of the client's thread.
+      mailbox = SUPPORT_MAILBOX;
+      threaded = true;
+      draft = await graphRequest(
+        `/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(messageId)}/createReply`,
+        token,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }
+      );
+      if (draftHtml && draft?.id) {
+        draft = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(draft.id)}`, token, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ body: { contentType: 'HTML', content: injectReplyIntoDraftHtml(draft?.body?.content, draftHtml) } })
+        });
+      }
+    } else {
+      const subject = String(req.body?.subject || '').trim() || 'Support ticket';
+      const to = toGraphRecipients(req.body?.to);
+      const cc = toGraphRecipients(req.body?.cc);
+      draft = await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages`, token, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject,
+          body: { contentType: 'HTML', content: draftHtml || '<p></p>' },
+          ...(to.length ? { toRecipients: to } : {}),
+          ...(cc.length ? { ccRecipients: cc } : {})
+        })
+      });
+    }
+
+    const webLink = String(draft?.webLink || '');
+    if (!webLink) throw new Error('draft_without_weblink');
+
+    const actor = String(req.session.username || '').trim().toUpperCase() || null;
+    const ticketRow = await prisma.ticket.findUnique({ where: { externalId }, select: { id: true } }).catch(() => null);
+    if (ticketRow?.id) {
+      await createTicketAuditEvent({
+        ticketId: ticketRow.id,
+        userId: req.session.userId || null,
+        eventType: 'outlook_draft_created',
+        newValue: mailbox,
+        metadata: { actor, mailbox, threaded, messageId: messageId || null }
+      });
+    }
+
+    return res.json({ ok: true, webLink, draftId: String(draft?.id || ''), mailbox, threaded });
+  } catch (error) {
+    return replyErrorResponse(res, error, { from, connectedAddress: identity.connectedAddress });
+  }
+});
+
+/* ===================== Feedback from the people using it =================
+
+   A small button in the header, a box to type in, and this - so a bug in the
+   board can be reported from the board instead of remembered until someone
+   happens to mention it.
+
+   Three things happen with one report, and they are deliberately independent:
+
+   - it is recorded, first, before any delivery is attempted. A report that was
+     emailed and lost is bad; a report that was never written down anywhere is
+     worse. This is what makes "the email failed" a nuisance rather than a lost
+     bug report.
+   - it is emailed to everyone in FEEDBACK_EMAIL, from the mailbox the board is
+     connected to
+     Outlook as (/me/sendMail), so no Send As grant is needed for it to work.
+     Reply-To is the reporter, so answering the mail answers them.
+   - it is posted to FEEDBACK_WEBHOOK_URL if one is configured, which is how it
+     reaches Teams. Empty by default: no webhook, no Teams, no error.
+
+   The response says which of the three actually happened rather than a bare ok,
+   because "sent!" over a report that went nowhere is the one outcome worth
+   never printing. */
+/* Who the report is emailed to. Comma, semicolon or space separated, because
+   feedback about the board is read by the people who maintain it and there is
+   more than one of them - a single address means one person's holiday is a
+   fortnight of unread bug reports. Deduplicated, and anything without an @ is
+   dropped so a stray separator cannot make Graph reject the whole send. */
+const FEEDBACK_EMAILS = (() => {
+  const configured = String(process.env.FEEDBACK_EMAIL || '')
+    .split(/[,;\s]+/)
+    .map(value => value.trim().toLowerCase())
+    .filter(value => value.includes('@'));
+  return configured.length ? [...new Set(configured)] : ['sfa@quinta.im', 'sgu@quinta.im', 'ahk@quinta.im'];
+})();
+// The first one, for the places that show a single address or that a flow
+// reads as one - the list is what actually gets mailed.
+const FEEDBACK_EMAIL = FEEDBACK_EMAILS[0];
+// A Teams incoming webhook, or a Power Automate "When an HTTP request is
+// received" URL. The payload carries both a MessageCard (which Teams renders on
+// its own) and the same fields flat at the top level (which a flow can read),
+// so either kind of endpoint works without a shape negotiation.
+const FEEDBACK_WEBHOOK_URL = String(process.env.FEEDBACK_WEBHOOK_URL || '').trim();
+const FEEDBACK_MAX_CHARS = Number(process.env.FEEDBACK_MAX_CHARS || 4000);
+// Feedback is typed by a person, so a handful per session is generous; this is
+// only here to stop a stuck retry loop mailing somebody a thousand times.
+const feedbackLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+
+const FEEDBACK_CATEGORIES = {
+  bug: { label: 'Bug', emoji: '\u{1F41B}', colour: 'b42318' },
+  idea: { label: 'Idea', emoji: '\u{1F4A1}', colour: '0f766e' },
+  question: { label: 'Question', emoji: '\u{2753}', colour: '2563eb' },
+  other: { label: 'Feedback', emoji: '\u{1F4AC}', colour: '4f46e5' }
+};
+
+// Only the fields the report is allowed to carry, each clamped. The client
+// collects this itself (which view, which build, which browser), and it is the
+// difference between "the board is broken" and a reproducible report - but it
+// arrives from a browser, so none of it is trusted to be sane.
+function sanitizeFeedbackContext(raw) {
+  const context = (raw && typeof raw === 'object') ? raw : {};
+  const str = (value, max) => String(value == null ? '' : value).trim().slice(0, max);
+  return {
+    view: str(context.view, 40),
+    ticketId: str(context.ticketId, 200),
+    build: str(context.build, 60),
+    url: str(context.url, 300),
+    theme: str(context.theme, 20),
+    viewport: str(context.viewport, 24),
+    userAgent: str(context.userAgent, 300)
+  };
+}
+
+function feedbackContextRows(context, actor) {
+  return [
+    ['From', actor.label],
+    ['View', context.view || 'board'],
+    ['Ticket', context.ticketId || '-'],
+    ['Build', context.build || 'unknown'],
+    ['Page', context.url || '-'],
+    ['Screen', `${context.viewport || '-'}${context.theme ? ` (${context.theme} theme)` : ''}`],
+    ['Browser', context.userAgent || '-']
+  ];
+}
+
+function buildFeedbackEmailHtml({ category, message, context, actor }) {
+  const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
+  const rows = feedbackContextRows(context, actor)
+    .map(([key, value]) => `<tr><td style="padding:3px 12px 3px 0;color:#667085;font-size:12px;white-space:nowrap;vertical-align:top;">${escapeHtml(key)}</td><td style="padding:3px 0;font-size:12px;color:#0f172a;word-break:break-all;">${escapeHtml(value)}</td></tr>`)
+    .join('');
+  return [
+    '<div style="font-family:Segoe UI,Arial,sans-serif;color:#0f172a;line-height:1.5;max-width:640px;">',
+    `<div style="font-size:12px;font-weight:700;color:#${meta.colour};text-transform:uppercase;letter-spacing:.06em;">${meta.emoji} ${escapeHtml(meta.label)} &middot; Support Kanban</div>`,
+    // The message first and whole, because that is the part somebody wrote by
+    // hand and the part that has to be read.
+    `<div style="margin:10px 0 16px;padding:13px 15px;border-left:3px solid #${meta.colour};background:#f8fafc;border-radius:0 8px 8px 0;white-space:pre-wrap;font-size:14px;">${escapeHtml(message)}</div>`,
+    `<table style="border-collapse:collapse;">${rows}</table>`,
+    '<div style="margin-top:14px;font-size:11px;color:#98a2b3;">Sent by the Feedback button on the support board. Reply to this mail to answer the reporter.</div>',
+    '</div>'
+  ].join('');
+}
+
+function buildFeedbackWebhookPayload({ category, message, context, actor }) {
+  const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
+  const title = `${meta.emoji} ${meta.label} from ${actor.label}`;
+  const facts = feedbackContextRows(context, actor).map(([name, value]) => ({ name, value }));
+  return {
+    // Read by a Power Automate flow, or by anything else pointed at this URL.
+    kind: 'support_kanban_feedback',
+    category,
+    categoryLabel: meta.label,
+    message,
+    reporter: actor.label,
+    reporterEmail: actor.email || '',
+    recipientEmail: FEEDBACK_EMAIL,
+    recipientEmails: FEEDBACK_EMAILS,
+    context,
+    // Rendered by a Teams incoming webhook without a flow in between.
+    '@type': 'MessageCard',
+    '@context': 'https://schema.org/extensions',
+    themeColor: meta.colour,
+    summary: title,
+    title,
+    text: message,
+    sections: [{ facts, markdown: false }],
+    /* And the Adaptive Card, for Teams Workflows.
+
+       Microsoft retired the Office 365 connector that consumed the MessageCard
+       above; the supported route is now a Power Automate workflow, and the
+       "Post to a channel when a webhook request is received" template forwards
+       whatever it finds in `attachments`. Carrying all three shapes in one body
+       is a few hundred bytes and means the same URL works whether it points at
+       an old connector, a Workflows webhook, or somebody's own flow reading the
+       flat fields - rather than the setup depending on which one was chosen. */
+    attachments: [{
+      contentType: 'application/vnd.microsoft.card.adaptive',
+      content: {
+        type: 'AdaptiveCard',
+        $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+        version: '1.4',
+        msteams: { width: 'Full' },
+        body: [
+          { type: 'TextBlock', text: title, weight: 'Bolder', size: 'Medium', wrap: true },
+          { type: 'TextBlock', text: message, wrap: true, spacing: 'Small' },
+          { type: 'FactSet', facts: facts.map(f => ({ title: f.name, value: f.value })), spacing: 'Medium' }
+        ],
+        actions: actor.email
+          ? [{ type: 'Action.OpenUrl', title: `Email ${actor.username || 'the reporter'}`, url: `mailto:${actor.email}` }]
+          : []
+      }
+    }]
+  };
+}
+
+/* Sending one report through both channels, on demand.
+
+   Configuring this is two settings and a consent, and every one of them fails
+   silently from the outside: a wrong webhook URL, a token without Mail.Send, a
+   flow that is switched off. Without this, the only way to find out is to type
+   a real report and wait to see whether anything arrives - and if nothing does,
+   there is nothing to say which leg was at fault.
+
+   Admin-only, because it sends mail. */
+// The subject line is the report's first line. Kept as a function because a
+// report pasted out of Outlook arrives with CRLF endings, and a stray carriage
+// return on the end of a mail subject is what renders as a box in somebody's
+// inbox.
+function feedbackFirstLine(message) {
+  return String(message || '').split(/\r?\n/)[0].trim().slice(0, 90) || 'New feedback';
+}
+
+/* Mailing one report, by whichever leg this deployment actually has.
+
+   The flow first when there is one: it needs no Mail.Send consent and no
+   Outlook connection, which is exactly the state a deployment is in when the
+   Feedback button is most needed. Otherwise /me/sendMail, which sends as the
+   connected identity and so needs no Send As grant either way. */
+async function sendFeedbackEmail({ req, subject, html, actor }) {
+  if (MAIL_WEBHOOK_URL) {
+    await sendMailViaFlow({
+      kind: 'support_kanban_feedback',
+      from: KANBAN_MAILBOX,
+      to: FEEDBACK_EMAILS,
+      subject,
+      bodyHtml: html,
+      replyTo: actor.email ? [actor.email] : [],
+      actor
+    });
+    return 'flow';
+  }
+  const token = await graphDelegatedToken(req);
+  await graphRequest(boardSendMailPath(), token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: {
+        subject,
+        body: { contentType: 'HTML', content: html },
+        toRecipients: FEEDBACK_EMAILS.map(address => ({ emailAddress: { address } })),
+        ...(actor.email ? { replyTo: [{ emailAddress: { address: actor.email } }] } : {})
+      },
+      saveToSentItems: false
+    })
+  });
+  return 'graph';
+}
+
+async function deliverFeedback({ req, category, message, context, actor }) {
+  const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
+  const subject = `[Kanban ${meta.label}] ${feedbackFirstLine(message)}`;
+  const result = { emailed: false, notified: false, emailError: '', webhookError: '', emailVia: '' };
+
+  try {
+    result.emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
+    result.emailed = true;
+  } catch (error) {
+    result.emailError = String(error?.message || error).slice(0, 300);
+    console.warn('Feedback email failed:', result.emailError);
+  }
+
+  if (FEEDBACK_WEBHOOK_URL) {
+    try {
+      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
+      result.notified = true;
+    } catch (error) {
+      result.webhookError = String(error?.message || error).slice(0, 300);
+      console.warn('Feedback webhook failed:', result.webhookError);
+    }
+  }
+  return result;
+}
+
+async function feedbackActorFor(req) {
+  let user = null;
+  if (req.session?.userId) {
+    user = await prisma.user
+      .findUnique({ where: { id: req.session.userId }, select: { username: true, displayName: true, email: true, role: true } })
+      .catch(() => null);
+  }
+  const username = String(user?.username || req.session?.username || 'unknown');
+  return {
+    username,
+    email: normalizeEmailAddress(user?.email) || agentOwnMailboxes({ username, email: user?.email })[0] || '',
+    label: `${user?.displayName || username.toUpperCase()}${user?.role ? ` (${user.role})` : ''}`
+  };
+}
+
+/* Wrapped, because this endpoint's whole job is to be run when delivery is
+   broken - and an async throw out of an Express handler is an unhandled
+   rejection, which on current Node ends the process. A diagnostic that takes
+   the board down when the thing it diagnoses is misconfigured is worse than no
+   diagnostic. */
+app.post('/api/feedback/test', requireAdmin, feedbackLimiter, async (req, res) => {
+ try {
+  const actor = await feedbackActorFor(req);
+  const context = sanitizeFeedbackContext({
+    view: 'delivery test',
+    build: APP_BUILD_VERSION,
+    url: '/api/feedback/test',
+    theme: '-',
+    viewport: '-',
+    userAgent: String(req.headers['user-agent'] || '')
+  });
+  const message = [
+    `This is a delivery test for the Feedback button on the support board.`,
+    ``,
+    `If this reached Outlook, the email leg works. If it also appeared in Teams, the webhook leg works.`,
+    `Nothing is broken and nobody reported anything - the board sent this on purpose.`
+  ].join('\n');
+
+  const result = await deliverFeedback({ req, category: 'other', message, context, actor });
+  return res.json({
+    ok: result.emailed || result.notified,
+    emailed: result.emailed,
+    notified: result.notified,
+    emailTo: FEEDBACK_EMAILS,
+    emailVia: result.emailVia || undefined,
+    webhookConfigured: !!FEEDBACK_WEBHOOK_URL,
+    // The reasons, in full, because this endpoint exists to be diagnosed by.
+    emailError: result.emailError || undefined,
+    webhookError: result.webhookError || undefined
+  });
+ } catch (error) {
+  const detail = String(error?.message || error).slice(0, 300);
+  console.error('Feedback delivery test failed:', detail);
+  return res.status(500).json({ ok: false, emailed: false, notified: false, emailError: detail });
+ }
+});
+
+app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
+  const message = String(req.body?.message || '').trim();
+  const rawCategory = String(req.body?.category || 'other').trim().toLowerCase();
+  const category = Object.prototype.hasOwnProperty.call(FEEDBACK_CATEGORIES, rawCategory) ? rawCategory : 'other';
+  if (!message) return res.status(400).json({ error: 'empty_feedback' });
+  if (message.length > FEEDBACK_MAX_CHARS) return res.status(413).json({ error: 'feedback_too_long', max: FEEDBACK_MAX_CHARS });
+
+  const context = sanitizeFeedbackContext(req.body?.context);
+  let user = null;
+  if (req.session?.userId) {
+    user = await prisma.user
+      .findUnique({ where: { id: req.session.userId }, select: { username: true, displayName: true, email: true, role: true } })
+      .catch(() => null);
+  }
+  const username = String(user?.username || req.session?.username || 'unknown');
+  const actor = {
+    username,
+    email: normalizeEmailAddress(user?.email) || agentOwnMailboxes({ username, email: user?.email })[0] || '',
+    label: `${user?.displayName || username.toUpperCase()}${user?.role ? ` (${user.role})` : ''}`
+  };
+
+  /* Recorded before anything is sent, and its id returned, so a report is never
+     only in an email that may not have gone out. SyncLog rather than a table of
+     its own: this needs no migration to start working, and a migration is a
+     deploy step that could leave the button 500ing on an environment that had
+     not run it. Query it with
+     `provider = 'feedback'` when you want the list. */
+  let logId = null;
+  try {
+    const row = await prisma.syncLog.create({
+      data: {
+        provider: 'feedback',
+        syncType: category,
+        status: 'received',
+        message: message.slice(0, FEEDBACK_MAX_CHARS),
+        metadata: { actor, context, receivedAt: new Date().toISOString() }
+      }
+    });
+    logId = row?.id || null;
+  } catch (error) {
+    console.error('Feedback could not be recorded:', String(error?.message || error).slice(0, 200));
+  }
+
+  const meta = FEEDBACK_CATEGORIES[category];
+  const subject = `[Kanban ${meta.label}] ${message.split(/\r?\n/)[0].slice(0, 90)}`;
+  let emailed = false;
+  let emailError = '';
+  let emailVia = '';
+  try {
+    emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
+    emailed = true;
+  } catch (error) {
+    emailError = String(error?.message || error).slice(0, 200);
+    console.warn('Feedback email failed:', emailError);
+  }
+
+  let notified = false;
+  let webhookError = '';
+  if (FEEDBACK_WEBHOOK_URL) {
+    try {
+      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
+      notified = true;
+    } catch (error) {
+      webhookError = String(error?.message || error).slice(0, 200);
+      console.warn('Feedback webhook failed:', webhookError);
+    }
+  }
+
+  if (logId) {
+    // What actually happened to it, on the record itself - so a report nobody
+    // ever saw is findable later rather than indistinguishable from one that
+    // was read and ignored.
+    await prisma.syncLog
+      .update({
+        where: { id: logId },
+        data: {
+          status: emailed || notified ? 'delivered' : 'stored_only',
+          metadata: { actor, context, emailed, notified, emailVia: emailVia || undefined, emailError: emailError || undefined, webhookError: webhookError || undefined }
+        }
+      })
+      .catch(() => null);
+  }
+
+  return res.json({
+    ok: true,
+    stored: !!logId,
+    emailed,
+    notified,
+    webhookConfigured: !!FEEDBACK_WEBHOOK_URL,
+    to: emailed ? FEEDBACK_EMAILS : null,
+    // Only when nothing was delivered, and only the reason - the client turns
+    // this into "recorded, but it could not be sent yet" rather than a silent
+    // success.
+    detail: (!emailed && !notified) ? (emailError || webhookError || 'no_delivery_configured') : undefined
+  });
+});
 
 app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
   try {
@@ -6317,10 +6868,14 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       // the fetch below was skipped, so every cid: img in the body stayed
       // pointing at a scheme the browser cannot resolve.
       const bodyContent = String(msg?.body?.content || '');
-      // src= covers <img> and Word's <v:imagedata>; background= covers table
-      // backgrounds. Anchored on the attribute name so a link whose query
-      // string happens to contain "cid:" doesn't trigger a pointless fetch.
-      const referencesCid = /(?:src|background)\s*=\s*["']?\s*cid:/i.test(bodyContent);
+      // How many pictures the body asks for. src= covers <img> and Word's
+      // <v:imagedata>; background= covers table backgrounds. Anchored on the
+      // attribute name so a link whose query string happens to contain "cid:"
+      // does not count. Counting rather than testing, because the count is what
+      // lets the modal say "this message wanted 3 pictures and got none"
+      // instead of quietly rendering the mail with the images deleted.
+      const cidRefs = (bodyContent.match(/(?:src|background)\s*=\s*["']?\s*cid:/gi) || []).length;
+      const referencesCid = cidRefs > 0;
       let imageAttachments = [];
       let imagesError = '';
       if (msg?.hasAttachments || referencesCid) {
@@ -6336,13 +6891,23 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
           imagesError = String(err?.message || err).slice(0, 200);
         }
       }
+      // A message that asked for pictures and came back with none is a bug
+      // somewhere - a projection, a permission, a message moved mid-read - and
+      // for months it looked identical to a message that simply had no
+      // pictures, because the renderer deletes a cid: it cannot resolve. Say so.
+      if (referencesCid && !imageAttachments.length && !imagesError) {
+        imagesError = `The message references ${cidRefs} inline image${cidRefs === 1 ? '' : 's'}, but the mailbox returned none.`;
+      }
       return res.json({
         isError: false,
         structuredContent: {
           body: { content: msg?.body?.content || '', contentType: msg?.body?.contentType || 'text' },
           bodyPreview: msg?.bodyPreview || '',
           imageAttachments,
-          imagesError
+          imagesError,
+          // What the two sides actually saw, so "no images" is diagnosable from
+          // the browser's network tab instead of a pod log.
+          imageDiag: { cidRefs, hasAttachments: !!msg?.hasAttachments, returned: imageAttachments.length }
         }
       });
     }
@@ -7190,15 +7755,64 @@ const localEngine = require('./translate-local');
 
 const TRANSLATE_LOCAL_ENABLED = !/^(off|none|false|0|disabled)$/i.test(String(process.env.TRANSLATE_LOCAL || '').trim());
 const TRANSLATE_LOCAL_DIR = String(process.env.TRANSLATE_LOCAL_MODELS || path.join(__dirname, 'data', 'mt-models'));
-// Two resident models is about 1.5GB of RSS. Raise it on a bigger box.
-const TRANSLATE_LOCAL_MAX_MODELS = Number(process.env.TRANSLATE_LOCAL_MAX_MODELS || 2);
-// Generous, because the first request for a language downloads it and a long
-// thread is genuinely a minute of CPU. Still bounded - a wedged worker must not
-// hold an agent's request open forever.
-const TRANSLATE_LOCAL_TIMEOUT_MS = Number(process.env.TRANSLATE_LOCAL_TIMEOUT_MS || 300_000);
+// One resident model is about 700MB of RSS while it is loaded, two about 1.5GB -
+// and they are only loaded while someone is translating: the worker is torn down
+// once it goes idle (TRANSLATE_LOCAL_IDLE_MS in translate-local.js), which
+// returns that memory to the OS rather than holding it until the next deploy.
+// The default is one; raise it on a bigger box to keep a language and its
+// reverse warm.
+const TRANSLATE_LOCAL_MAX_MODELS = Number(process.env.TRANSLATE_LOCAL_MAX_MODELS || 1);
+// ONNX Runtime's CPU arena. Off, because on it the footprint climbed with every
+// ticket translated - 414MB, then 571MB, then 682MB over three - and only came
+// back when the worker was torn down. Off, it stays flat at ~410MB, for about
+// two thirds more wall clock. TRANSLATE_LOCAL_ARENA=on for the faster, hungrier
+// behaviour. See the measurements in translate-local-worker.js.
+const TRANSLATE_LOCAL_ARENA = /^(1|on|true|yes)$/i.test(String(process.env.TRANSLATE_LOCAL_ARENA || '').trim());
+// Beam search width, left at the model's own 4. Greedy decoding was tried as a
+// memory saving and is not one: measured within noise on peak RSS and slower,
+// because it keeps generating where a beam search has settled. See the note in
+// translate-local-worker.js before reaching for it.
+const TRANSLATE_LOCAL_BEAMS = Number(process.env.TRANSLATE_LOCAL_BEAMS || 4);
+// ONNX intra-op threads. 0 leaves it to the runtime, which is the default and
+// the fastest; it made no measurable difference to peak RSS, so set this only to
+// stop translation taking CPU from the web server it shares a box with.
+const TRANSLATE_LOCAL_THREADS = Number(process.env.TRANSLATE_LOCAL_THREADS || 0);
+// Hard ceiling on generated tokens per row - a guard against a repetition loop
+// growing a KV cache for tokens nothing asked for. The worker scales it down
+// per batch from the longest row in that batch.
+const TRANSLATE_LOCAL_MAX_NEW_TOKENS = Number(process.env.TRANSLATE_LOCAL_MAX_NEW_TOKENS || 256);
+// Weight precision. q8 is what Xenova publishes for opus-mt and what the disk
+// cache holds; the knob exists so a smaller quantisation can be tried without
+// editing the worker.
+const TRANSLATE_LOCAL_DTYPE = String(process.env.TRANSLATE_LOCAL_DTYPE || 'q8');
+// A stall timeout, not a length limit: the worker reports progress after every
+// batch, and each report pushes this deadline out. So the ceiling is "stopped
+// making progress for this long", which is what a wedged worker looks like,
+// while a genuinely long thread is allowed to take as long as it takes.
+const TRANSLATE_LOCAL_TIMEOUT_MS = Number(process.env.TRANSLATE_LOCAL_TIMEOUT_MS || 60_000);
+// Batching knobs, passed through to the worker - see the batching note there for
+// why a whole ticket must not be one batch.
+const TRANSLATE_LOCAL_BATCH_ROWS = Number(process.env.TRANSLATE_LOCAL_BATCH_ROWS || 8);
+const TRANSLATE_LOCAL_BATCH_COST = Number(process.env.TRANSLATE_LOCAL_BATCH_COST || 3200);
+// How far apart in length two rows may be before they go in separate batches.
+// Not a performance knob - batching a 371-character paragraph beside "Bonjour,"
+// makes the library corrupt every row in that batch with a run of periods. See
+// the reproduction in translate-local-worker.js.
+const TRANSLATE_LOCAL_BATCH_RATIO = Number(process.env.TRANSLATE_LOCAL_BATCH_RATIO || 8);
 
 function localEngineOptions() {
-  return { cacheDir: TRANSLATE_LOCAL_DIR, maxModels: TRANSLATE_LOCAL_MAX_MODELS };
+  return {
+    cacheDir: TRANSLATE_LOCAL_DIR,
+    maxModels: TRANSLATE_LOCAL_MAX_MODELS,
+    batchRows: TRANSLATE_LOCAL_BATCH_ROWS,
+    batchCost: TRANSLATE_LOCAL_BATCH_COST,
+    beams: TRANSLATE_LOCAL_BEAMS,
+    threads: TRANSLATE_LOCAL_THREADS,
+    maxNewTokens: TRANSLATE_LOCAL_MAX_NEW_TOKENS,
+    dtype: TRANSLATE_LOCAL_DTYPE,
+    arena: TRANSLATE_LOCAL_ARENA,
+    batchRatio: TRANSLATE_LOCAL_BATCH_RATIO
+  };
 }
 
 const localProvider = {
@@ -7241,7 +7855,20 @@ const localProvider = {
     const cores = segments.map(s => splitEdges(s.text).core);
     let result;
     try {
-      result = await localEngine.translateTexts(cores, sourceLang, targetLang, localEngineOptions(), TRANSLATE_LOCAL_TIMEOUT_MS);
+      // The progress callback is logged rather than streamed to the client: this
+      // route answers once, and a line per quarter of a long ticket is what
+      // turns "translation is slow" into a number in the pod's log.
+      let logged = 0;
+      result = await localEngine.translateTexts(
+        cores, sourceLang, targetLang, localEngineOptions(), TRANSLATE_LOCAL_TIMEOUT_MS,
+        (p) => {
+          const step = Math.max(1, Math.floor(p.total / 4));
+          if (p.done - logged >= step || p.done === p.total) {
+            logged = p.done;
+            console.log(`Local translation ${sourceLang}->${targetLang} hop ${p.hop}/${p.hops}: ${p.done}/${p.total} rows`);
+          }
+        }
+      );
     } catch (error) {
       // A timeout or a dead worker is worth trying another engine for.
       throw translationError('provider_error', `Local translation failed: ${error?.message || error}`);
@@ -7588,9 +8215,17 @@ async function runTranslation({ targetLang, targetName, segments }) {
 // own limiter rather than sharing an existing one. Keyed per signed-in agent,
 // not per IP: the whole support team shares one office IP, and an IP-keyed
 // budget would let one agent working through a backlog lock out everyone else.
+// The client splits a long message into many small requests rather than one
+// long one (see the chunking note in index.html), so a request is no longer a
+// useful measure of cost: one open of a long thread is a dozen or more of them,
+// and a cached re-open fires them back to back in a second. The old ceiling of
+// 40 a minute was written when a ticket was one request, and against chunking it
+// would turn a perfectly normal second ticket into a rate-limit warning. The
+// per-request size caps (TRANSLATE_MAX_SEGMENTS / TRANSLATE_MAX_CHARS) are what
+// actually bound the work; this stays as a runaway-client backstop.
 const translateLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 40,
+  max: Number(process.env.TRANSLATE_RATE_MAX || 300),
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => String(req.session?.username || req.ip || 'anon').toLowerCase()

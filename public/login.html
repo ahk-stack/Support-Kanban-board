@@ -104,8 +104,14 @@
           forgotMsg.textContent = 'No active user exists with that email.';
           forgotMsg.className = 'msg err';
         } else if (out.error === 'send_email_failed') {
-          forgotMsg.textContent = 'Could not send email. Ask an admin to reconnect Microsoft 365.';
+          forgotMsg.textContent = out.sendVia === 'flow'
+            ? 'Could not send the email. Ask an admin to check the mail flow.'
+            : 'Could not send email. Ask an admin to reconnect Microsoft 365.';
           forgotMsg.className = 'msg err';
+          // The real reason, for whoever is helping them - it never fits in the
+          // line above and it is what makes the difference between a guess and
+          // a fix.
+          if (out.detail) console.warn('[forgot-password]', out.detail);
         } else {
           forgotMsg.textContent = 'Unable to send reset email.';
           forgotMsg.className = 'msg err';

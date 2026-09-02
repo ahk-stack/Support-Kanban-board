@@ -609,6 +609,137 @@ header {
   gap: 12px;
   box-shadow: 0 14px 40px rgba(var(--ink-rgb), 0.22);
 }
+/* The Feedback button.
+
+   Small, but no longer transparent. The first version was styled as the quietest
+   thing in the header - transparent and dimmed - on the theory that a control
+   for the rare moment something breaks should not compete with the ones people
+   press all day. Sat between two filled pills in a header of nine controls,
+   that made it genuinely hard to find, which is the worse fault: a feedback
+   button nobody spots collects nothing. It now carries the same fill as the
+   Audit Log button beside it, at a slightly smaller size. */
+.feedback-btn {
+  border-radius: 999px;
+  border: 1px solid rgba(var(--ink-text-rgb), 0.20);
+  background: rgba(var(--ink-text-rgb), 0.10);
+  color: var(--ink-text);
+  cursor: pointer;
+  transition: all .16s ease;
+  font-size: 11.5px;
+  font-weight: 800;
+  padding: 7px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.feedback-btn::before { content: "\1F4AC"; font-size: 12px; }
+
+.feedback-btn:hover {
+  background: rgba(var(--ink-text-rgb), 0.20);
+  transform: translateY(-1px);
+}
+
+/* ---- The report itself ---- */
+
+.fb-body {
+  padding: 15px 18px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fb-cats { display: flex; gap: 7px; flex-wrap: wrap; }
+
+.fb-cat {
+  border: 1px solid var(--border);
+  background: var(--white);
+  border-radius: 999px;
+  padding: 6px 13px;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: all .14s ease;
+}
+
+.fb-cat:hover { border-color: var(--border-strong); }
+
+.fb-cat[aria-pressed="true"] {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+  box-shadow: 0 0 0 3px rgba(var(--indigo-600-rgb), .12);
+}
+
+.fb-textarea {
+  width: 100%;
+  min-height: 128px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 11px 12px;
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--white);
+}
+
+.fb-textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 4px rgba(var(--indigo-600-rgb), .12);
+}
+
+.fb-count {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 700;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.fb-count.over { color: var(--red-600); }
+
+/* What is attached, shown rather than described. Somebody about to send their
+   browser version and the page they are on should be able to see that that is
+   all it is. */
+.fb-context {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  padding: 9px 11px;
+  font-size: 11px;
+  color: var(--muted);
+  display: grid;
+  gap: 3px;
+}
+
+.fb-context strong {
+  display: block;
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.fb-context span { word-break: break-all; }
+
+.fb-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-weight: 600;
+  /* The action bar is flex-end, so this has to claim the space to stay left -
+     and shrink rather than push the buttons onto a second row, which is what
+     three buttons plus a sentence did at this modal's width. */
+  margin-right: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .audit-board-btn {
   border-radius: 999px;
   border: 1px solid rgba(var(--ink-text-rgb), 0.18);
@@ -2345,22 +2476,25 @@ header {
 }
 
 /* Mail is authored at whatever width the sender's client used - a signature
-   table or a pasted screenshot is routinely wider than this modal - so the body
-   scrolls sideways inside itself.
-   overflow-x: scroll already reserved the axis, but the bar itself was
-   effectively invisible: WebKit hides overlay scrollbars until they are used,
-   and the page's generic thin scrollbar styling gave no track to see when idle.
-   A wide mail therefore looked simply cut off. Same always-visible treatment as
-   .kpi-scroll-x, which exists for exactly this reason. */
+   table or a pasted screenshot is routinely wider than this modal - and the
+   body used to scroll sideways inside itself, with an always-visible
+   horizontal bar pinned under the message.
+   That bar cost a strip of the reading area on every single ticket, so the mail
+   is reflowed to the modal's width instead: long words and URLs break, wide
+   tables and images shrink to fit. Nothing is cut off and there is no bar.
+   Vertical scrolling keeps the visible-track treatment - that one is load
+   bearing, a long thread has to look scrollable. Sideways stays *auto* rather
+   than hidden: a mail table with hard pixel widths can still out-measure the
+   sheet, and clipping it would hide content instead of just hiding a bar. In
+   the normal case nothing overflows, so no bar is drawn. */
 #em-body {
-  overflow-x: scroll;
+  overflow-x: auto;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: rgba(var(--slate-400-rgb), .85) rgba(var(--slate-200-rgb), .55);
 }
 #em-body::-webkit-scrollbar {
-  height: 12px;
   width: 12px;
 }
 #em-body::-webkit-scrollbar-track {
@@ -2377,21 +2511,31 @@ header {
   background: rgba(var(--slate-500-rgb), .95);
   background-clip: padding-box;
 }
-/* The horizontal bar sits at the bottom edge of the scroll box, so the sheet
-   needs to clear it rather than sit under it. */
-#em-body > div:last-child {
-  margin-bottom: 4px;
-}
 
+/* Wrap rather than widen. anywhere (not break-word) because the usual culprit
+   is a single unbroken tracking URL or a base64 blob, which break-word leaves
+   sticking out past the sheet. */
 #em-body > div {
-  width: max-content;
-  min-width: 100%;
-  max-width: none;
+  width: auto;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
+/* fixed layout is what stops a mail table from sizing itself to its widest
+   cell and pushing past the sheet again. */
 #em-body table {
-  width: max-content;
-  max-width: none;
+  width: auto;
+  max-width: 100%;
+  table-layout: fixed;
+}
+#em-body td,
+#em-body th {
+  overflow-wrap: anywhere;
+}
+/* Code blocks and pasted logs carry their own long lines. */
+#em-body pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Raw email HTML carries its own inline color/background styles from whatever
@@ -2418,8 +2562,61 @@ header {
   color: var(--text);
 }
 
+/* The toggle's other position: the same message wearing the platform's own
+   surface and text. The mail's inline colors - authored against a white page -
+   are what made a themed body illegible when this was the only mode, so here
+   they are overridden rather than preserved. That is the whole trade: the sheet
+   keeps the client's appearance, this keeps the platform's. The agent picks,
+   and the pictures, tables and layout are untouched either way. */
+.email-body-content.themed {
+  background: var(--surface-soft);
+  color: var(--text);
+}
+[data-theme="dark"] .email-body-content.themed {
+  box-shadow: 0 0 0 1px var(--border);
+}
+/* Inline styles beat a class by specificity, so the mail's own colors only give
+   way to !important. The attribute match is deliberately loose: it catches
+   `color`, `background-color` and shorthand alike, and an element that sets a
+   background but no text color still needs a legible one against ours. */
+.email-body-content.themed [style*="color"],
+.email-body-content.themed [style*="background"],
+.email-body-content.themed font[color],
+.email-body-content.themed [bgcolor] {
+  color: var(--text) !important;
+  background-color: transparent !important;
+  background-image: none !important;
+}
+.email-body-content.themed a,
+.email-body-content.themed a[style*="color"] {
+  color: var(--primary) !important;
+}
+/* Borders the mail drew for tables and quote bars are usually a light gray that
+   disappears against a dark surface, taking the table's structure with it. */
+.email-body-content.themed table,
+.email-body-content.themed td,
+.email-body-content.themed th,
+.email-body-content.themed blockquote,
+.email-body-content.themed hr {
+  border-color: var(--border) !important;
+}
+/* Our own widgets inside the sheet are pinned to light values for the white
+   sheet (see above); in themed mode they can use the tokens again. */
+.email-body-content.themed .email-image-attachments { border-top-color: var(--border); }
+.email-body-content.themed .email-image-attachment {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+.email-body-content.themed .email-image-attachment img { background: var(--surface-muted); }
+.email-body-content.themed .email-image-attachment span { color: var(--muted); }
+.email-body-content.themed .email-image-missing {
+  border-color: var(--border-strong);
+  color: var(--muted) !important;
+}
+
 #em-body img {
-  max-width: none;
+  max-width: 100%;
   height: auto;
   border-radius: 8px;
 }
@@ -2567,6 +2764,9 @@ header {
   gap: 8px;
   justify-content: flex-end;
   background: var(--slate-50);
+  /* Four buttons on the email modal since Reply joined them - on a narrow
+     window they wrap rather than shrinking each other out of readability. */
+  flex-wrap: wrap;
 }
 
 .btn-out,
@@ -2760,6 +2960,93 @@ textarea:focus {
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* The reply composer in the email modal. Sits between the message body and the
+   modal's own action bar, so the quoted message stays visible above whatever is
+   being written about it. It borrows .form-input and .compose-textarea rather
+   than restyling fields, so a reply looks like every other form on the board. */
+.em-reply {
+  border-top: 1px solid var(--border);
+  padding: 12px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  background: var(--neutral-50);
+  /* The body above it scrolls; this must not, or a long reply pushes the Send
+     button off the bottom of the modal. */
+  flex: 0 0 auto;
+}
+
+.em-reply[hidden] { display: none; }
+
+.em-reply-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.em-reply-note {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.em-reply-note.warn { color: var(--amber-600); }
+.em-reply-note.bad { color: var(--red-600); }
+
+/* From is narrow and fixed, To/Cc take the rest - on a phone they stack. */
+.em-reply-grid {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr);
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .em-reply-grid { grid-template-columns: 1fr; }
+}
+
+.em-reply-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.em-reply-field > span {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .03em;
+}
+
+#em-reply-body { min-height: 108px; }
+
+.em-reply-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.em-reply-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.em-reply-buttons {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .tag-section {
@@ -3309,121 +3596,334 @@ textarea:focus {
   padding: 16px 18px 20px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
+}
+
+/* The input is a card of its own rather than loose fields on the page
+   background: a run is a deliberate act with a cost (one HTTP fetch per site),
+   so the thing you press it with should look like a control panel. */
+.qt-detect-input {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--white);
+  padding: 14px 15px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .qt-detect-label {
-  display: block;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--slate-500);
-  margin-bottom: 6px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.qt-detect-label .qt-detect-hint {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+  color: var(--muted-light);
 }
 
 .qt-detect-textarea {
   width: 100%;
-  min-height: 130px;
+  min-height: 132px;
   resize: vertical;
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 10px 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.6;
+  border-radius: var(--radius);
+  padding: 11px 12px;
+  /* A list of URLs is data, and lines up far better read in a monospace face -
+     a mistyped domain is spottable at a glance instead of by proofreading. */
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
   color: var(--text);
-  background: var(--white);
+  background: var(--bg-soft);
+  transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
 }
 
 .qt-detect-textarea:focus {
   outline: none;
-  border-color: var(--indigo-400, #818cf8);
+  background: var(--white);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 4px rgba(var(--indigo-600-rgb), .12);
 }
+
+.qt-detect-textarea::placeholder { color: var(--muted-light); }
 
 .qt-detect-controls {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  margin-top: 10px;
 }
 
-.qt-detect-file {
-  display: none;
-}
+/* Pushes everything after it to the right edge: run/clear read as the actions,
+   export as the thing you do afterwards. */
+.qt-detect-controls .qt-detect-spacer { flex: 1 1 auto; }
+
+.qt-detect-file { display: none; }
 
 .qt-detect-select {
-  height: 34px;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0 28px 0 10px;
+  border-radius: 10px;
+  padding: 6px 9px;
   font-size: 12px;
   font-weight: 700;
-  color: var(--slate-700);
+  color: var(--text);
   background: var(--white);
 }
 
 .qt-detect-status {
   font-size: 12px;
-  color: var(--slate-500);
+  color: var(--muted);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
 }
+
+/* Spins only while a run is in flight. The check is one request for the whole
+   list, so there is no honest percentage to show - this says "still working"
+   without pretending to know how far along it is. */
+.qt-detect-status.busy::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid rgba(var(--indigo-600-rgb), .25);
+  border-top-color: var(--primary);
+  animation: qt-detect-spin .7s linear infinite;
+}
+
+@keyframes qt-detect-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .qt-detect-status.busy::before { animation-duration: 2.4s; }
+}
+
+/* ---- Results ---- */
 
 .qt-detect-summary {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
 }
 
+/* One tile per outcome, and they are buttons: with a few hundred sites checked,
+   "show me only the failures" is the next thing anybody wants, and the count
+   they just read is the obvious thing to click to get it. */
 .qt-detect-stat {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 11px 13px 12px;
   border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 4px 12px;
-  font-size: 12px;
-  font-weight: 700;
+  border-radius: var(--radius);
   background: var(--white);
-  color: var(--slate-600);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  overflow: hidden;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
 }
 
-.qt-detect-stat.yes { background: rgba(var(--green-500-rgb), .14); border-color: rgba(var(--green-300-rgb), .5); color: var(--emerald-800); }
-.qt-detect-stat.no { background: rgba(var(--slate-200-rgb), .5); }
-.qt-detect-stat.err { background: rgba(var(--amber-500-rgb), .16); border-color: rgba(var(--amber-500-rgb), .45); color: var(--amber-800); }
+.qt-detect-stat::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--border-strong);
+}
+
+.qt-detect-stat:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(var(--shadow-rgb), .07); }
+.qt-detect-stat[aria-pressed="true"] { border-color: var(--border-strong); box-shadow: 0 0 0 3px rgba(var(--shadow-rgb), .05); }
+.qt-detect-stat[disabled] { opacity: .5; cursor: default; transform: none; box-shadow: none; }
+
+.qt-detect-stat-value {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.qt-detect-stat-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.qt-detect-stat.yes::before { background: var(--green-500); }
+.qt-detect-stat.yes .qt-detect-stat-value { color: var(--emerald-800); }
+.qt-detect-stat.yes[aria-pressed="true"] { border-color: rgba(var(--green-500-rgb), .55); box-shadow: 0 0 0 3px rgba(var(--green-500-rgb), .14); }
+
+.qt-detect-stat.no::before { background: var(--border-strong); }
+.qt-detect-stat.err::before { background: var(--amber-500); }
+.qt-detect-stat.err .qt-detect-stat-value { color: var(--amber-800); }
+.qt-detect-stat.err[aria-pressed="true"] { border-color: rgba(var(--amber-500-rgb), .5); box-shadow: 0 0 0 3px rgba(var(--amber-500-rgb), .16); }
+
+.qt-detect-stat.all::before { background: var(--primary); }
+.qt-detect-stat.all[aria-pressed="true"] { border-color: rgba(var(--indigo-600-rgb), .5); box-shadow: 0 0 0 3px rgba(var(--indigo-600-rgb), .14); }
 
 .qt-detect-table-wrap {
-  overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--white);
+  overflow: auto;
+  /* Enough to be worth scrolling inside rather than growing the page forever. */
+  max-height: min(62vh, 720px);
 }
 
 .qt-detect-table {
   width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-  min-width: 720px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12.5px;
 }
 
-.qt-detect-table th,
-.qt-detect-table td {
+/* Sticky, because the whole point of this tool is a long list and a column you
+   cannot name is a column you have to scroll back up to read. */
+.qt-detect-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
   padding: 9px 12px;
   text-align: left;
-  border-bottom: 1px solid var(--border);
-  vertical-align: top;
-}
-
-.qt-detect-table tr:last-child td { border-bottom: 0; }
-
-.qt-pill {
-  display: inline-block;
-  border-radius: 999px;
-  padding: 2px 9px;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--muted);
   white-space: nowrap;
 }
 
-.qt-pill.yes { background: rgba(var(--green-500-rgb), .18); color: var(--emerald-800); }
-.qt-pill.no { background: rgba(var(--slate-200-rgb), .7); color: var(--slate-600); }
-.qt-pill.err { background: rgba(var(--amber-500-rgb), .2); color: var(--amber-800); }
+.qt-detect-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  color: var(--text);
+}
+
+.qt-detect-table tbody tr:last-child td { border-bottom: 0; }
+.qt-detect-table tbody tr { transition: background .12s ease; }
+.qt-detect-table tbody tr:hover td { background: var(--bg-soft); }
+
+.qt-detect-site {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  max-width: 340px;
+}
+
+.qt-detect-redirect {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 3px;
+  word-break: break-all;
+}
+
+.qt-detect-evidence {
+  max-width: 300px;
+  word-break: break-all;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.qt-detect-evidence code {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--text-soft);
+}
+
+.qt-detect-num {
+  white-space: nowrap;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* The header has its own text-align, so it needs saying again to sit over the
+   numbers it labels rather than off to their left. */
+.qt-detect-table thead th.qt-detect-num { text-align: right; }
+
+/* Nothing yet, nothing left after filtering, and a finished run with no rows
+   all land here - a panel that says which, rather than a blank rectangle that
+   looks like something failed to draw. */
+.qt-detect-empty {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--white);
+  padding: 34px 24px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.qt-detect-empty-mark {
+  width: 42px;
+  height: 42px;
+  margin: 0 auto 12px;
+  border-radius: 13px;
+  display: grid;
+  place-items: center;
+  background: var(--bg-soft);
+  color: var(--muted-light);
+}
+
+.qt-detect-empty-mark svg { width: 21px; height: 21px; }
+
+.qt-detect-empty strong {
+  display: block;
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.qt-detect-empty span { font-size: 12.5px; }
+
+.qt-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 3px 10px 3px 8px;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.qt-pill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+
+.qt-pill.yes { background: rgba(var(--green-500-rgb), .14); border-color: rgba(var(--green-300-rgb), .6); color: var(--emerald-800); }
+.qt-pill.no { background: rgba(var(--slate-200-rgb), .55); border-color: var(--border); color: var(--slate-600); }
+.qt-pill.err { background: rgba(var(--amber-500-rgb), .16); border-color: rgba(var(--amber-500-rgb), .45); color: var(--amber-800); }
+
+@media (max-width: 700px) {
+  .qt-detect-body { padding: 13px 13px 16px; }
+  .qt-detect-controls { gap: 7px; }
+  .qt-detect-controls .qt-detect-spacer { flex-basis: 100%; height: 0; }
+  .qt-detect-site, .qt-detect-evidence { max-width: none; }
+}
 
 .qt-seize-frame {
   width: 100%;
@@ -3507,6 +4007,31 @@ textarea:focus {
 
 #kpi-status-cards {
   grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)) !important;
+}
+
+[data-kpi-drilldown]:hover {
+  box-shadow: 0 4px 12px rgba(var(--shadow-rgb), 0.14);
+  transform: translateY(-1px);
+}
+[data-kpi-drilldown]:focus-visible {
+  outline: 2px solid var(--red-300);
+  outline-offset: 1px;
+}
+
+.kpi-ticket-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.kpi-ticket-row:hover {
+  background: var(--surface-soft);
+}
+.kpi-ticket-row:last-child {
+  border-bottom: none;
 }
 
 /* =========================
@@ -3959,6 +4484,7 @@ th {
 <a class="audit-board-btn" href="/audit/tickets" title="Which tickets each Support agent and each CS updated, and what they changed">
   Audit Log
 </a>
+<button class="feedback-btn" id="feedback-btn" type="button" title="Report a problem with the board, or suggest something">Feedback</button>
     <div class="account-menu">
       <button class="account-btn" id="account-btn">Account </button>
      <div class="account-panel" id="account-panel">
@@ -4359,21 +4885,25 @@ th {
     </div>
     <div class="qt-detect-body">
       <div class="qt-detect-input">
-        <label class="qt-detect-label" for="qt-detect-urls">Site URLs &mdash; one per line, or paste a CSV column</label>
+        <label class="qt-detect-label" for="qt-detect-urls">
+          <span>Site URLs</span>
+          <span class="qt-detect-hint">One per line &mdash; or paste a column straight out of a spreadsheet</span>
+        </label>
         <textarea id="qt-detect-urls" class="qt-detect-textarea" spellcheck="false"
           placeholder="hotel-example.com&#10;https://another-hotel.fr&#10;www.third-hotel.es"></textarea>
         <div class="qt-detect-controls">
           <input id="qt-detect-file" class="qt-detect-file" type="file" accept=".csv,.tsv,.txt,.xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,text/tab-separated-values">
-          <button class="btn-out" id="qt-detect-import" type="button">Upload file</button>
           <button class="btn-primary" id="qt-detect-run" type="button">Check sites</button>
+          <button class="btn-out" id="qt-detect-import" type="button">Upload file</button>
           <button class="btn-out" id="qt-detect-clear" type="button">Clear</button>
+          <span class="qt-detect-status" id="qt-detect-status">Paste URLs to begin.</span>
+          <span class="qt-detect-spacer"></span>
           <select class="qt-detect-select" id="qt-detect-export-format" aria-label="Export format">
             <option value="csv">CSV</option>
             <option value="tsv">TSV</option>
             <option value="xlsx">Excel</option>
           </select>
           <button class="btn-out" id="qt-detect-export" type="button" disabled>Export</button>
-          <span class="qt-detect-status" id="qt-detect-status">Paste URLs to begin.</span>
         </div>
       </div>
       <div class="qt-detect-results" id="qt-detect-results"></div>
@@ -4396,10 +4926,70 @@ th {
     </div>
   </div>
 </div>
+<!-- Feedback modal -->
+<div class="modal-bg" id="feedback-modal">
+  <!-- 580 rather than 520: the admin Test delivery button alongside Cancel and
+       Send pushed the row onto two lines at the narrower width. -->
+  <div class="modal" style="max-width:580px;">
+    <div class="modal-head">
+      <div>
+        <h2>Send feedback</h2>
+        <div style="font-size:11px;color:var(--slate-400);margin-top:3px;">Something broken, missing, or worth changing on the board</div>
+      </div>
+      <button class="modal-close-x" data-close="feedback-modal"></button>
+    </div>
+    <div class="fb-body">
+      <div class="fb-cats" id="fb-cats" role="group" aria-label="What kind of feedback">
+        <button class="fb-cat" type="button" data-fb-cat="bug" aria-pressed="true">Bug</button>
+        <button class="fb-cat" type="button" data-fb-cat="idea" aria-pressed="false">Idea</button>
+        <button class="fb-cat" type="button" data-fb-cat="question" aria-pressed="false">Question</button>
+        <button class="fb-cat" type="button" data-fb-cat="other" aria-pressed="false">Other</button>
+      </div>
+      <div>
+        <textarea class="fb-textarea" id="fb-message" spellcheck="true"
+          placeholder="What happened, and what did you expect instead? If it was on one ticket, its number helps."></textarea>
+        <div class="fb-count" id="fb-count"></div>
+      </div>
+      <div class="fb-context" id="fb-context"></div>
+    </div>
+    <div class="modal-actions">
+      <span class="fb-note" id="fb-note"></span>
+      <!-- Admin only, and hidden otherwise: it sends a real mail, and it exists
+           so whoever set FEEDBACK_EMAIL and FEEDBACK_WEBHOOK_URL can prove both
+           legs work without waiting for somebody to report something. -->
+      <button class="btn-out admin-only" id="fb-test" type="button" title="Send a test report to check that email and Teams delivery work">Test delivery</button>
+      <button class="btn-out" data-close="feedback-modal">Cancel</button>
+      <button class="btn-primary" id="fb-send">Send feedback</button>
+    </div>
+  </div>
+</div>
 <div id="toast"></div>
 
 <!-- Email modal -->
-<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="modal-body-scroll" id="em-body"></div><div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-outlook">Open in Outlook </button></div></div></div>
+<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="modal-body-scroll" id="em-body"></div>
+<!-- Replying to the client, without leaving the board. Collapsed until the
+     Reply button is pressed: the modal's first job is still reading the
+     message, and an always-open composer pushes the body out of view. -->
+<div class="em-reply" id="em-reply" hidden>
+  <div class="em-reply-head">
+    <div class="compose-label">Reply to the client</div>
+    <div class="em-reply-note" id="em-reply-note"></div>
+  </div>
+  <div class="em-reply-grid">
+    <label class="em-reply-field"><span>From</span><select class="form-input" id="em-reply-from"></select></label>
+    <label class="em-reply-field"><span>To</span><input class="form-input" id="em-reply-to" type="text" placeholder="client@example.com" autocomplete="off" spellcheck="false"></label>
+    <label class="em-reply-field"><span>Cc</span><input class="form-input" id="em-reply-cc" type="text" placeholder="Optional, comma separated" autocomplete="off" spellcheck="false"></label>
+  </div>
+  <textarea class="compose-textarea" id="em-reply-body" placeholder="Write your reply. The client's message is quoted underneath it, exactly as Outlook would."></textarea>
+  <div class="em-reply-foot">
+    <label class="em-reply-check"><input type="checkbox" id="em-reply-wct" checked> Move ticket to Waiting on Contact</label>
+    <div class="em-reply-buttons">
+      <button class="btn-out" id="em-reply-cancel">Cancel</button>
+      <button class="btn-primary" id="em-reply-send">Send reply</button>
+    </div>
+  </div>
+</div>
+<div class="modal-actions"><button class="btn-out" data-close="email-modal">Close</button><button class="btn-out" id="em-copy" title="Copy the whole message - header and body - to the clipboard">Copy email</button><button class="btn-out" id="em-reply-open" title="Write a reply and send it from the board">Reply</button><button class="btn-out" id="em-outlook" title="Open this message in Outlook on the web">Open in Outlook</button></div></div></div>
 <!-- One shared language picker for every translate trigger on the page. See the
      .tr-trigger CSS for why this is a single element rather than one per card. -->
 <div id="tr-pop" role="dialog" aria-label="Translate ticket">
@@ -4410,6 +5000,8 @@ th {
 </div>
 <!-- Intern com modal -->
 <div class="modal-bg" id="com-modal"><div class="modal" style="max-width:560px;"><div class="modal-head"><div style="flex:1;min-width:0;"><h2 id="com-title"></h2><div style="font-size:11px;color:var(--slate-400);margin-top:3px;" id="com-subtitle"></div></div><button class="modal-close-x" data-close="com-modal"></button></div><div class="tr-bar" id="com-tr-bar"></div><div class="com-thread" id="com-thread"></div><div class="compose-area"><div class="compose-label">Add internal comment</div><textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea><div class="compose-footer"><div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div><div style="display:flex;gap:8px;align-self:flex-end;"><button class="btn-out" id="com-debug-expert">Debug Expert</button><button class="btn-primary" id="com-post">Post</button></div></div></div></div></div>
+<!-- KPI drilldown: the tickets behind a red ("bad" tone) KPI card -->
+<div class="modal-bg" id="kpi-tickets-modal"><div class="modal" style="max-width:640px;"><div class="modal-head"><h2 id="kpi-tickets-title"></h2><button class="modal-close-x" data-close="kpi-tickets-modal"></button></div><div class="modal-body-scroll" id="kpi-tickets-list"></div><div class="modal-actions"><button class="btn-out" data-close="kpi-tickets-modal">Close</button></div></div></div>
 <!-- Mentions modal -->
 <div class="modal-bg" id="mentions-modal"><div class="modal" style="max-width:600px;"><div class="modal-head"><h2 id="mentions-title"> My Alerts</h2><div style="display:flex;align-items:center;gap:8px;"><button class="btn-out" id="mark-all-read" style="font-size:11px;padding:4px 10px;">Mark all read</button><button class="modal-close-x" data-close="mentions-modal"></button></div></div><div style="font-size:12px;color:var(--slate-500);padding:8px 18px 0;" id="mentions-info"></div><div style="display:flex;flex-direction:column;padding:14px 18px;overflow-y:auto;flex:1;" id="mentions-list"></div></div></div>
 <!-- Company custom property modal -->
@@ -4763,6 +5355,59 @@ function isInternalEmailAddress(value){const addr=String(value||'').trim().toLow
 function getClientEmail(emailObj){const sender=(emailObj?.sender||'').toLowerCase();if(!isInternalEmailAddress(sender))return sender||null;const recipients=Array.isArray(emailObj?.recipients)?emailObj.recipients:[];const client=recipients.find(r=>{if(!r||typeof r!=='string')return false;const rl=r.toLowerCase();if(SUPPORT_BOX_ALIASES.includes(rl))return false;if(isInternalEmailAddress(rl))return false;if(NO_REPLY_PATTERNS.some(p=>rl.includes(p)))return false;return true;});return client?client.toLowerCase():null;}
 function csAgentFromSenderEmail(sender){const addr=String(sender||'').trim().toLowerCase();if(!addr.includes('@'))return'';const domain=addr.split('@')[1]||'';if(!INTERNAL_EMAIL_DOMAINS.includes(domain))return'';const local=addr.split('@')[0].toUpperCase();return CS_AGENTS.includes(local)?local:'';}
 function supportAgentFromSenderEmail(sender){const addr=String(sender||'').trim().toLowerCase();if(!addr.includes('@'))return'';const domain=addr.split('@')[1]||'';if(!INTERNAL_EMAIL_DOMAINS.includes(domain))return'';const local=addr.split('@')[0].toUpperCase();return SUPPORT_AGENTS.includes(local)?local:'';}
+/* Which support agents the mail itself names.
+
+   When a CS agent or a client puts a support agent on the To/Cc line, that is
+   already the answer to "whose ticket is this" - it was just invisible to the
+   board, which assigned by workload instead and left CS to move it by hand. The
+   trigram is the mailbox local part (sgu@quinta.im -> SGU), so the roster and
+   the internal domains are all this needs.
+
+   Order is To-then-Cc as Graph returned it (mapMessage concatenates them in
+   that order), so the first name is the most likely owner rather than whoever
+   sorts first alphabetically. */
+function supportAgentsTaggedInEmail(emailObj){
+  const seen=new Set();
+  const tagged=[];
+  (Array.isArray(emailObj?.recipients)?emailObj.recipients:[]).forEach(addr=>{
+    const code=supportAgentFromSenderEmail(addr);
+    if(!code||seen.has(code))return;
+    seen.add(code);
+    tagged.push(code);
+  });
+  return tagged;
+}
+/* Where a ticket goes when the mail names nobody who can take it.
+
+   An admin, deliberately, rather than the least loaded agent. The mail's To/Cc
+   line is the only signal about whose ticket it is; when it carries none - no
+   colleague tagged, or only people who are not on the support roster (a client,
+   a CS agent, an admin account that cannot hold tickets) - nobody has actually
+   been asked to take it, and quietly spreading those across the team by
+   workload made them look assigned when they had never been triaged. They land
+   with an admin to hand out instead.
+
+   Only SUPPORT_AGENTS trigrams are valid here: the server independently
+   rejects anything else for this field (see the assignedAgent check in
+   upsertBoardTicketsToDatabase), so an admin who is not on that roster - AHK,
+   OWNER, or VGU, who is CS - cannot be given a ticket even by name. SGU is the
+   admin who is on it, which is why it is the fallback.
+
+   Fixed rather than computed on purpose: leastLoadedSupportAgent() is a
+   session-local sum, so two tabs could reach different answers for the same
+   untriaged ticket and flap it between them. */
+const FALLBACK_SUPPORT_OWNER='SGU';
+function fallbackSupportOwner(){
+  // Only if SGU is ever retired from the roster does workload decide again -
+  // an invalid assignee would be rejected on save and re-stamped on every
+  // render.
+  return normalizeSupportAgent(FALLBACK_SUPPORT_OWNER)||leastLoadedSupportAgent();
+}
+// Who a ticket lands on when nobody has chosen yet: the agent the mail names,
+// and failing that the admin above.
+function defaultSupportAgentForTicket(emailObj){
+  return supportAgentsTaggedInEmail(emailObj)[0]||fallbackSupportOwner();
+}
 function normalizeEmailList(values){return (Array.isArray(values)?values:[]).map(v=>String(v||'').trim().toLowerCase()).filter(Boolean);}
 function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(NO_REPLY_SUBJECTS.some(p=>tl.includes(p)))return true;if(/\b(newsletter|webinar|digest|event reminder)\b/.test(tl))return true;if(/(microsoft teams meeting|join microsoft teams meeting|meeting invitation|accepted:|declined:|tentative:)/.test(tl))return true;return false;}
 function normalizeThreadSubject(subject){return String(subject||'').toLowerCase().replace(/^\s*((re|fw|fwd)\s*:\s*)+/gi,'').replace(/\s+/g,' ').trim();}
@@ -4866,6 +5511,21 @@ let ticketAssigneeTouchedAt={};
 // for an auto-assign or a stale-tab overwrite is not the person responsible.
 // This carries the real actor and the reason through to the audit row.
 let ticketAssigneeBy={};
+/* Assignment ordering is decided by comparing timestamps, and those timestamps
+   were not all being read off the same clock. The board mints them with the
+   browser's Date.now(); everything they are compared against - the database
+   row, the audit event that records an assignment - is stamped by the server.
+   On a machine whose clock is a minute slow, every assignment made there was
+   born looking older than the value it was replacing, so the server's copy kept
+   winning and the ticket "went back to the previous agent by itself".
+
+   So mint them in the server's clock instead. The offset comes from
+   /api/shift/state, which the board already polls, and it is accurate to the
+   request latency rather than the millisecond - which is all that ordering
+   between two human actions needs. Zero until that first poll answers, which is
+   exactly today's behaviour, so nothing is worse off while it is unknown. */
+let serverClockOffset=0;
+function boardNow(){return Date.now()+serverClockOffset;}
 // Ring buffer of every assignment change, with the calling function. Assignment
 // has several writers (manual dropdown, workload auto-assign, DB merge, live
 // patches, reply-sender follow), so when one of them undoes another the only
@@ -4888,7 +5548,7 @@ function assignCaller(){
 function setTicketAssignee(id,agent,ts,source){
   if(!id)return false;
   const next=agent||'';
-  const stamp=Number(ts||Date.now());
+  const stamp=Number(ts||boardNow());
   const prev=ticketAssignee[id]||'';
   const prevTs=Number(ticketAssigneeTouchedAt[id]||0);
   if(ticketAssignee[id]===next&&prevTs>=stamp)return false;
@@ -4904,7 +5564,14 @@ function setTicketAssignee(id,agent,ts,source){
     const why=source||assignCaller();
     // A live-sync patch is someone else's change arriving; the actor is the
     // agent named in the patch, not whoever happens to be looking at this tab.
-    const actor=/^liveSync\//.test(why)?why.split('/')[1]:currentUser();
+    // "reconciled/..." is the third case: a value the server's merge or its
+    // database reconciliation decided, which belongs to nobody. Recording the
+    // session that carried it as the actor is what printed a CS agent's
+    // initials against a support reassignment - so record no actor at all, and
+    // let the audit view name it as the sync it was.
+    const actor=/^reconciled\//.test(why)?null
+      :/^liveSync\//.test(why)?why.split('/')[1]
+      :currentUser();
     ticketAssigneeBy[id]={by:actor,source:why,at:stamp,from:prev||''};
     logAssignChange({id:String(id),from:prev||'(none)',to:next||'(none)',result:'applied',ts:stamp,prevTs,by:why,actor,at:Date.now()});
   }
@@ -5037,7 +5704,54 @@ function currentUserRole(){
 function currentUserCanViewAllTickets(){
   return currentUserIsAdmin();
 }
+/* Handing a ticket to a support agent is CS's decision, not support's.
+
+   This used to be ticketVisibleToCurrentUser alone, which for a support agent
+   is "am I the assignee" - so the person holding a ticket could pass it to
+   somebody else, and CS only found out by noticing the initials had changed.
+   Support still sees who holds the ticket; the menu just does not open.
+
+   The server refuses the same change in applyRolePermissionsToStateWrite, so
+   this is only about not offering a control that would be rejected. */
+/* Which team the signed-in person is on, which is not the same question as
+   what their role column says.
+
+   Seven CS agents' accounts still carry the legacy 'agent' role, which
+   currentUserRole() reports as 'support'. Gating on the role alone would have
+   taken the CS review buttons away from half the CS team - the check this
+   replaced looked only at the trigram, for exactly that reason. The roster
+   settles it for anyone on it; the role covers everyone else. Mirrors
+   effectiveTeam() in server.js, which is what actually enforces this. */
+function currentUserTeam(){
+  if(currentUserIsAdmin())return'admin';
+  const role=currentUserRole();
+  const me=currentUser();
+  if(role==='cs'||CS_AGENTS.includes(me))return'cs';
+  if(SUPPORT_AGENTS.includes(me))return'support';
+  return role==='cs'?'cs':'support';
+}
 function currentUserCanAssignTicket(ticket){
+  if(currentUserIsAdmin())return true;
+  if(currentUserTeam()!=='cs')return false;
+  // Deliberately not ticketVisibleToCurrentUser: for a CS agent whose account
+  // still says 'agent' that helper asks "am I the assignee", which a CS agent
+  // never is, and would refuse them every ticket they own.
+  const me=normalizeCSAgent(currentUser());
+  const {csOwner}=ticketFilterAgentValues(ticket);
+  return !!me&&me===normalizeCSAgent(csOwner);
+}
+// Signing a resolved ticket off for good. Same rule, stated separately because
+// it is a different decision and reads better at both call sites than one
+// overloaded helper.
+function currentUserCanConfirmResolution(csOwner){
+  if(currentUserIsAdmin())return true;
+  if(currentUserTeam()!=='cs')return false;
+  const me=normalizeCSAgent(currentUser());
+  return !!me&&me===normalizeCSAgent(csOwner);
+}
+// Replying to the client is the work itself, so whoever holds the ticket can
+// do it: the support agent it is assigned to, the CS who owns it, or an admin.
+function currentUserCanReplyToTicket(ticket){
   if(currentUserIsAdmin())return true;
   return ticketVisibleToCurrentUser(ticket);
 }
@@ -5087,6 +5801,25 @@ async function apiGetTickets(){
 async function apiSaveState(payload){
   try{
     const res=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(payload)});
+    // The server drops CS-only changes out of a save made by someone who is
+    // not CS (see applyRolePermissionsToStateWrite) and says which. The rest of
+    // the save still succeeded, so this is not a failure - but it must not pass
+    // silently either, or the board would show a change that was never stored
+    // until the next reload quietly undid it.
+    if(res.ok){
+      const out=await res.json().catch(()=>null);
+      const refused=Array.isArray(out?.refused)?out.refused:[];
+      if(refused.length){
+        const fields=[...new Set(refused.map(r=>String(r?.field||'')))];
+        const what=fields.includes('ticketAssignee')&&fields.length===1
+          ?'Support assignment is CS-only - that change was not saved'
+          :'Confirming a resolved ticket is CS-only - that change was not saved';
+        showToast(what,'warn');
+        // Take the board back to what was actually stored rather than leaving
+        // the refused value on screen.
+        loadState().then(()=>renderActiveView()).catch(()=>{});
+      }
+    }
     return !!res.ok;
   }catch(_){}
   return false;
@@ -5468,7 +6201,11 @@ function applyBoardPatch(p){
         // as timestamp 1, not Date.now() - adopting the value is fine, but it
         // must not masquerade as a fresh decision and outrank a real assignment
         // made elsewhere a moment later.
-        if(setTicketAssignee(id,c.value,remoteTs>0?remoteTs:1,'liveSync/'+(p.actor||'?')))touched++;
+        // c.byActor is set only when the sending session's own payload asked
+        // for this value. Null means the server reconciled it - a merge, or the
+        // database's copy winning - and no agent is responsible for it.
+        const src=c.byActor?('liveSync/'+c.byActor):'reconciled/server';
+        if(setTicketAssignee(id,c.value,remoteTs>0?remoteTs:1,src))touched++;
         return;
       }
     }
@@ -5623,8 +6360,9 @@ async function loadState(){
 // Migrates pre-split data where a CS agent code sat in the support-assignee
 // slot. Runs at the end of every loadState, which makes it dangerous: it used
 // to pick a replacement with leastLoadedSupportAgent() - a session-local
-// calculation, so two tabs chose different agents and the ticket flapped - and
-// it cleared manualSupportOverride, destroying the protection a deliberate
+// calculation, so two tabs chose different agents and the ticket flapped (it
+// takes the fixed fallbackSupportOwner() now) - and it cleared
+// manualSupportOverride, destroying the protection a deliberate
 // assignment had just been given. Both are now fixed, and the migration is
 // recorded in the assignment log so a mass move can never again be invisible.
 function normalizeLegacyAssignmentModes(){
@@ -5638,7 +6376,7 @@ function normalizeLegacyAssignmentModes(){
       if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;
       // Never overwrite a deliberate assignment during a data migration.
       if(!manualSupportOverride[id]){
-        setTicketAssignee(id,leastLoadedSupportAgent(),undefined,'legacyMigration');
+        setTicketAssignee(id,fallbackSupportOwner(),undefined,'legacyMigration');
         migrated++;
       }
       ticketAssignmentMode[id]='support';
@@ -5727,6 +6465,8 @@ async function refreshShiftState(){
     const res=await fetch('/api/shift/state',{credentials:'include'});
     if(!res.ok)return;
     const out=await res.json();
+    const serverNow=Number(out?.serverNow||0);
+    if(serverNow>0)serverClockOffset=serverNow-Date.now();
     shiftAgents=out?.agents||{};
     shiftMe=out?.me||null;
     shiftTracked=!!shiftMe;
@@ -6471,7 +7211,7 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   if(clientEmail)ticketClientEmail[id]=clientEmail;
   ticketCategory[id]=category;
   if(subtype)ticketSubtype[id]=subtype;
-  setTicketAssignee(id,normalizeSupportAgent(document.getElementById('ct-agent').value)||leastLoadedSupportAgent());
+  setTicketAssignee(id,normalizeSupportAgent(document.getElementById('ct-agent').value)||fallbackSupportOwner());
   ticketAssignmentMode[id]='support';
   const creatorCS=currentUserCSAgent();
   if(creatorCS){ticketCSOwner[id]=creatorCS;manualCSOverride[id]=true;}
@@ -6537,6 +7277,9 @@ function showQtDetectView(){
   if(!currentUserIsAdmin()){showBoardView();return;}
   viewMode='qtDetect';setBoardChromeVisible(false);hidePrimaryViews();
   document.getElementById('qt-detect-view').style.display='block';
+  // Paints the empty state (or the previous run's results) rather than opening
+  // on a blank panel that reads as something having failed to load.
+  qtDetectRender();
   setSideNavActive('qtDetect');saveLastWorkspaceSession('qtDetect');
 }
 
@@ -6607,45 +7350,119 @@ function qtDetectExtractUrlsFromSpreadsheetText(text){
   return qtDetectParseUrls(candidates.filter(qtDetectLooksLikeUrl).join('\n'));
 }
 function qtDetectSetStatus(text){const el=document.getElementById('qt-detect-status');if(el)el.textContent=text;}
+/* Which outcome the results table is showing. A check of three hundred sites is
+   read by looking for the ones that went wrong, so the counts double as the
+   filter - clicking "12 failed" shows those twelve. Reset whenever a new run
+   starts, because a filter left over from the last list is a list that looks
+   mysteriously short. */
+let qtDetectFilter='all';
+
+function qtDetectOutcome(row){
+  if(row?.status!=='ok')return'err';
+  return row?.detected?'yes':'no';
+}
+
+function qtDetectEmptyHtml(title,detail){
+  return`<div class="qt-detect-empty">
+    <div class="qt-detect-empty-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 4.5 4.5"></path>
+      </svg>
+    </div>
+    <strong>${esc(title)}</strong>
+    <span>${esc(detail)}</span>
+  </div>`;
+}
+
+function qtDetectStatHtml(kind,value,label,active,total){
+  // Nothing of that kind means nothing to filter to, so the tile is inert
+  // rather than a button that appears to do nothing.
+  const dead=!value&&kind!=='all';
+  return`<button type="button" class="qt-detect-stat ${kind}" data-qt-filter="${kind}"
+    aria-pressed="${active?'true':'false'}"${dead?' disabled':''}
+    title="${dead?`No sites in this group`:`Show only ${esc(label)}`}">
+    <span class="qt-detect-stat-value">${value}</span>
+    <span class="qt-detect-stat-label">${esc(label)}${kind!=='all'&&total?` &middot; ${Math.round((value/total)*100)}%`:''}</span>
+  </button>`;
+}
+
 function qtDetectRender(){
   const box=document.getElementById('qt-detect-results');
   if(!box)return;
-  if(!qtDetectRows.length){box.innerHTML='';document.getElementById('qt-detect-export').disabled=true;return;}
-  document.getElementById('qt-detect-export').disabled=false;
-  const yes=qtDetectRows.filter(r=>r.detected).length;
-  const err=qtDetectRows.filter(r=>r.status!=='ok').length;
-  const no=qtDetectRows.length-yes-err;
-  const rows=qtDetectRows.map(r=>{
-    const cls=r.status!=='ok'?'err':(r.detected?'yes':'no');
-    const label=r.status!=='ok'?'Error':(r.detected?'Installed':'Not found');
-    const detail=r.status!=='ok'
-      ? esc(r.error||r.status||'')
-      : (r.detected?`${esc(r.marker||'')} in ${esc(r.via||'')}`:'no active embed');
-    return `<tr>
+  const exportBtn=document.getElementById('qt-detect-export');
+  if(!qtDetectRows.length){
+    box.innerHTML=qtDetectEmptyHtml(
+      'No sites checked yet',
+      'Paste the site URLs above, or upload a CSV or Excel column, then press Check sites.'
+    );
+    if(exportBtn)exportBtn.disabled=true;
+    return;
+  }
+  if(exportBtn)exportBtn.disabled=false;
+
+  const total=qtDetectRows.length;
+  const yes=qtDetectRows.filter(r=>qtDetectOutcome(r)==='yes').length;
+  const err=qtDetectRows.filter(r=>qtDetectOutcome(r)==='err').length;
+  const no=total-yes-err;
+  const shown=qtDetectFilter==='all'?qtDetectRows:qtDetectRows.filter(r=>qtDetectOutcome(r)===qtDetectFilter);
+
+  const summary=`<div class="qt-detect-summary">
+    ${qtDetectStatHtml('all',total,'checked',qtDetectFilter==='all',0)}
+    ${qtDetectStatHtml('yes',yes,'installed',qtDetectFilter==='yes',total)}
+    ${qtDetectStatHtml('no',no,'not found',qtDetectFilter==='no',total)}
+    ${qtDetectStatHtml('err',err,'failed',qtDetectFilter==='err',total)}
+  </div>`;
+
+  if(!shown.length){
+    box.innerHTML=summary+qtDetectEmptyHtml('Nothing in this group','Every site checked landed somewhere else - pick another count above.');
+    qtDetectBindFilters(box);
+    return;
+  }
+
+  const rows=shown.map(r=>{
+    const cls=qtDetectOutcome(r);
+    const label=cls==='err'?'Error':(cls==='yes'?'Installed':'Not found');
+    const evidence=cls==='err'
+      ? esc(r.error||r.status||'Unreachable')
+      : (r.detected
+        ? `${esc(r.marker||'embed')} in ${esc(r.via||'page')}`
+        : 'No active embed');
+    return`<tr>
       <td><span class="qt-pill ${cls}">${label}</span></td>
-      <td style="max-width:320px;word-break:break-all;">${esc(r.input||'')}${r.finalUrl&&r.finalUrl!==r.url?`<div style="color:var(--muted);">&rarr; ${esc(r.finalUrl)}</div>`:''}</td>
-      <td style="max-width:280px;word-break:break-all;color:var(--muted);">${detail}${r.src?`<div style="color:var(--muted);">${esc(String(r.src).slice(0,90))}</div>`:''}</td>
-      <td style="white-space:nowrap;color:var(--muted);">${r.httpStatus||'-'}</td>
-      <td style="white-space:nowrap;color:var(--muted);">${r.ms!=null?r.ms+'ms':'-'}</td>
+      <td class="qt-detect-site">${esc(r.input||'')}${r.finalUrl&&r.finalUrl!==r.url?`<div class="qt-detect-redirect">&rarr; ${esc(r.finalUrl)}</div>`:''}</td>
+      <td class="qt-detect-evidence">${evidence}${r.src?`<div><code>${esc(String(r.src).slice(0,90))}</code></div>`:''}</td>
+      <td class="qt-detect-num">${r.httpStatus||'&mdash;'}</td>
+      <td class="qt-detect-num">${r.ms!=null?`${r.ms} ms`:'&mdash;'}</td>
     </tr>`;
   }).join('');
-  box.innerHTML=`<div class="qt-detect-summary">
-      <span class="qt-detect-stat yes">${yes} installed</span>
-      <span class="qt-detect-stat no">${no} not found</span>
-      <span class="qt-detect-stat err">${err} failed</span>
-      <span class="qt-detect-stat">${qtDetectRows.length} checked</span>
-    </div>
-    <div class="qt-detect-table-wrap"><table class="qt-detect-table">
-      <thead><tr><th>Result</th><th>Site</th><th>Evidence</th><th>HTTP</th><th>Time</th></tr></thead>
+
+  box.innerHTML=summary+`<div class="qt-detect-table-wrap"><table class="qt-detect-table">
+      <thead><tr><th>Result</th><th>Site</th><th>Evidence</th><th class="qt-detect-num">HTTP</th><th class="qt-detect-num">Time</th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;
+  qtDetectBindFilters(box);
 }
+
+function qtDetectBindFilters(box){
+  box.querySelectorAll('[data-qt-filter]').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      const wanted=btn.dataset.qtFilter;
+      // Clicking the group you are already in goes back to everything, so the
+      // tiles work as a toggle and never trap you in a filtered view.
+      qtDetectFilter=(qtDetectFilter===wanted&&wanted!=='all')?'all':wanted;
+      qtDetectRender();
+    });
+  });
+}
+
 async function qtDetectRun(){
   if(qtDetectBusy)return;
   const urls=qtDetectParseUrls(document.getElementById('qt-detect-urls').value);
   if(!urls.length){qtDetectSetStatus('Add at least one URL.');return;}
   qtDetectBusy=true;
+  qtDetectFilter='all';
   const btn=document.getElementById('qt-detect-run');
   btn.disabled=true;
+  document.getElementById('qt-detect-status')?.classList.add('busy');
   qtDetectSetStatus(`Checking ${urls.length} site${urls.length>1?'s':''}...`);
   try{
     const res=await fetch('/api/qt-detect',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -6662,6 +7479,7 @@ async function qtDetectRun(){
     qtDetectSetStatus('Check failed: '+String(e?.message||e));
   }finally{
     qtDetectBusy=false;btn.disabled=false;
+    document.getElementById('qt-detect-status')?.classList.remove('busy');
   }
 }
 function qtDetectExportRows(){
@@ -6786,18 +7604,23 @@ async function renderAssignLogView(){
     // "How" distinguishes a deliberate dropdown change from workload
     // auto-assign or a patch that arrived from another agent's session.
     const src=String(r.source||'');
-    const how=/manual|applyTicketAgentSelection/i.test(src)?'Manual'
+    // A reconciled change is the server's own doing - a timestamp merge, or the
+    // database's copy of the assignee winning. It has no actor by design, so it
+    // must not fall back to naming the login whose save carried it.
+    const reconciled=/^reconciled/i.test(src);
+    const how=reconciled?'Database sync'
+      :/manual|applyTicketAgentSelection/i.test(src)?'Manual'
       :/liveSync/i.test(src)?'From '+esc(src.split('/')[1]||'another session')
       :/ensureSupportAssignment|leastLoaded|autoAssign|applyCompanyCS/i.test(src)?'Auto (workload)'
-      :/mergeDatabaseTickets|liveSync/i.test(src)?'Sync'
+      :/mergeDatabaseTickets/i.test(src)?'Sync'
       :src?esc(src):'-';
-    const actor=r.actor||r.account||'-';
+    const actor=r.actor||(reconciled?'system':r.account)||'-';
     return `<tr style="border-top:1px solid var(--border);${r.isRevert?'background:rgba(var(--rose-500-rgb,244,63,94),.07);':''}">
       <td style="padding:9px 12px;white-space:nowrap;color:var(--muted);">${when?esc(when.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})):'-'}</td>
       <td style="padding:9px 12px;"><div style="font-weight:700;">${ticketLabel}</div><div style="color:var(--muted);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.subject||'')}</div></td>
       <td style="padding:9px 12px;">${r.from?`<span class="agent-pill" style="--agent-accent:${agentColor(r.from)}">${esc(r.from)}</span>`:'<span style="color:var(--muted);">unassigned</span>'}</td>
       <td style="padding:9px 12px;">${r.to?`<span class="agent-pill" style="--agent-accent:${agentColor(r.to)}">${esc(r.to)}</span>`:'<span style="color:var(--muted);">unassigned</span>'}</td>
-      <td style="padding:9px 12px;white-space:nowrap;">${esc(actor)}${r.account&&r.account!==actor?`<div style="color:var(--muted);font-size:10.5px;">login: ${esc(r.account)}</div>`:''}</td>
+      <td style="padding:9px 12px;white-space:nowrap;">${esc(actor)}${!reconciled&&r.account&&r.account!==actor?`<div style="color:var(--muted);font-size:10.5px;">login: ${esc(r.account)}</div>`:''}${reconciled?`<div style="color:var(--muted);font-size:10.5px;">not an agent action</div>`:''}</td>
       <td style="padding:9px 12px;white-space:nowrap;">${how}${r.isRevert?`<div style="color:var(--rose-600,#e11d48);font-weight:800;font-size:10.5px;">REVERTED${r.revertedAfterSeconds!==null?` after ${r.revertedAfterSeconds}s`:''}</div>`:''}</td>
     </tr>`;
   }).join('');
@@ -6903,16 +7726,117 @@ function fmtHours(h){
   if(n<48)return`${Math.round(n*10)/10}h`;
   return`${Math.round(n/24*10)/10}d`;
 }
-function kpiCard(label,value,{tone='',hint=''}={}){
+// Every card carries the tickets behind its number so clicking one opens
+// them, rather than leaving the agent to go hunt through a filter to find
+// what's driving it. `category` cards fetch on demand from the server
+// (matching the currently active KPI filters); `rows` cards get their list
+// pre-supplied (used by the offline/local fallback view, which has no
+// server to ask).
+let kpiDrilldownSeq=0;
+let kpiDrilldownStore={};
+// The KPI view re-renders on a timer and on every filter change - without
+// this, every past render's row snapshots would stay reachable from this
+// module-global store for as long as the tab is open.
+function resetKpiDrilldownStore(){kpiDrilldownStore={};kpiDrilldownSeq=0;}
+function kpiCard(label,value,{tone='',hint='',rows=null,category=null}={}){
   const toneStyle=tone==='bad'?'border-color:var(--red-300);background:var(--red-50);'
     :tone==='warn'?'border-color:var(--amber-300);background:var(--amber-50);'
     :tone==='good'?'border-color:var(--green-200);background:var(--green-50);':'';
-  return`<div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;${toneStyle}">
+  const clickable=Array.isArray(rows)||!!category;
+  let dataAttr='';
+  if(clickable){
+    const key='kd'+(kpiDrilldownSeq++);
+    kpiDrilldownStore[key]={title:label,rows,category};
+    dataAttr=` data-kpi-drilldown="${key}" role="button" tabindex="0"`;
+  }
+  return`<div${dataAttr} style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;${toneStyle}${clickable?'cursor:pointer;':''}">
     <div style="font-size:12px;color:var(--legacy-666);">${esc(label)}</div>
     <div style="font-family:Caladea,serif;font-size:30px;">${esc(String(value))}</div>
     ${hint?`<div style="font-size:10px;color:var(--legacy-666);margin-top:2px;">${esc(hint)}</div>`:''}
   </div>`;
 }
+function showKpiTicketsPopup(title,rows,{loading=false,error=null,total=null}={}){
+  document.getElementById('kpi-tickets-modal').classList.add('open');
+  const list=document.getElementById('kpi-tickets-list');
+  if(loading){
+    document.getElementById('kpi-tickets-title').textContent=`${title}`;
+    list.innerHTML='<div style="padding:20px 0;color:var(--muted);font-size:13px;">Loading...</div>';
+    return;
+  }
+  if(error){
+    document.getElementById('kpi-tickets-title').textContent=`${title}`;
+    list.innerHTML=`<div style="padding:20px 0;color:var(--red-600);font-size:13px;">Failed to load: ${esc(error)}</div>`;
+    return;
+  }
+  const count=total!==null?total:rows.length;
+  const truncated=total!==null&&total>rows.length;
+  document.getElementById('kpi-tickets-title').textContent=`${title} (${count}${truncated?`, showing ${rows.length}`:''})`;
+  list.innerHTML=rows.length?rows.map(r=>`<div class="kpi-ticket-row" data-kpi-ticket="${esc(r.id||'')}">
+      <div style="min-width:0;">
+        <div style="font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.ticketNumber?esc(r.ticketNumber)+' ':''}${esc(r.subject||'(no subject)')}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px;">${esc(r.company||'')}${r.agent?'  '+esc(r.agent):''}${r.statusLabel?'  '+esc(r.statusLabel):''}</div>
+      </div>
+      <div style="font-size:11px;color:var(--red-600);font-weight:700;white-space:nowrap;">${esc(r.detail||'')}</div>
+    </div>`).join(''):'<div style="padding:20px 0;color:var(--muted);font-size:13px;">No tickets to show.</div>';
+}
+document.getElementById('kpi-tickets-list').addEventListener('click',e=>{
+  const row=e.target.closest('[data-kpi-ticket]');
+  if(!row||!row.dataset.kpiTicket)return;
+  const ticket=allTickets.find(t=>t.id===row.dataset.kpiTicket);
+  if(!ticket){showToast("Ticket isn't loaded on the board right now - it may be outside the board's current fetch window.");return;}
+  document.getElementById('kpi-tickets-modal').classList.remove('open');
+  openEmailModal(ticket);
+});
+// A rapid second click (a different card, or the same one again) must win
+// over a still-in-flight earlier fetch - otherwise a slower first response
+// can land after a faster second one and silently overwrite that popup with
+// the wrong card's tickets.
+let kpiDrilldownRequestSeq=0;
+async function openKpiDrilldown(key){
+  const entry=kpiDrilldownStore[key];
+  if(!entry)return;
+  if(Array.isArray(entry.rows)){
+    kpiDrilldownRequestSeq++;
+    showKpiTicketsPopup(entry.title,entry.rows);
+    return;
+  }
+  const requestId=++kpiDrilldownRequestSeq;
+  showKpiTicketsPopup(entry.title,[],{loading:true});
+  try{
+    const params=new URLSearchParams({category:entry.category,range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false'});
+    const res=await fetch('/api/tickets/kpis/drilldown?'+params.toString(),{credentials:'include'});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(data?.error||'drilldown_fetch_failed');
+    if(requestId!==kpiDrilldownRequestSeq)return;
+    const rows=(data.rows||[]).map(r=>({id:r.externalId,ticketNumber:r.ticketNumber,subject:r.subject,company:r.company,agent:r.agent,priority:r.priority,statusLabel:COL_NAMES[r.status]||r.status,detail:r.detail||''}));
+    showKpiTicketsPopup(entry.title,rows,{total:data.total});
+  }catch(error){
+    if(requestId!==kpiDrilldownRequestSeq)return;
+    showKpiTicketsPopup(entry.title,[],{error:String(error?.message||error)});
+  }
+}
+document.getElementById('kpi-sla-cards').addEventListener('click',e=>{
+  const card=e.target.closest('[data-kpi-drilldown]');
+  if(card)openKpiDrilldown(card.dataset.kpiDrilldown);
+});
+document.getElementById('kpi-sla-cards').addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ')return;
+  const card=e.target.closest('[data-kpi-drilldown]');
+  if(!card)return;
+  e.preventDefault();
+  openKpiDrilldown(card.dataset.kpiDrilldown);
+});
+document.getElementById('kpi-status-cards').addEventListener('click',e=>{
+  const card=e.target.closest('[data-kpi-drilldown]');
+  if(card)openKpiDrilldown(card.dataset.kpiDrilldown);
+});
+document.getElementById('kpi-status-cards').addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ')return;
+  const card=e.target.closest('[data-kpi-drilldown]');
+  if(!card)return;
+  e.preventDefault();
+  openKpiDrilldown(card.dataset.kpiDrilldown);
+});
 async function renderKpiView(){
   if(!currentUserCanViewAllTickets()){
     const role=currentUserRole();
@@ -6961,28 +7885,31 @@ async function renderKpiView(){
     document.getElementById('kpi-range-label').textContent=`Live DB tickets: ${totals.tickets||0} current (range: ${totals.rangeTickets||0})${dupNote}  ${data.range?.label||'Range'}  ${start} to ${end}  ${teamLabel}  ${agentLabel}`;
     kpiLastLoadedAt=Date.now();
     updateKpiFreshnessLabel();
-    document.getElementById('kpi-status-cards').innerHTML=`
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">New</div><div style="font-family:Caladea,serif;font-size:30px;">${s.new||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">In Progress</div><div style="font-family:Caladea,serif;font-size:30px;">${s.inp||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Waiting On Us</div><div style="font-family:Caladea,serif;font-size:30px;">${s.wus||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Due for test</div><div style="font-family:Caladea,serif;font-size:30px;">${s.dft||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Waiting On Contact</div><div style="font-family:Caladea,serif;font-size:30px;">${s.wct||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Resolved</div><div style="font-family:Caladea,serif;font-size:30px;">${s.res||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Tickets with CS</div><div style="font-family:Caladea,serif;font-size:30px;">${totals.ticketsWithCs||0}</div></div>
-      <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Jira Linked</div><div style="font-family:Caladea,serif;font-size:30px;">${totals.jiraLinked||0}</div></div>`;
     const compliance=sla.compliancePct;
+    const overdueDrilldownRows=(data.overdueRows||[]).map(r=>({id:r.externalId,ticketNumber:r.ticketNumber,subject:r.subject,company:r.company,agent:r.agent,priority:r.priority,statusLabel:COL_NAMES[r.status]||r.status,detail:fmtHours(r.overdueHours)+' overdue'}));
+    resetKpiDrilldownStore();
+    document.getElementById('kpi-status-cards').innerHTML=[
+      kpiCard('New',s.new||0,{category:'new'}),
+      kpiCard('In Progress',s.inp||0,{category:'inp'}),
+      kpiCard('Waiting On Us',s.wus||0,{category:'wus'}),
+      kpiCard('Due for test',s.dft||0,{category:'dft'}),
+      kpiCard('Waiting On Contact',s.wct||0,{category:'wct'}),
+      kpiCard('Resolved',s.res||0,{category:'res'}),
+      kpiCard('Tickets with CS',totals.ticketsWithCs||0,{category:'ticketsWithCs'}),
+      kpiCard('Jira Linked',totals.jiraLinked||0,{category:'jiraLinked'})
+    ].join('');
     document.getElementById('kpi-sla-cards').innerHTML=[
-      kpiCard('Overdue now',sla.overdue||0,{tone:(sla.overdue||0)>0?'bad':'good',hint:'Open, past SLA target'}),
-      kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left'}),
+      kpiCard('Overdue now',sla.overdue||0,{tone:(sla.overdue||0)>0?'bad':'good',hint:'Open, past SLA target',rows:overdueDrilldownRows}),
+      kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left',category:'atRisk'}),
       kpiCard('SLA met',compliance===null||compliance===undefined?'-':`${compliance}%`,{
         tone:compliance===null||compliance===undefined?'':(compliance>=90?'good':compliance>=75?'warn':'bad'),
-        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`}),
-      kpiCard('Avg resolve',fmtHours(sla.avgResolveShiftHours),{hint:`Median ${fmtHours(sla.medianResolveShiftHours)} - shift time`}),
-      kpiCard('Oldest open',fmtHours(sla.oldestOpenHours),{hint:'Wall clock since arrival'}),
-      kpiCard('Created',flow.created||0,{hint:'In this range'}),
-      kpiCard('Resolved',flow.resolved||0,{hint:`Net ${(flow.net||0)>0?'+':''}${flow.net||0} vs created`,tone:(flow.net||0)>0?'warn':''}),
-      kpiCard('Reopened',flow.reopened||0,{tone:(flow.reopened||0)>0?'warn':'',hint:'Left Resolved again'}),
-      kpiCard('Duplicates',totals.duplicates||0,{hint:`${totals.duplicatesResolvedInRange||0} resolved in range, not counted`})
+        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`,category:'slaMeasured'}),
+      kpiCard('Avg resolve',fmtHours(sla.avgResolveShiftHours),{hint:`Median ${fmtHours(sla.medianResolveShiftHours)} - shift time`,category:'slaMeasured'}),
+      kpiCard('Oldest open',fmtHours(sla.oldestOpenHours),{hint:'Wall clock since arrival',category:'oldestOpen'}),
+      kpiCard('Created',flow.created||0,{hint:'In this range',category:'created'}),
+      kpiCard('Resolved',flow.resolved||0,{hint:`Net ${(flow.net||0)>0?'+':''}${flow.net||0} vs created`,tone:(flow.net||0)>0?'warn':'',category:'resolved'}),
+      kpiCard('Reopened',flow.reopened||0,{tone:(flow.reopened||0)>0?'warn':'',hint:'Left Resolved again',category:'reopened'}),
+      kpiCard('Duplicates',totals.duplicates||0,{hint:`${totals.duplicatesResolvedInRange||0} resolved in range, not counted`,category:'duplicates'})
     ].join('');
     document.getElementById('kpi-overdue-rows').innerHTML=(data.overdueRows||[]).length
       ?data.overdueRows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
@@ -7110,11 +8037,14 @@ function renderKpiViewLocal(){
   const localSla=openLocal.map(t=>({t,status:getSLAStatus(t.id)})).filter(x=>x.status);
   const localOverdue=localSla.filter(x=>x.status.overdue);
   const localAtRisk=localSla.filter(x=>!x.status.overdue&&x.status.cls==='sla-urgent');
+  const localTicketRow=(t,detail)=>({id:t.id,ticketNumber:ticketDisplayNumber(t.id),subject:t.email?.subject||'(no subject)',company:companyForTicket(t)||'Unknown',agent:ticketAssignee[t.id]||'Unassigned',priority:ticketPriority[t.id]||t.priority||'Normal',statusLabel:COL_NAMES[normalizeTicketStage(ticketState[t.id]||'new')]||'',detail:detail||''});
+  const localOverdueDrilldownRows=localOverdue.map(({t,status})=>localTicketRow(t,status.text));
+  resetKpiDrilldownStore();
   document.getElementById('kpi-sla-cards').innerHTML=[
-    kpiCard('Overdue now',localOverdue.length,{tone:localOverdue.length?'bad':'good',hint:'Open, past SLA target'}),
-    kpiCard('At risk',localAtRisk.length,{tone:localAtRisk.length?'warn':'',hint:'Under 25% of target left'}),
-    kpiCard('Open tickets',openLocal.length,{hint:'Excluding duplicates'}),
-    kpiCard('Duplicates',duplicatesInView.length,{hint:'Excluded from every figure'})
+    kpiCard('Overdue now',localOverdue.length,{tone:localOverdue.length?'bad':'good',hint:'Open, past SLA target',rows:localOverdueDrilldownRows}),
+    kpiCard('At risk',localAtRisk.length,{tone:localAtRisk.length?'warn':'',hint:'Under 25% of target left',rows:localAtRisk.map(({t,status})=>localTicketRow(t,status.text))}),
+    kpiCard('Open tickets',openLocal.length,{hint:'Excluding duplicates',rows:openLocal.map(t=>localTicketRow(t))}),
+    kpiCard('Duplicates',duplicatesInView.length,{hint:'Excluded from every figure',rows:duplicatesInView.map(t=>localTicketRow(t,'Duplicate'))})
   ].join('');
   document.getElementById('kpi-overdue-rows').innerHTML=localOverdue.length
     ?localOverdue.sort((a,b)=>(b.status.shiftMs||0)-(a.status.shiftMs||0)).slice(0,25).map(({t,status})=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
@@ -7136,15 +8066,17 @@ function renderKpiViewLocal(){
         <td style="padding:8px 10px;">${esc(ticketDisplayNumber(duplicateMasterId(t.id)))}</td>
       </tr>`).join('')
     :'<tr><td colspan="5" style="padding:12px 10px;color:var(--legacy-666);">No duplicates marked.</td></tr>';
-  document.getElementById('kpi-status-cards').innerHTML=`
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">New</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.new}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">In Progress</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.inp}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Waiting On Us</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.wus}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Due for test</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.dft}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Waiting On Contact</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.wct}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Resolved</div><div style="font-family:Caladea,serif;font-size:30px;">${statusCounts.res}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Tickets with CS</div><div style="font-family:Caladea,serif;font-size:30px;">${ticketsWithCs}</div></div>
-    <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:12px;padding:12px;"><div style="font-size:12px;color:var(--legacy-666);">Unique CS</div><div style="font-family:Caladea,serif;font-size:30px;">${uniqueCsCount}</div></div>`;
+  const inRangeByStage=stage=>inRange.filter(t=>normalizeTicketStage(ticketState[t.id]||'new')===stage).map(t=>localTicketRow(t));
+  document.getElementById('kpi-status-cards').innerHTML=[
+    kpiCard('New',statusCounts.new,{rows:inRangeByStage('new')}),
+    kpiCard('In Progress',statusCounts.inp,{rows:inRangeByStage('inp')}),
+    kpiCard('Waiting On Us',statusCounts.wus,{rows:inRangeByStage('wus')}),
+    kpiCard('Due for test',statusCounts.dft,{rows:inRangeByStage('dft')}),
+    kpiCard('Waiting On Contact',statusCounts.wct,{rows:inRangeByStage('wct')}),
+    kpiCard('Resolved',statusCounts.res,{rows:inRangeByStage('res')}),
+    kpiCard('Tickets with CS',ticketsWithCs,{rows:inRange.filter(t=>ticketFilterAgentValues(t).csOwner).map(t=>localTicketRow(t,ticketFilterAgentValues(t).csOwner))}),
+    kpiCard('Unique CS',uniqueCsCount,{})
+  ].join('');
   const rows=Object.values(agentRows).sort((a,b)=>b.total-a.total||a.agent.localeCompare(b.agent));
   const maxStatus=Math.max(1,statusCounts.new,statusCounts.inp,statusCounts.wus,statusCounts.dft,statusCounts.wct,statusCounts.res);
   document.getElementById('kpi-status-chart').innerHTML=`
@@ -7717,7 +8649,7 @@ function ensureTicketCSOwnerResolved(id,emailObj){
   }
   return ticketCSOwner[id]||null;
 }
-function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:leastLoadedSupportAgent();const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){setTicketAssignee(id,supportAgent);ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]===undefined){manualSupportOverride[id]=false;changed=true;}return changed;}
+function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:defaultSupportAgentForTicket(emailObj);const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){setTicketAssignee(id,supportAgent);ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]===undefined){manualSupportOverride[id]=false;changed=true;}return changed;}
 function shouldRefreshHubspotCacheEntry(email){const ce=String(email||'').toLowerCase();if(!ce)return false;if(!(ce in hsCache))return true;const cached=hsCache[ce];const related=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&(ticketClientEmail[t.id]||getClientEmail(t.email))===ce);if(!related.length)return false;if(cached===null)return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);if(!cached||!cached.companyName||!cached.companyId||!cached.coOwner)return true;return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);}
 function applyCompanyCSAssignments(){let changed=0;let reassigned=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs&&!manualCSOverride[id]){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true})){changed++;reassigned++;}}});
   // Retiring an agent from SUPPORT_AGENTS makes every ticket they hold fail the
@@ -7962,13 +8894,22 @@ async function buildAgentUI(){
   });
 }
 const nextPriority=cur=>PRIORITIES[(PRIORITIES.indexOf(cur)+1)%PRIORITIES.length];
-function agentAssignMenuHtml(selected){
-  const renderGroup=(label,agents)=>`<div class="agent-assign-group">${label}</div>`+agents.map(a=>`
+/* The assign menu, with the mail's own answer at the top.
+
+   `tagged` is whoever the message put on To/Cc. They are listed first, under
+   their own heading, because a CS agent choosing an assignee should not have to
+   open the mail to remember who was named in it - and the full roster is still
+   right below, since being tagged is a strong hint rather than a rule. */
+function agentAssignMenuHtml(selected,tagged=[]){
+  const renderOption=(a,extra='')=>`
     <button class="agent-assign-option${a===selected?' active':''}" type="button" data-agent-pick="${esc(a)}">
-      <span>${esc(a)}</span>
+      <span>${esc(a)}${extra}</span>
       <span class="agent-assign-dot" style="background:${agentColor(a)}"></span>
-    </button>`).join('');
-  return renderGroup('Support',SUPPORT_AGENTS);
+    </button>`;
+  const renderGroup=(label,agents,extra='')=>agents.length?`<div class="agent-assign-group">${label}</div>`+agents.map(a=>renderOption(a,extra)).join(''):'';
+  const taggedList=(Array.isArray(tagged)?tagged:[]).filter(a=>SUPPORT_AGENTS.includes(a));
+  return renderGroup('Tagged in the email',taggedList,' <span style="opacity:.6;">in mail</span>')
+    +renderGroup(taggedList.length?'All support':'Support',SUPPORT_AGENTS);
 }
 
 function getAgentAssignMenuElement(wrap){
@@ -8063,13 +9004,22 @@ function resolvedReviewHtml(id,csOwner){
   const resolvedAt=resolvedAtForTicket(id);
   const remaining=Math.max(0,RESOLVED_RETENTION_MS-(Date.now()-resolvedAt));
   const hoursLeft=Math.ceil(remaining/(60*60*1000));
-  const role=String(currentSessionUser?.role||'').toLowerCase();
-  const canReview=role==='admin'||role==='owner'||normalizeCSAgent(currentUser())===normalizeCSAgent(csOwner);
+  // Support moves the card here; CS is who signs it off. The old test matched
+  // on the CS trigram alone, so a support agent who happened to be named in a
+  // ticket's CS field got both buttons and could confirm their own work.
+  const canReview=currentUserCanConfirmResolution(csOwner);
   const status=meta.sentBackAt?'Sent back by CS':`Auto-hides in ${hoursLeft||1}h unless CS sends it back`;
-  const actions=canReview?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"><button class="btn-primary" data-res-confirm="${id}" style="font-size:10px;padding:4px 8px;">Confirm resolved</button><button class="btn-out" data-res-sendback="${id}" style="font-size:10px;padding:4px 8px;">Send back</button></div>`:'';
+  const actions=canReview?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"><button class="btn-primary" data-res-confirm="${id}" style="font-size:10px;padding:4px 8px;">Confirm resolved</button><button class="btn-out" data-res-sendback="${id}" style="font-size:10px;padding:4px 8px;">Send back</button></div>`
+    // Not a disabled button: a greyed-out "Confirm resolved" reads as broken.
+    // Saying whose call it is answers the question the button would raise.
+    :`<div style="margin-top:5px;opacity:.75;">Waiting on ${csOwner?esc(normalizeCSAgent(csOwner)||csOwner):'CS'} to confirm - only CS can close this.</div>`;
   return`<div style="margin-top:7px;padding:7px 8px;border:1px solid var(--green-200);border-radius:8px;background:var(--green-50);color:var(--green-800);font-size:10px;line-height:1.35;"><strong>CS review</strong><div>${esc(status)}</div>${actions}</div>`;
 }
 function confirmTicketResolved(id){
+  if(!currentUserCanConfirmResolution(ticketCSOwner[id])){
+    showToast('Only the ticket CS can confirm a resolved ticket','warn');
+    return;
+  }
   ticketResolutionMeta[id]={...(ticketResolutionMeta[id]||{}),confirmedAt:Date.now(),confirmedBy:currentUser()};
   ticketArchived[id]={archivedAt:Date.now(),archivedBy:currentUser(),reason:'resolved_confirmed'};
   saveState('resolved_confirmed_by_cs');
@@ -8077,6 +9027,10 @@ function confirmTicketResolved(id){
   showToast('Resolved ticket confirmed and archived','ok');
 }
 async function sendResolvedTicketBack(id){
+  if(!currentUserCanConfirmResolution(ticketCSOwner[id])){
+    showToast('Only the ticket CS can send a resolved ticket back','warn');
+    return;
+  }
   const note=prompt('Add a note for why this ticket is being sent back:');
   if(note===null)return;
   const text=String(note||'').trim();
@@ -8170,24 +9124,103 @@ async function trLoadCachedFor(ticketId){
   }catch(_){return null;}
 }
 
-async function trRequest(ticketId,targetLang,segments,{force=false}={}){
-  const r=await fetch('/api/translate',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    credentials:'include',
-    body:JSON.stringify({ticketId,targetLang,segments,force})
-  });
-  const data=await r.json().catch(()=>({}));
+async function trRequestOnce(ticketId,targetLang,segments,{force=false}={}){
+  let r;
+  try{
+    r=await fetch('/api/translate',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'include',
+      body:JSON.stringify({ticketId,targetLang,segments,force})
+    });
+  }catch(err){
+    // fetch only rejects when the request never got an answer at all - the
+    // connection dropped, the pod restarted, the laptop lost wifi. It arrived
+    // here as a bare TypeError with no code, so trReportError printed
+    // "Translation failed: Failed to fetch" and the retry below never fired.
+    const e=new Error(`The connection to the translation service dropped before it answered (${String(err?.message||err)}).`);
+    e.code='translation_unreachable';
+    e.retryable=true;
+    throw e;
+  }
+  const data=await r.json().catch(()=>null);
   if(!r.ok){
-    const err=new Error(data?.message||data?.error||`Translation failed (${r.status})`);
-    err.code=data?.error;
-    err.retryable=!!data?.retryable;
+    // A body we cannot parse did not come from this app. Every failure the route
+    // itself raises is JSON carrying a reason; an unparseable 502/504 is the
+    // gateway in front of it giving up on a request that ran too long, and
+    // reporting that as a bare "Translation failed (502)" is what left agents
+    // with a status code and nothing to do about it.
+    if(!data){
+      const err=new Error(r.status===502||r.status===503||r.status===504
+        ?'The translation took too long and the connection was dropped before it finished. It may still be running - reopen the ticket in a moment and the finished translation will be there.'
+        :`The translation service answered ${r.status} with no reason given.`);
+      err.code='translation_gateway';
+      err.retryable=true;
+      throw err;
+    }
+    const err=new Error(data.message||data.error||`Translation failed (${r.status})`);
+    err.code=data.error;
+    err.retryable=!!data.retryable;
     throw err;
   }
   const langs=trCachedLangs.get(ticketId)||new Set();
   langs.add(data.targetLang);
   trCachedLangs.set(ticketId,langs);
   return data;
+}
+
+/* Why a failed translation request is worth repeating.
+
+   The common failure is not the engine refusing - it is a request that ran
+   long enough for something in between to give up on it, which is what agents
+   saw as "the translation took too long". The server, though, had usually
+   finished: it writes every result to the shared cache under a hash of the
+   exact segments that were sent. So the retry asks for the same chunk again and
+   is answered from that cache, immediately - the expensive work is not redone.
+   Even when the first attempt genuinely died mid-translation, a second pass at
+   one chunk is cheap next to making the agent re-translate the whole ticket.
+
+   Only failures that can plausibly come out differently are retried. A missing
+   API key, an exhausted free quota, an unsupported language pair and a ticket
+   over the size limit will all answer the same way forever, and retrying them
+   just makes the agent wait three times as long for the same sentence. */
+const TR_ATTEMPTS=3;
+function trRetryable(err){
+  const code=err?.code;
+  if(code==='translation_not_configured'
+    ||code==='translation_quota_exhausted'
+    ||code==='translation_target_unsupported'
+    ||code==='translation_source_undetected'
+    ||code==='translation_auth_failed'
+    ||code==='translation_refused'
+    ||code==='too_many_segments'
+    ||code==='content_too_large'
+    ||code==='no_translatable_segments'
+    ||code==='unsupported_target_lang'
+    ||code==='missing_ticket_id')return false;
+  if(code==='translation_gateway'||code==='translation_unreachable')return true;
+  return !!err?.retryable;
+}
+
+async function trRequest(ticketId,targetLang,segments,opts={}){
+  const{force=false}=opts;
+  let last=null;
+  for(let attempt=0;attempt<TR_ATTEMPTS;attempt++){
+    // Backing off rather than retrying straight away: the engine is either
+    // still busy with the attempt that just died, or it is rate limiting us,
+    // and an immediate second request makes both worse.
+    if(attempt)await new Promise(r=>setTimeout(r,1200*attempt));
+    try{
+      // force is honoured on the first attempt only. A retry must be allowed to
+      // take the cache entry the interrupted attempt left behind - that is
+      // precisely what makes retrying a dropped translation nearly free.
+      return await trRequestOnce(ticketId,targetLang,segments,{force:force&&attempt===0});
+    }catch(err){
+      last=err;
+      if(!trRetryable(err))throw err;
+    }
+  }
+  throw last;
 }
 
 // Turn an API failure into one sentence an agent can act on.
@@ -8201,7 +9234,7 @@ function trReportError(err){
     ||code==='translation_source_undetected'
     ||code==='translation_auth_failed'){showToast(err?.message||'Translation is unavailable','warn');return;}
   if(code==='translation_rate_limited'){showToast('Translation is rate limited right now - try again in a moment','warn');return;}
-  if(code==='translation_unreachable'){showToast(err?.message||'Could not reach the translation service','warn');return;}
+  if(code==='translation_unreachable'||code==='translation_gateway'){showToast(err?.message||'Could not reach the translation service','warn');return;}
   if(code==='too_many_segments'||code==='content_too_large'){showToast('This ticket is too long to translate in one go','warn');return;}
   if(code==='no_translatable_segments'){showToast('Nothing to translate on this ticket','warn');return;}
   showToast(`Translation failed: ${err?.message||'unknown error'}`);
@@ -8243,7 +9276,7 @@ function trTicketSegments(ticket){
   return segs;
 }
 
-async function trTranslateTicket(id,targetLang){
+async function trTranslateTicket(id,targetLang,{force=false}={}){
   if(trBusy.has(id))return;
   const ticket=allTickets.find(t=>t.id===id);
   if(!ticket)return;
@@ -8257,7 +9290,7 @@ async function trTranslateTicket(id,targetLang){
   renderBoard();
   const noteCount=segments.filter(s=>s.id.startsWith('n')).length;
   try{
-    const data=await trRequest(id,targetLang,segments);
+    const data=await trRequest(id,targetLang,segments,{force});
     const map=data.segments||{};
     trCardCache.set(id,{
       targetLang:data.targetLang,
@@ -8294,7 +9327,7 @@ async function trTranslateTicket(id,targetLang){
 // Called when the email modal finishes rendering a body. A ticket the agent has
 // already chosen to read in another language should not need a second click.
 function trAutoTranslateBody(id){
-  const lang=trTicketLang.get(id);
+  const lang=trTicketLang.get(id)||trCardCache.get(id)?.targetLang;
   if(!lang||!trShown.has(id))return;
   if(emTrState.ticketId!==id||emTrState.busy||emTrState.lang)return;
   trTranslateEmailBody(id,lang);
@@ -8505,10 +9538,10 @@ function trRevertTextNodes(undo){
 
 // Reset per opened ticket, so a translation can never be attributed to, or
 // reverted against, a different message.
-let emTrState={ticketId:null,lang:null,undo:null,subjectOriginal:null,sourceLangName:null,busy:false};
+let emTrState={ticketId:null,lang:null,undo:null,subjectOriginal:null,sourceLangName:null,busy:false,progress:null};
 
 function trResetEmailState(ticketId){
-  emTrState={ticketId,lang:null,undo:null,subjectOriginal:null,sourceLangName:null,busy:false};
+  emTrState={ticketId,lang:null,undo:null,subjectOriginal:null,sourceLangName:null,busy:false,progress:null};
 }
 
 function trRenderEmailBar(){
@@ -8519,13 +9552,59 @@ function trRenderEmailBar(){
   const on=!!emTrState.lang;
   const busy=emTrState.busy;
   const label=busy?'...':(on?trShortCode(emTrState.lang):trShortCode(trPreferredLang()));
-  let html=`<button class="tr-trigger${on?' active':''}${busy?' busy':''}" data-tr-em-trigger="1" title="Translate this message"${busy?' disabled':''}><span class="tr-glyph">&#127760;</span><span>${esc(busy?'Translating':`Translate (${label})`)}</span></button>`;
+  // A long thread is many requests, and a button that reads "Translating" for
+  // two minutes is indistinguishable from one that has hung. Counting the parts
+  // is what tells the agent it is still moving.
+  const prog=busy&&emTrState.progress&&emTrState.progress.total>1
+    ?` ${emTrState.progress.done}/${emTrState.progress.total}`:'';
+  let html=`<button class="tr-trigger${on?' active':''}${busy?' busy':''}" data-tr-em-trigger="1" title="Translate this message"${busy?' disabled':''}><span class="tr-glyph">&#127760;</span><span>${esc(busy?`Translating${prog}`:`Translate (${label})`)}</span></button>`;
   if(on){
     const from=emTrState.sourceLangName||'the original';
     html+=`<span class="tr-banner-note">Machine translation - ${esc(from)} &rarr; ${esc(trLangName(emTrState.lang))}</span>`
       +`<button class="tr-trigger" data-tr-em-original="1">Show original</button>`;
   }
+  // Sits at the end of the bar: it is a reading preference, not part of the
+  // translation flow, and the translate control has to stay the first thing.
+  const themed=emSheetThemed();
+  html+=`<button class="tr-trigger${themed?' active':''}" data-em-sheet="1" style="margin-left:auto" `
+    +`title="${esc(themed
+      ? 'Showing the message in the platform theme. Switch back to see the colors the client actually sent.'
+      : "Showing the message as the client sent it, on a white sheet. Switch to the platform theme if you'd rather it matched the rest of the board.")}">`
+    +`${esc(themed?'Platform theme':'Original colors')}</button>`;
   bar.innerHTML=html;
+}
+
+/* A real mail body is nothing like a card: a thread with a quoted history, a
+   signature and a legal footer runs to hundreds of separate text runs, and the
+   server refuses a request over its per-request ceilings. The email path used
+   to hand the whole body over in one go and, when that was too big, print
+   "over the limit" and leave the agent reading the original - which is what
+   "the translation does not work when I open a ticket" looked like from the
+   outside. Split it into requests the server will accept instead. Segment ids
+   stay globally indexed, so each chunk is its own cache entry and the results
+   merge back into one map. */
+// How much work one request carries. Small on purpose - see the note where
+// these are used. Overridable per environment only in the sense that the server
+// limits still cap them; they are otherwise deliberately fixed, because the
+// number that matters is wall-clock per request and that does not vary with the
+// ticket.
+const TR_CHUNK_SEGMENTS=40;
+const TR_CHUNK_CHARS=4000;
+
+function trChunkSegments(segments,maxSegments,maxChars){
+  const chunks=[];
+  let current=[],chars=0;
+  for(const seg of segments){
+    // A single run over the char budget still has to go somewhere - its own
+    // chunk, rather than being split mid-sentence.
+    if(current.length&&(current.length>=maxSegments||chars+seg.text.length>maxChars)){
+      chunks.push(current);current=[];chars=0;
+    }
+    current.push(seg);
+    chars+=seg.text.length;
+  }
+  if(current.length)chunks.push(current);
+  return chunks;
 }
 
 async function trTranslateEmailBody(id,targetLang){
@@ -8548,19 +9627,58 @@ async function trTranslateEmailBody(id,targetLang){
   const subject=String(titleEl.textContent||'').trim();
   if(subject)segments.unshift({id:'subject',text:subject});
   if(!segments.length){showToast('Nothing to translate in this message','warn');return;}
-  if(segments.length>trLimits.maxSegments){
-    showToast(`This message has ${segments.length} text runs, over the ${trLimits.maxSegments} limit`,'warn');
-    return;
-  }
+  const chunks=trChunkSegments(
+    segments,
+    // Not the server's ceiling. The ceiling says what one request is *allowed*
+    // to carry (600 runs, 200k characters); it says nothing about how long that
+    // request will take, and the local models translate at a few hundred
+    // characters a second. Chunking at the ceiling put a whole thread in one
+    // request that ran for minutes and was then killed by the proxy in front of
+    // this app - which is exactly what "the translation took too long" was.
+    // Sized for a request that comes back in seconds instead, so nothing in the
+    // path has a reason to give up, each part is cached the moment it lands, and
+    // a retry only ever re-does one part.
+    Math.max(1,Math.min(TR_CHUNK_SEGMENTS,trLimits.maxSegments||TR_CHUNK_SEGMENTS)),
+    Math.max(1000,Math.min(TR_CHUNK_CHARS,Math.floor((trLimits.maxChars||200000)*0.9)))
+  );
 
   emTrState.busy=true;
+  emTrState.progress={done:0,total:chunks.length};
   trRenderEmailBar();
   try{
-    const data=await trRequest(id,targetLang,segments);
-    const map=data.segments||{};
-    // The modal can be closed, or moved to another ticket, while this is in
-    // flight - writing into it then would corrupt whatever is on screen now.
-    if(emTrState.ticketId!==id)return;
+    const map={};
+    let data=null;
+    let failed=null;
+    for(const chunk of chunks){
+      try{
+        const part=await trRequest(id,targetLang,chunk);
+        // The modal can be closed, or moved to another ticket, while this is in
+        // flight - writing into it then would corrupt whatever is on screen now,
+        // and there is no point paying for the chunks that are left.
+        if(emTrState.ticketId!==id)return;
+        Object.assign(map,part.segments||{});
+        // The first answer names the source language. "Cached" only holds if
+        // every chunk was a hit, otherwise the toast would claim a translation
+        // that was just paid for.
+        data=data?{...data,cached:data.cached&&part.cached}:part;
+      }catch(err){
+        if(emTrState.ticketId!==id)return;
+        // One part that will not translate is no longer the whole message's
+        // problem. Every other part is already paid for and readable, and a
+        // thread whose quoted history or legal footer failed is still worth
+        // reading in the agent's language - so keep going and say afterwards
+        // that some of it is still in the original.
+        failed=failed||err;
+        // Nothing has translated yet and this failure will not come out
+        // differently - no key configured, quota gone, no model for this
+        // language pair. That is the whole message's problem, not this part's,
+        // so stop rather than asking the same dead question once per chunk.
+        if(!data&&!trRetryable(err))break;
+      }
+      emTrState.progress.done++;
+      trRenderEmailBar();
+    }
+    if(!data){if(failed)trReportError(failed);return;}
     if(typeof map.subject==='string'){
       emTrState.subjectOriginal=subject;
       titleEl.textContent=map.subject;
@@ -8568,13 +9686,18 @@ async function trTranslateEmailBody(id,targetLang){
     emTrState.undo=trApplyTextNodes(nodes,'b',map);
     emTrState.lang=data.targetLang;
     emTrState.sourceLangName=data.sourceLangName||data.sourceLang||null;
-    showToast(data.cached
-      ?`Showing cached ${trLangName(data.targetLang)} translation`
-      :`Message translated to ${trLangName(data.targetLang)}`,'ok');
+    if(failed){
+      showToast(`Translated to ${trLangName(data.targetLang)}, but part of this message could not be: ${failed.message||'unknown error'}`,'warn');
+    }else{
+      showToast(data.cached
+        ?`Showing cached ${trLangName(data.targetLang)} translation`
+        :`Message translated to ${trLangName(data.targetLang)}`,'ok');
+    }
   }catch(err){
     trReportError(err);
   }finally{
     emTrState.busy=false;
+    emTrState.progress=null;
     trRenderEmailBar();
   }
 }
@@ -8683,7 +9806,8 @@ window.addEventListener('scroll',()=>{if(trPopAnchor)trPositionPop(trPopAnchor);
 document.getElementById('em-tr-bar')?.addEventListener('click',ev=>{
   const trigger=ev.target.closest('[data-tr-em-trigger]');
   if(trigger){ev.stopPropagation();if(emTrState.ticketId)trOpenPop(trigger,emTrState.ticketId,'email');return;}
-  if(ev.target.closest('[data-tr-em-original]')){ev.stopPropagation();trRevertEmailBody();}
+  if(ev.target.closest('[data-tr-em-original]')){ev.stopPropagation();trRevertEmailBody();return;}
+  if(ev.target.closest('[data-em-sheet]')){ev.stopPropagation();emToggleSheetMode();}
 });
 document.getElementById('com-tr-bar')?.addEventListener('click',ev=>{
   const trigger=ev.target.closest('[data-tr-com-trigger]');
@@ -8691,25 +9815,25 @@ document.getElementById('com-tr-bar')?.addEventListener('click',ev=>{
   if(ev.target.closest('[data-tr-com-original]')){ev.stopPropagation();trRevertNotes();}
 });
 
-async function trForceRetranslateCard(id,lang){
-  const ticket=allTickets.find(t=>t.id===id);
-  if(!ticket)return;
-  trBusy.add(id);renderBoard();
-  try{
-    const data=await trRequest(id,lang,trCardSegments(ticket),{force:true});
-    trCardCache.set(id,{targetLang:data.targetLang,sourceLang:data.sourceLang,sourceLangName:data.sourceLangName,segments:data.segments||{}});
-    trShown.add(id);
-    showToast(`Re-translated to ${trLangName(data.targetLang)}`,'ok');
-  }catch(err){trReportError(err);}
-  finally{trBusy.delete(id);renderBoard();}
+/* "Re-translate (ignore cache)" for the whole ticket. It used to have its own
+   copy of the request/apply logic, which called a trCardSegments() that does
+   not exist - so the button only ever produced "Translation failed:
+   trCardSegments is not defined", and worse, it never wrote the ticket's
+   remembered language, so a ticket that got here stopped auto-translating its
+   body on open. One path now, with force threaded through it. */
+function trForceRetranslateCard(id,lang){
+  return trTranslateTicket(id,lang,{force:true});
 }
 
 function makeCard(ticket,isNew=false){
   const{email,id}=ticket;
   ensureTicketNumber(id);
   const priority=ticketPriority[id]||ticket.priority;
-  const agent=normalizeSupportAgent(ticketAssignee[id])||leastLoadedSupportAgent();
+  const agent=normalizeSupportAgent(ticketAssignee[id])||defaultSupportAgentForTicket(email);
   if(ticketAssignee[id]!==agent)setTicketAssignee(id,agent);
+  // Who the mail put on the To/Cc line, for the assign menu and the hint next
+  // to it. Computed once per card rather than per control.
+  const taggedSupport=supportAgentsTaggedInEmail(email);
   const csOwner=ensureTicketCSOwnerResolved(id,email)||normalizeCSAgent(ticketCSOwner[id]||'');
   const showCSBadge=!!csOwner;
   const canAssign = currentUserCanAssignTicket(ticket);
@@ -8830,13 +9954,14 @@ function makeCard(ticket,isNew=false){
         ${dupMasterId?'':`<button class="btn-out" data-dup-open="${id}" title="Mark this ticket as a duplicate of another one" style="font-size:10px;padding:2px 7px;">Duplicate</button>`}
         <button class="btn-out" data-archive="${id}" title="Archive this ticket" style="font-size:10px;padding:2px 7px;"> Archive</button>
         <div class="agent-assign-wrap" data-agent-menu="${id}">
-          <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? 'Assign support agent' : 'Only admins and the ticket CS can change support assignment'}"${canAssign ? '' : ' disabled'}>
+          <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? (taggedSupport.length?`Assign support agent - tagged in the email: ${esc(taggedSupport.join(', '))}` : 'Assign support agent') : 'Only admins and the ticket CS can change support assignment'}"${canAssign ? '' : ' disabled'}>
             <span class="agent-assign-label">${esc(agent)}</span>
             <span class="agent-assign-chevron">v</span>
           </button>
-          <div class="agent-assign-menu" data-agent-menu-id="${id}">${agentAssignMenuHtml(agent)}</div>
+          <div class="agent-assign-menu" data-agent-menu-id="${id}">${agentAssignMenuHtml(agent,taggedSupport)}</div>
         </div>
         ${showCSBadge?`<span class="agent-badge-card" style="background:${agentColor(csOwner)};opacity:.75;cursor:default;" title="CS owner">${csOwner} CS</span>`:''}
+        ${taggedSupport.length&&taggedSupport[0]!==agent?`<span class="agent-badge-card" style="background:${agentColor(taggedSupport[0])};opacity:.55;cursor:default;" title="Tagged in the email: ${esc(taggedSupport.join(', '))} - CS can assign it to them">@${esc(taggedSupport[0])} in mail</span>`:''}
       </div>
     </div>
     ${inlineSectionHtml}`;
@@ -9052,13 +10177,20 @@ function trIndexInlineImages(list){
   const byKey=new Map();
   const add=(k,x)=>{const key=String(k||'').replace(/^<|>$/g,'').trim().toLowerCase();if(key&&!byKey.has(key))byKey.set(key,x);};
   list.forEach(x=>{
-    if(!x.dataUrl)return;
+    if(!emImageSrc(x))return;
     add(x.contentId,x);
     add(String(x.contentId||'').split('@')[0],x);
     add(x.name,x);
   });
   return byKey;
 }
+
+// Where the bytes for one attachment come from. `url` is the server streaming
+// the picture out of the mail store one request at a time, which is what it now
+// sends; `dataUrl` is the old inline base64, kept so a browser holding a cached
+// copy of this page against an older server still renders its pictures rather
+// than deleting them.
+function emImageSrc(x){return x&&(x.url||x.dataUrl)||'';}
 
 // Remote images in a signature (a CDN behind auth, a host that is simply gone,
 // a tracking pixel) cannot be made to load from here. Leaving the element
@@ -9104,15 +10236,36 @@ function renderEmailBodyWithImages(body,images){
   // A cid: table/cell background can never resolve either, and unlike an <img>
   // it fails silently - drop the attribute so the mail's own colors apply.
   wrap.querySelectorAll('[background^="cid:" i]').forEach(el=>el.removeAttribute('background'));
+
+  // Which cid: references the keyed lookup can actually serve, and which images
+  // no reference reaches. When both sets are non-empty and the same size, the
+  // body and the mailbox are describing the same pictures under names that do
+  // not match, so document order is a better answer than deleting them - see
+  // the fallback in the loop below.
+  const cidOf=img=>String(img.getAttribute('src')||'').trim().match(/^cid:(.+)$/i)?.[1]?.replace(/^<|>$/g,'').toLowerCase()||'';
+  const cidImgs=[...wrap.querySelectorAll('img')].map(cidOf).filter(Boolean);
+  const hit=cid=>inlineByCid.get(cid)||inlineByCid.get(cid.split('@')[0]);
+  const missCount=cidImgs.filter(cid=>!hit(cid)).length;
+  const placed=new Set(cidImgs.map(hit).filter(Boolean).map(x=>x.id||x.contentId));
+  const spare=list.filter(x=>emImageSrc(x)&&!placed.has(x.id||x.contentId));
+  const unmatched=(missCount>0&&missCount===spare.length)?spare.slice():[];
+
   wrap.querySelectorAll('img').forEach(img=>{
     const src=String(img.getAttribute('src')||'').trim();
-    const cid=src.match(/^cid:(.+)$/i)?.[1]?.replace(/^<|>$/g,'').toLowerCase();
+    const cid=cidOf(img);
     if(cid){
       // A cid: src is only meaningful inside the mail store - a browser can
       // never fetch it. Either we swap in the bytes, or we drop the element:
       // leaving it renders a broken-image icon and hides the fact that the
       // picture is available in the gallery below.
-      const found=inlineByCid.get(cid)||inlineByCid.get(cid.split('@')[0]);
+      let found=inlineByCid.get(cid)||inlineByCid.get(cid.split('@')[0]);
+      // Last resort before deleting somebody's screenshot: if the message
+      // carries exactly as many unplaced images as the body has unresolved
+      // cid: references, the two lists are the same pictures under names that
+      // did not match, so pair them off in document order. Outlook and Graph
+      // disagreeing about contentId spelling is the whole reason the lookup
+      // above has three keys, and this is the case where all three miss.
+      if(!found&&unmatched.length)found=unmatched.shift();
       if(!found){
         // Nothing to swap in - the bytes never came back from the mail store.
         // An unlabelled one is signature decoration (a divider, a social icon,
@@ -9123,9 +10276,9 @@ function renderEmailBodyWithImages(body,images){
         else img.remove();
         return;
       }
-      img.src=found.dataUrl;
+      img.src=emImageSrc(found);
       img.alt=img.alt||found.name||'Email image';
-      used.add(found.id||found.contentId||found.dataUrl);
+      used.add(found.id||found.contentId||emImageSrc(found));
     }else if(location.protocol==='https:'&&/^http:\/\//i.test(src)){
       // The board is served over TLS, so a plain-http image in a signature is
       // blocked as mixed content before the request is even made - a broken
@@ -9141,11 +10294,12 @@ function renderEmailBodyWithImages(body,images){
   // actually substituted, not on isInline. Outlook marks a pasted screenshot
   // inline whether or not the body ends up referencing its cid, and filtering
   // on the flag made those images vanish from the ticket entirely.
-  const visible=list.filter(x=>x.dataUrl&&!used.has(x.id||x.contentId||x.dataUrl));
+  const visible=list.filter(x=>emImageSrc(x)&&!used.has(x.id||x.contentId||emImageSrc(x)));
   if(visible.length){
     const gallery=document.createElement('div');
     gallery.className='email-image-attachments';
-    gallery.innerHTML=visible.map(x=>`<a class="email-image-attachment" href="${esc(x.dataUrl)}" target="_blank" rel="noopener noreferrer"><img src="${esc(x.dataUrl)}" alt="${esc(x.name||'Email image')}" loading="lazy" decoding="async"><span>${esc(x.name||'Email image')}</span></a>`).join('');
+    gallery.innerHTML=visible.map(x=>{const u=esc(emImageSrc(x));const n=esc(x.name||'Email image');
+      return `<a class="email-image-attachment" href="${u}" target="_blank" rel="noopener noreferrer"><img src="${u}" alt="${n}" loading="lazy" decoding="async"><span>${n}</span></a>`;}).join('');
     wrap.firstElementChild.appendChild(gallery);
   }
   // The node, not its innerHTML: the error handlers above are the whole point
@@ -9153,8 +10307,697 @@ function renderEmailBodyWithImages(body,images){
   return wrap.firstElementChild;
 }
 
+/* ------------------------------------------------------- copy on open
+
+   Agents were opening the ticket, then opening the message itself in Outlook,
+   only to select-all and copy it into HubSpot, a Jira description or a reply.
+   The modal does that for them: the moment the message is on screen it is also
+   on the clipboard - the header the ticket shows (client, dates, SLA, company,
+   Jira, HubSpot) followed by the body as the client sent it. Two flavours go on
+   the clipboard at once, so a paste into anything rich keeps the formatting and
+   the tables, and a paste into a plain box gets readable text rather than
+   markup. Opening the mail in Outlook is no longer part of the flow. */
+
+// The ticket the email modal is currently showing, so the Copy button can
+// re-copy without going hunting for it.
+let emCurrentTicket=null;
+
+// What lands on the clipboard. Read off the modal's own DOM rather than rebuilt
+// from the ticket, so what is copied is exactly what the agent is looking at -
+// including a translation, if one is showing by then.
+function emCopyPayload(){
+  const title=String(document.getElementById('em-title')?.textContent||'').trim();
+  const meta=document.getElementById('em-meta');
+  const host=document.getElementById('em-body');
+  if(!host)return null;
+  // Direct children only: the SLA entry nests spans inside its own, and
+  // collecting those too would print every clock twice.
+  const metaLines=meta?[...meta.querySelectorAll(':scope > span')].map(s=>s.textContent.replace(/\s+/g,' ').trim()).filter(Boolean):[];
+  // The white sheet is the message. Anything else in the host - a spinner, a
+  // "the images did not load" notice - is our chrome and has no business on
+  // somebody's clipboard.
+  const sheet=host.querySelector('.email-body-content');
+  if(!sheet)return null;
+  const bodyText=(sheet.innerText||sheet.textContent||'').replace(/\n{3,}/g,'\n\n').trim();
+  const header=[title,...metaLines].filter(Boolean).join('\n');
+  const html=`<div>${title?`<div style="font-size:16px;font-weight:700;margin-bottom:6px;">${esc(title)}</div>`:''}`
+    +(metaLines.length?`<div style="font-size:12px;color:#475569;margin-bottom:10px;">${metaLines.map(esc).join('<br>')}</div>`:'')
+    +`${sheet.innerHTML}</div>`;
+  return {text:`${header}\n\n${bodyText}`.trim(),html};
+}
+
+// Last resort for a browser that refuses the async clipboard: a hidden textarea
+// and the old command. Plain text only, which is why it is not the first choice.
+function emCopyFallback(text){
+  try{
+    const ta=document.createElement('textarea');
+    ta.value=text;
+    ta.setAttribute('readonly','');
+    ta.style.cssText='position:fixed;top:-1000px;left:-1000px;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok=document.execCommand('copy');
+    ta.remove();
+    return ok;
+  }catch(_){return false;}
+}
+
+/* auto=true is the copy that happens by itself when a ticket opens: it must not
+   nag. A clipboard write needs the tab focused and the permission granted, and
+   an agent who alt-tabbed away mid-load does not need a red toast about it -
+   the Copy email button is right there. A copy they actually clicked always
+   says what happened. */
+async function emCopyEmail({auto=false}={}){
+  const p=emCopyPayload();
+  if(!p||!p.text){if(!auto)showToast('There is nothing to copy yet - the message has not loaded','warn');return false;}
+  try{
+    if(navigator.clipboard&&typeof ClipboardItem!=='undefined'){
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/html':new Blob([p.html],{type:'text/html'}),
+        'text/plain':new Blob([p.text],{type:'text/plain'})
+      })]);
+    }else if(navigator.clipboard?.writeText){
+      await navigator.clipboard.writeText(p.text);
+    }else if(!emCopyFallback(p.text)){
+      throw new Error('this browser blocks clipboard writes');
+    }
+    showToast(auto?'Email copied - paste it wherever you need it':'Email copied to the clipboard','ok');
+    return true;
+  }catch(err){
+    if(emCopyFallback(p.text)){showToast('Email copied as plain text','ok');return true;}
+    if(!auto)showToast(`Could not copy the email: ${String(err?.message||err)}`,'warn');
+    return false;
+  }
+}
+
+document.getElementById('em-copy')?.addEventListener('click',()=>emCopyEmail());
+
+/* ===================== Replying without leaving the board =================
+
+   The Reply button opens a composer under the message: From, To, Cc, the text,
+   and Send. The reply is drafted and sent by the server through Graph's
+   createReply, so it lands in the client's existing thread rather than starting
+   a new one - see /api/tickets/:externalId/reply.
+
+   Three things are deliberately the client's job here and not the server's:
+
+   - the prefill. To is the client, Cc is everyone else who was on the original
+     mail bar the helpdesk mailbox, which is the reply-all an agent would have
+     made in Outlook, still editable before it goes.
+   - the internal note. A reply that leaves no trace on the board is a reply
+     nobody else on the team knows about, so the text is posted to the ticket's
+     thread as well.
+   - moving the ticket to Waiting on Contact, because that is what answering a
+     client means, offered as a checkbox rather than done silently.
+
+   Whether replying is possible at all is asked once per session and cached:
+   the connection can be missing, or consented before Mail.Send existed, and it
+   is better to say so on the button than to let someone write a reply that
+   cannot be sent. */
+let emReplyCapability=null;
+let emReplySending=false;
+
+async function emLoadReplyCapability(force=false){
+  if(emReplyCapability&&!force)return emReplyCapability;
+  try{
+    const res=await fetch('/api/reply/from-addresses',{credentials:'include'});
+    emReplyCapability=res.ok
+      ?await res.json()
+      :{canSend:false,connected:false,scopeConfigured:false,sendVia:'graph',addresses:[]};
+  }catch(_){
+    emReplyCapability={canSend:false,connected:false,scopeConfigured:false,sendVia:'graph',addresses:[]};
+  }
+  return emReplyCapability;
+}
+
+/* Drop the cached answer to "can this board send" when a failure suggests it is
+   out of date. The usual sequence after a refusal is that somebody reconnects
+   Outlook or is granted Send As, and a cached capability would keep telling
+   them the old story - including naming the wrong connected account - until
+   they reloaded the page. */
+function emForgetReplyCapability(payload){
+  const code=String(payload?.error||'');
+  if(code.startsWith('m365_')||code==='reply_send_forbidden'||code==='reply_from_not_allowed'){
+    emReplyCapability=null;
+  }
+}
+
+function emReplyEls(){
+  return {
+    panel:document.getElementById('em-reply'),
+    note:document.getElementById('em-reply-note'),
+    from:document.getElementById('em-reply-from'),
+    to:document.getElementById('em-reply-to'),
+    cc:document.getElementById('em-reply-cc'),
+    body:document.getElementById('em-reply-body'),
+    wct:document.getElementById('em-reply-wct'),
+    send:document.getElementById('em-reply-send'),
+    open:document.getElementById('em-reply-open')
+  };
+}
+
+function emReplyAddresses(cap){
+  const list=Array.isArray(cap?.addresses)?cap.addresses.filter(a=>a&&a.address):[];
+  if(list.length)return list;
+  const fallback=cap?.defaultAddress||SUPPORT_BOX;
+  return [{address:fallback,label:fallback,isDefault:true,isHelpdesk:true,threaded:true}];
+}
+
+function emReplyAddressInfo(cap,address){
+  const wanted=String(address||'').trim().toLowerCase();
+  return emReplyAddresses(cap).find(a=>a.address===wanted)||null;
+}
+
+/* The mailbox a new Outlook draft is created in.
+
+   The connected account first, because that is the one whose token the board
+   holds: creating a draft in anybody else's mailbox needs write access to it,
+   and the whole point of the draft is that the agent can open and edit it. Then
+   their own address, then the helpdesk. */
+function emPreferredDraftMailbox(cap){
+  const list=emReplyAddresses(cap);
+  const pick=list.find(a=>a.isConnected)||list.find(a=>a.isOwn)||list.find(a=>a.isHelpdesk)||list[0];
+  return pick?.address||cap?.defaultAddress||SUPPORT_BOX;
+}
+
+/* What is about to happen, in one line above the composer.
+
+   The From address changes the answer, which is the point of saying it here:
+   only a reply sent from the mailbox that holds the message keeps the thread's
+   own headers. Anything else is a new "Re:" mail that clients group by subject.
+   And an address the board is not connected as needs a Send As grant that only
+   Exchange can confirm, so that is flagged as a maybe rather than promised. */
+function emReplyNoteFor(cap,ticket,address){
+  /* When a Power Automate flow is doing the sending, neither of the two
+     warnings below is true or useful: the board holds no send credential by
+     design, and telling somebody to reconnect Outlook would send them after a
+     permission that is deliberately not there. */
+  const viaFlow = cap?.sendVia === 'flow';
+  if(!viaFlow && !cap?.connected)return{text:'Outlook is not connected - reconnect it to send from here.',cls:'em-reply-note bad'};
+  if(!viaFlow && !cap?.scopeConfigured)return{text:'This deployment has no mail-send permission configured.',cls:'em-reply-note bad'};
+  const info=emReplyAddressInfo(cap,address);
+  const hasThread=!ticket?.email?.isManual&&!!ticket?.email?.id;
+  const bits=[];
+  let cls='em-reply-note';
+  if(!hasThread){
+    bits.push('This ticket has no Outlook thread - the reply goes out as a new email.');
+  }else if(info?.threaded){
+    bits.push('Sent inside the existing thread, quoting the client message.');
+  }else{
+    bits.push('Sent from your mailbox as a new "Re:" mail - grouped by subject, not by the thread headers.');
+  }
+  if(info&&!info.isConnected){
+    bits.push(`Needs Send As on ${info.address}${cap.connectedAddress?` (Outlook is connected as ${cap.connectedAddress})`:''}.`);
+    cls='em-reply-note warn';
+  }
+  return{text:bits.join(' '),cls};
+}
+
+function emRenderReplyNote(){
+  const els=emReplyEls();
+  if(!els.note||!emReplyCapability)return;
+  const note=emReplyNoteFor(emReplyCapability,emCurrentTicket,els.from?.value);
+  els.note.textContent=note.text;
+  els.note.className=note.cls;
+}
+
+// Everyone who was on the original mail except the helpdesk mailbox itself and
+// whoever is already in To - Cc'ing the ticket's own inbox would file the
+// reply back into the board as a new ticket.
+function emReplyDefaultCc(ticket,toAddress){
+  const skip=new Set([String(toAddress||'').toLowerCase(),...SUPPORT_BOX_ALIASES.map(a=>String(a).toLowerCase())]);
+  return (Array.isArray(ticket?.email?.recipients)?ticket.email.recipients:[])
+    .map(a=>String(a||'').trim().toLowerCase())
+    .filter(a=>a.includes('@')&&!skip.has(a))
+    .filter((a,i,arr)=>arr.indexOf(a)===i)
+    .slice(0,10);
+}
+
+function emCloseReply(){
+  const els=emReplyEls();
+  if(els.panel)els.panel.hidden=true;
+  if(els.open)els.open.textContent='Reply';
+}
+
+// Closing keeps the draft (an agent who hid the panel to re-read the message
+// expects their text back); opening a DIFFERENT ticket must not, or a reply
+// written for one client goes out to another.
+function emResetReply(ticket){
+  const els=emReplyEls();
+  emCloseReply();
+  [els.to,els.cc,els.body].forEach(el=>{ if(el) el.value=''; });
+  if(els.wct)els.wct.checked=true;
+  if(els.open){
+    const canReply=!!ticket&&currentUserCanReplyToTicket(ticket);
+    els.open.style.display=canReply?'':'none';
+  }
+}
+
+async function emOpenReply(){
+  const ticket=emCurrentTicket;
+  const els=emReplyEls();
+  if(!ticket||!els.panel)return;
+  if(!currentUserCanReplyToTicket(ticket)){
+    showToast('You can only reply to tickets assigned to you','warn');
+    return;
+  }
+  const id=ticket.id;
+  const cap=await emLoadReplyCapability();
+  if(els.from){
+    const addresses=emReplyAddresses(cap);
+    // Keep whatever the agent last chose, for this ticket and the next one -
+    // somebody who answers as themselves does so all day and should not have to
+    // reselect it per ticket. Otherwise the helpdesk, which is the sender the
+    // client has been corresponding with.
+    const previous=String(els.from.value||'').trim().toLowerCase();
+    const keep=addresses.some(a=>a.address===previous)?previous:'';
+    els.from.innerHTML=addresses.map(a=>`<option value="${esc(a.address)}">${esc(a.label||a.address)}</option>`).join('');
+    els.from.value=keep||cap.defaultAddress||addresses[0].address;
+    // One address is not a choice - keep it visible (it is what the client will
+    // see as the sender) but do not present it as one.
+    els.from.disabled=addresses.length<2;
+  }
+  // Whatever the composer can and cannot do, said before anything is typed.
+  emRenderReplyNote();
+  const client=ticketClientEmail[id]||getClientEmail(ticket.email)||ticket.email?.sender||'';
+  // Only prefill what is empty, so reopening the panel after closing it does
+  // not discard a half-written reply.
+  if(els.to&&!els.to.value.trim())els.to.value=client;
+  if(els.cc&&!els.cc.value.trim())els.cc.value=emReplyDefaultCc(ticket,client).join(', ');
+  if(els.send)els.send.disabled=!cap.canSend;
+  els.panel.hidden=false;
+  if(els.open)els.open.textContent='Hide reply';
+  if(els.body)els.body.focus();
+  els.panel.scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+
+function emReplyErrorMessage(status,payload){
+  const code=String(payload?.error||'');
+  if(code==='m365_not_connected')return'Outlook is not connected - reconnect it and try again.';
+  if(code==='m365_reauth_required')return'Outlook needs signing in again before it can send.';
+  if(code==='m365_client_secret_invalid')return'The Microsoft app secret on this deployment is invalid - Outlook cannot be reached at all until it is renewed.';
+  if(code==='reply_send_forbidden'){
+    // The two causes look identical from the outside, so name both and say
+    // which mailbox the board is actually holding a token for.
+    const from=payload?.from?` as ${payload.from}`:'';
+    const asWho=payload?.connectedAddress?` Outlook is connected as ${payload.connectedAddress}.`:'';
+    return`Outlook refused to send${from}.${asWho} Either that mailbox needs Send As for this address, or the connection predates the mail-send permission - reconnect Outlook (as that account, to send from it) and try again.`;
+  }
+  // A flow failure is not a permission problem, and saying "reconnect Outlook"
+  // at it sends somebody to the wrong place entirely.
+  if(/^mail_flow_error_/.test(code)||/^mail_flow_error_/.test(String(payload?.detail||'')))return'The mail flow refused that send - check the Power Automate flow run history.';
+  if(code==='mail_webhook_not_configured')return'No mail flow is configured on this deployment.';
+  if(code==='reply_from_not_allowed')return'That From address is not allowed on this board.';
+  if(code==='reply_message_not_found')return'The original message is no longer in the mailbox - reply from Outlook instead.';
+  if(code==='missing_recipients')return'Add at least one recipient.';
+  if(code==='reply_too_long')return'That reply is too long to send.';
+  if(status===429)return'Too many sends just now - wait a moment and try again.';
+  return`Reply failed: ${payload?.detail||code||status}`;
+}
+
+async function emSendReply(){
+  const ticket=emCurrentTicket;
+  const els=emReplyEls();
+  if(!ticket||emReplySending)return;
+  if(!currentUserCanReplyToTicket(ticket)){
+    showToast('You can only reply to tickets assigned to you','warn');
+    return;
+  }
+  const id=ticket.id;
+  const bodyText=String(els.body?.value||'').trim();
+  if(!bodyText){showToast('Write something before sending','warn');return;}
+  const to=String(els.to?.value||'').split(/[,;]/).map(v=>v.trim()).filter(Boolean);
+  const from=String(els.from?.value||'').trim();
+  if(!to.length){showToast('Add at least one recipient','warn');return;}
+
+  emReplySending=true;
+  if(els.send){els.send.disabled=true;els.send.textContent='Sending...';}
+  try{
+    const res=await fetch(`/api/tickets/${encodeURIComponent(id)}/reply`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'include',
+      body:JSON.stringify({
+        // No message id for a manual ticket: there is no Outlook thread to
+        // reply into, and the server sends a fresh mail instead.
+        messageId:ticket.email?.isManual?'':String(ticket.email?.id||''),
+        subject:ticket.email?.isManual?`Re: ${String(ticket.email?.subject||'').trim()}`.trim():'',
+        /* Not an override - a fallback. The server prefers the subject it reads
+           off the original message; this is what it uses when it cannot read
+           one, which is the normal state on a deployment that sends through a
+           flow rather than through Graph. */
+        subjectHint:(()=>{const s=String(ticket.email?.subject||'').trim();return s?(/^re:/i.test(s)?s:`Re: ${s}`):'';})(),
+        from,
+        to,
+        cc:String(els.cc?.value||'').split(/[,;]/).map(v=>v.trim()).filter(Boolean),
+        // The To list is explicit, so the server must not widen it.
+        replyAll:false,
+        body:bodyText
+      })
+    });
+    const out=await res.json().catch(()=>({}));
+    if(!res.ok||!out?.ok){
+      emForgetReplyCapability(out);
+      showToast(emReplyErrorMessage(res.status,out),'warn');
+      return;
+    }
+    // The board's own record of the reply. CLIENT_TAG marks it as something the
+    // client was actually told, as opposed to an internal note.
+    postTicketComment(id,`Replied to ${out.to.join(', ')||'client'} from ${out.from}:\n\n${bodyText}`,[CLIENT_TAG]);
+    if(els.body)els.body.value='';
+    if(els.cc)els.cc.value='';
+    emCloseReply();
+    if(els.wct?.checked&&normalizeTicketStage(ticketState[id]||'new')!=='wct'){
+      ticketState[id]='wct';
+      ticketStageTouchedAt[id]=Date.now();
+      await saveState('ticket_reply_waiting_on_contact');
+      renderActiveView();
+      const rs=await syncTicketStatusToHubspot(id,'wct');
+      if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id')showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`,'warn');
+    }
+    showToast(`Reply sent from ${out.from}`,'ok');
+  }catch(err){
+    showToast(`Reply failed: ${String(err?.message||err)}`,'warn');
+  }finally{
+    emReplySending=false;
+    if(els.send){els.send.disabled=false;els.send.textContent='Send reply';}
+  }
+}
+
+/* ====================== Feedback, from wherever you are ==================
+
+   The button is in the header and the report goes to /api/feedback, which
+   records it, emails it, and posts it to Teams if a webhook is configured.
+
+   The context block is the part that makes a report useful: which view, which
+   build, which browser, and the ticket that was open. Collected here because
+   this is the only place that knows it, shown in the modal rather than
+   described, so nobody has to take on trust what is being attached. */
+const FB_MAX = 4000;
+let fbCategory = 'bug';
+let fbSending = false;
+
+function fbContext(){
+  return {
+    view: viewMode || 'board',
+    // The ticket whose modal is open, if any - by far the most likely subject
+    // of a bug report, and the thing a reporter is least likely to think to
+    // mention.
+    ticketId: (document.getElementById('email-modal')?.classList.contains('open') && emCurrentTicket?.id)
+      || (comTicketId || ''),
+    build: appBuildVersion || 'unknown',
+    url: location.pathname + location.search,
+    theme: document.documentElement.getAttribute('data-theme') || 'system',
+    viewport: `${window.innerWidth}x${window.innerHeight}`,
+    userAgent: navigator.userAgent
+  };
+}
+
+function fbRenderContext(){
+  const box = document.getElementById('fb-context');
+  if(!box) return;
+  const c = fbContext();
+  const ticketLine = c.ticketId ? `<span>Ticket: ${esc(ticketDisplayNumber(c.ticketId)||c.ticketId)}</span>` : '';
+  box.innerHTML = `<strong>Attached automatically</strong>
+    <span>You: ${esc(currentUser())} &middot; View: ${esc(c.view)} &middot; Build: ${esc(c.build)}</span>
+    ${ticketLine}
+    <span>Screen: ${esc(c.viewport)} &middot; Theme: ${esc(c.theme)}</span>`;
+}
+
+function fbRenderCount(){
+  const el = document.getElementById('fb-count');
+  const value = String(document.getElementById('fb-message')?.value || '');
+  if(!el) return;
+  // Only worth showing once it is close to mattering - a character counter over
+  // an empty box is noise.
+  const left = FB_MAX - value.length;
+  el.textContent = value.length > FB_MAX - 500 ? `${left} characters left` : '';
+  el.classList.toggle('over', left < 0);
+}
+
+function fbSetCategory(category){
+  fbCategory = category;
+  document.querySelectorAll('[data-fb-cat]').forEach(btn=>{
+    btn.setAttribute('aria-pressed', btn.dataset.fbCat === category ? 'true' : 'false');
+  });
+}
+
+function openFeedbackModal(){
+  fbSetCategory('bug');
+  const box = document.getElementById('fb-message');
+  if(box) box.value = '';
+  const note = document.getElementById('fb-note');
+  // Says where it goes before it is written, not after. Not the address itself:
+  // that is the server's configuration to know, and the success toast names it.
+  if(note) note.textContent = 'Goes to the platform team';
+  fbRenderCount();
+  fbRenderContext();
+  document.getElementById('feedback-modal')?.classList.add('open');
+  setTimeout(()=>box?.focus(), 60);
+}
+
+async function sendFeedback(){
+  if(fbSending) return;
+  const box = document.getElementById('fb-message');
+  const message = String(box?.value || '').trim();
+  if(!message){ showToast('Write what happened first','warn'); box?.focus(); return; }
+  if(message.length > FB_MAX){ showToast(`That is ${message.length - FB_MAX} characters too long`,'warn'); return; }
+
+  const btn = document.getElementById('fb-send');
+  fbSending = true;
+  if(btn){ btn.disabled = true; btn.textContent = 'Sending...'; }
+  try{
+    const res = await fetch('/api/feedback',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'include',
+      body: JSON.stringify({ category: fbCategory, message, context: fbContext() })
+    });
+    const out = await res.json().catch(()=>({}));
+    if(!res.ok || !out?.ok){
+      const code = String(out?.error || '');
+      if(code === 'feedback_too_long') showToast('That report is too long to send','warn');
+      else if(res.status === 429) showToast('A few reports have just gone out - give it a minute','warn');
+      else showToast(`Could not send that: ${out?.detail || code || res.status}`,'warn');
+      return;
+    }
+    document.getElementById('feedback-modal')?.classList.remove('open');
+    if(box) box.value = '';
+    /* Three honest outcomes rather than one cheerful one. A report that was
+       written down but not delivered is not a failure - somebody will still see
+       it - but saying "sent" over it would be a lie. */
+    if(out.emailed || out.notified){
+      // `to` is a list now, and three addresses in a toast is noise - name the
+      // one recipient when there is one, and the count when there are more.
+      const to = Array.isArray(out.to) ? out.to : (out.to ? [out.to] : []);
+      const who = to.length === 1 ? to[0] : (to.length ? `${to.length} people on the platform team` : 'the team');
+      showToast(`Thanks - sent to ${who}`,'ok');
+    }else if(out.stored){
+      showToast('Recorded, but it could not be emailed yet - it is saved and will be seen','warn');
+    }else{
+      showToast('That could not be sent or saved. Please tell someone directly.','warn');
+    }
+  }catch(err){
+    showToast(`Could not send that: ${String(err?.message||err)}`,'warn');
+  }finally{
+    fbSending = false;
+    if(btn){ btn.disabled = false; btn.textContent = 'Send feedback'; }
+  }
+}
+
+/* Proving the two delivery legs work, from the UI.
+
+   Setting this up is two environment variables and an Outlook consent, and each
+   of them fails invisibly from the outside: a webhook URL with a typo, a token
+   that predates Mail.Send, a flow somebody switched off. Without this the only
+   way to find out is to file a real report and wait to see if anything arrives -
+   and when nothing does, there is nothing to say which leg was at fault. This
+   sends one canned report and reports each leg separately. */
+async function sendFeedbackTest(){
+  const btn = document.getElementById('fb-test');
+  if(!btn || btn.disabled) return;
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Testing...';
+  try{
+    const res = await fetch('/api/feedback/test',{ method:'POST', credentials:'include' });
+    const out = await res.json().catch(()=>({}));
+    if(res.status === 403){ showToast('Only admins can send a delivery test','warn'); return; }
+    const bits = [];
+    const emailTo = Array.isArray(out.emailTo) ? out.emailTo.join(', ') : (out.emailTo || 'nobody');
+    bits.push(out.emailed ? `email to ${emailTo} sent` : `email failed (${out.emailError||'unknown'})`);
+    if(out.webhookConfigured) bits.push(out.notified ? 'Teams webhook posted' : `Teams failed (${out.webhookError||'unknown'})`);
+    else bits.push('no Teams webhook configured');
+    showToast(bits.join(' - '), out.emailed || out.notified ? 'ok' : 'warn');
+    // The full reason goes to the console as well: a Graph error is longer than
+    // a toast and is the thing worth pasting into a ticket.
+    if(out.emailError || out.webhookError) console.warn('[feedback test]', out);
+  }catch(err){
+    showToast(`Delivery test failed: ${String(err?.message||err)}`,'warn');
+  }finally{
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+document.getElementById('feedback-btn')?.addEventListener('click', openFeedbackModal);
+document.getElementById('fb-test')?.addEventListener('click', sendFeedbackTest);
+document.getElementById('fb-send')?.addEventListener('click', sendFeedback);
+document.getElementById('fb-message')?.addEventListener('input', fbRenderCount);
+document.querySelectorAll('[data-fb-cat]').forEach(btn=>{
+  btn.addEventListener('click', ()=>fbSetCategory(btn.dataset.fbCat));
+});
+// Ctrl/Cmd+Enter sends, as it does in the reply composer.
+document.getElementById('fb-message')?.addEventListener('keydown', ev=>{
+  if((ev.ctrlKey||ev.metaKey) && ev.key === 'Enter'){ ev.preventDefault(); sendFeedback(); }
+});
+
+/* ================= Open in Outlook, including when there is none ==========
+
+   Replying on the board did not replace every reason to open the real thing -
+   forwarding it, seeing the whole thread, attaching a file - so this button
+   stays next to Reply rather than being replaced by it.
+
+   A ticket that came from the mailbox has a webLink and this just follows it. A
+   ticket raised on the board by hand has no message at all, and neither does
+   one Graph never returned a link for; the button used to vanish for those,
+   which is the wrong answer to "I want to deal with this in Outlook". So the
+   mail that is missing gets created - as a draft, with the ticket's subject,
+   client and description already in it - and the board opens that instead.
+   Nothing is sent: it is a draft in the agent's own Drafts, theirs to edit.
+
+   The blank tab is opened during the click and pointed at the draft afterwards.
+   Calling window.open() after the await instead would be a popup with no user
+   gesture behind it, which browsers block - and the agent would be told the
+   draft was created while nothing appeared. */
+// A manual ticket's sender is a placeholder ("manual@ticket") when nobody
+// recorded a client address, and offering to write to it would be nonsense.
+function emRealAddress(value){
+  const address=String(value||'').trim().toLowerCase();
+  return /^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+$/.test(address)?address:'';
+}
+function emTicketClientAddress(ticket){
+  const id=ticket?.id;
+  return emRealAddress(ticketClientEmail[id])
+    ||emRealAddress(getClientEmail(ticket?.email))
+    ||emRealAddress(ticket?.email?.sender);
+}
+
+async function emCreateOutlookDraft(ticket){
+  const id=ticket?.id;
+  if(!id)return null;
+  const cap=await emLoadReplyCapability();
+  if(!cap.connected){
+    showToast('Outlook is not connected - reconnect it to create the email','warn');
+    return null;
+  }
+  const mailbox=emPreferredDraftMailbox(cap);
+  const client=emTicketClientAddress(ticket);
+  const subject=String(ticket.email?.subject||'').trim()||`Support ticket ${ticketDisplayNumber(id)||''}`.trim();
+  const hasThread=!ticket.email?.isManual&&!!ticket.email?.id;
+  try{
+    const res=await fetch(`/api/tickets/${encodeURIComponent(id)}/outlook-draft`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      credentials:'include',
+      body:JSON.stringify({
+        // A manual ticket has no message to reply to, so the server composes a
+        // fresh draft; anything else drafts a reply on the real message.
+        messageId:hasThread?String(ticket.email.id):'',
+        from:mailbox,
+        subject,
+        to:client?[client]:[],
+        // Only a manual ticket's own description belongs in the draft. Seeding
+        // a reply draft with it would put the client's words in our answer as
+        // though we had written them - the quoted original is already there.
+        body:hasThread?'':String(ticket.email?.summary||'').trim()
+      })
+    });
+    const out=await res.json().catch(()=>({}));
+    if(!res.ok||!out?.ok){
+      emForgetReplyCapability(out);
+      showToast(emReplyErrorMessage(res.status,out),'warn');
+      return null;
+    }
+    /* Remember the link on the ticket. The draft is a real message now, so the
+       next Open in Outlook should go straight to it instead of asking to create
+       a second one - and every other agent's board gets the same link, which is
+       what stops three people drafting three mails for one ticket. */
+    if(ticket.email){
+      ticket.email.webLink=out.webLink;
+      if(emCurrentTicket===ticket)emSyncOutlookButton(ticket);
+      saveState('outlook_draft_created');
+    }
+    showToast(out.threaded?'Reply draft created in Outlook':`Draft created in ${out.mailbox}`,'ok');
+    return out;
+  }catch(err){
+    showToast(`Could not create the Outlook draft: ${String(err?.message||err)}`,'warn');
+    return null;
+  }
+}
+
+// The button's label and title, which depend on whether there is anything to
+// open yet. Kept in one place so the modal and a freshly created draft agree.
+function emSyncOutlookButton(ticket){
+  const btn=document.getElementById('em-outlook');
+  if(!btn)return;
+  const link=ticket?.email?.webLink||'';
+  btn.style.display='';
+  btn.textContent=link?'Open in Outlook':'Create in Outlook';
+  btn.title=link
+    ?'Open this message in Outlook on the web'
+    :'This ticket has no Outlook email yet - create a draft and open it';
+}
+
+async function emOpenInOutlook(){
+  const ticket=emCurrentTicket;
+  if(!ticket)return;
+  const link=ticket.email?.webLink||'';
+  if(link){
+    window.open(link,'_blank','noopener');
+    return;
+  }
+  const client=emTicketClientAddress(ticket);
+  const asked=confirm(
+    'This ticket has no email in Outlook yet.\n\n'
+    +'Create a draft'+(client?` to ${client}`:'')+' with the ticket\'s subject and description, and open it in Outlook?'
+  );
+  if(!asked)return;
+  // Opened now, while the click is still the reason for it.
+  const pending=window.open('','_blank');
+  const out=await emCreateOutlookDraft(ticket);
+  if(!out?.webLink){
+    try{pending?.close();}catch(_){}
+    return;
+  }
+  if(pending&&!pending.closed){
+    try{pending.opener=null;}catch(_){}
+    pending.location.href=out.webLink;
+  }else{
+    // The tab was blocked or closed - do not lose the draft, point at it.
+    window.open(out.webLink,'_blank','noopener');
+  }
+}
+
+document.getElementById('em-reply-open')?.addEventListener('click',()=>{
+  const panel=document.getElementById('em-reply');
+  if(panel&&!panel.hidden){emCloseReply();return;}
+  emOpenReply();
+});
+document.getElementById('em-outlook')?.addEventListener('click',()=>emOpenInOutlook());
+document.getElementById('em-reply-from')?.addEventListener('change',()=>emRenderReplyNote());
+document.getElementById('em-reply-cancel')?.addEventListener('click',()=>emCloseReply());
+document.getElementById('em-reply-send')?.addEventListener('click',()=>emSendReply());
+// Ctrl/Cmd+Enter sends, as it does in every mail client. Plain Enter is a
+// newline - a reply is prose, not a chat message.
+document.getElementById('em-reply-body')?.addEventListener('keydown',ev=>{
+  if((ev.ctrlKey||ev.metaKey)&&ev.key==='Enter'){ev.preventDefault();emSendReply();}
+});
+
 async function openEmailModal(ticket){
   const{email,id}=ticket;const clientEmail=ticketClientEmail[id];
+  emCurrentTicket=ticket;
+  emResetReply(ticket);
   // Any translation belongs to the message that was open before. Clear it
   // first, so nothing from the previous ticket can be reverted into this one.
   trResetEmailState(id);
@@ -9162,6 +11005,10 @@ async function openEmailModal(ticket){
   // Warm the picker's "cached" markers from whatever the team already has.
   trLoadCachedFor(id).then(()=>{if(emTrState.ticketId===id)trRenderEmailBar();});const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
   document.getElementById('em-title').textContent=email.subject||'(no subject)';
+  // Always offered, and never a dead button: with a webLink it opens the
+  // message, without one it offers to create the mail that does not exist yet.
+  // See emOpenInOutlook.
+  emSyncOutlookButton(ticket);
   const csOwner=ticketCSOwner[id]||null;
   const csMeta=csOwner?`  CS: ${esc(csOwner)}`:'';
   let metaHtml=isReply?`<span><strong>Client:</strong> ${esc(clientEmail)}</span><span><strong>Replied by:</strong> ${esc(email.sender)}</span>`:`<span><strong>From:</strong> ${esc(email.sender||'')}</span>`;
@@ -9191,13 +11038,13 @@ async function openEmailModal(ticket){
   document.getElementById('em-meta').innerHTML=metaHtml;
   // Manual tickets show description instead of fetching from Outlook
   if(email.isManual){
-    document.getElementById('em-body').innerHTML=email.summary?`<div style="overflow-wrap:break-word;white-space:pre-wrap;">${esc(email.summary)}</div>`:'<em style="color:var(--slate-400)">No description provided.</em>';
-    const ol=document.getElementById('em-outlook');ol.style.display='none';
+    document.getElementById('em-body').innerHTML=email.summary?`<div class="email-body-content" style="overflow-wrap:break-word;white-space:pre-wrap;">${esc(email.summary)}</div>`:'<div class="email-body-content"><em style="color:#64748b">No description provided.</em></div>';
+    emApplySheetMode();
     document.getElementById('email-modal').classList.add('open');
     trAutoTranslateBody(id);
+    emCopyEmail({auto:true});
     return;
   }
-  const ol=document.getElementById('em-outlook');ol.onclick=email.webLink?()=>window.open(email.webLink,'_blank'):null;ol.style.display=email.webLink?'':'none';
   document.getElementById('email-modal').classList.add('open');
   const uri=(email.uri||`mail:///messages/${email.id}`).split('?')[0]+'?owner='+encodeURIComponent(SUPPORT_BOX);
   if(!hasCowork){document.getElementById('em-body').innerHTML=`<p style="color:var(--slate-500);font-style:italic">Outlook content preview is only available in MCP mode.</p>`;return;}
@@ -9209,47 +11056,139 @@ async function openEmailModal(ticket){
    re-runs exactly this, rather than making the agent close and reopen the
    ticket. Guards on the modal still showing the same ticket: a slow fetch must
    not paint its body over whichever ticket the agent has moved on to. */
-async function loadEmailBody(ticket,uri){
-  const{email,id}=ticket;
+/* The message body, and where it comes from.
+
+   Every open used to be a Graph call for a message that never changes, so the
+   same body was re-fetched by every agent, every time, and the ticket could
+   only show what Graph felt like returning at that moment. The stored copy is
+   asked first now; Graph is the fallback, and what it returns is posted back so
+   the next open - anyone's - is served from the ticket.
+
+   Both paths go through emRenderEmailBody so a cached open and a live one
+   render through the same code rather than two copies that drift. What is
+   stored is the raw body exactly as Graph gave it, not the processed HTML, so
+   the processing below stays the single place it happens and a change to it
+   applies to bodies that were already captured. */
+function emPrepareBodyHtml(raw,isHtml){
+  let body=String(raw||'');
+  if(!body)return '';
+  if(isHtml)return body.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<a /gi,'<a target="_blank" ');
+  // Plain-text mail: <br> per newline is not enough on its own, because runs
+  // of spaces and blank lines are the only structure a text mail has. The
+  // pre-wrap wrapper below keeps them.
+  return `<div style="white-space:pre-wrap">${esc(body)}</div>`;
+}
+
+/* --------------------------------------------- how the message is dressed
+
+   The mail goes on a white sheet by default - see .email-body-content - because
+   that is the only way to show the client's own colors without the dark theme
+   turning half of them illegible. Agents who would rather have the message look
+   like the rest of the platform can say so, and the choice sticks: per agent,
+   remembered across tickets and sessions. It is one class on the sheet, so
+   switching is instant and never re-fetches or re-translates the message. */
+const EM_SHEET_KEY='kanban.email.sheet';
+function emSheetThemed(){
+  try{return localStorage.getItem(EM_SHEET_KEY)==='themed';}catch(_){return false;}
+}
+function emSetSheetThemed(on){
+  try{localStorage.setItem(EM_SHEET_KEY,on?'themed':'sheet');}catch(_){}
+}
+// Applied to whatever sheet is on screen now, and called from every render, so
+// a cached open, a live one and a manual ticket all honour the same choice.
+function emApplySheetMode(){
+  const themed=emSheetThemed();
+  document.querySelectorAll('#em-body .email-body-content')
+    .forEach(el=>el.classList.toggle('themed',themed));
+}
+function emToggleSheetMode(){
+  emSetSheetThemed(!emSheetThemed());
+  emApplySheetMode();
+  trRenderEmailBar();
+}
+
+function emRenderEmailBody({ticket,id,bodyHtml,images,imagesError,uri}){
   const host=document.getElementById('em-body');
-  host.innerHTML='<div class="loading"><div class="spinner"></div><span class="loading-label">Loading the message from Outlook...</span></div>';
-  const res=await window.cowork.callMcpTool(READ_TOOL,{uri});
-  if(emTrState.ticketId!==id)return;
-  if(res.isError){renderEmailLoadFailure(ticket,uri,res.error);return;}
-  const sc=res.structuredContent;let body='',images=[];
-  let isHtml=false;
-  if(sc){
-    body=sc.body?.content||sc.bodyPreview||sc.preview||'';
-    isHtml=(sc.body?.contentType||'').toLowerCase()==='html';
-    if(isHtml){body=body.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<a /gi,'<a target="_blank" ');}
-    // Plain-text mail: <br> per newline is not enough on its own, because runs
-    // of spaces and blank lines are the only structure a text mail has. The
-    // pre-wrap wrapper below keeps them.
-    else body=`<div style="white-space:pre-wrap">${esc(body)}</div>`;
-  }
-  if(sc&&Array.isArray(sc.imageAttachments))images=sc.imageAttachments;
-  if(!body){const raw=(res.content||[]).map(c=>c.text||'').join('');body=raw?`<div style="white-space:pre-wrap">${esc(raw)}</div>`:'<em style="color:var(--slate-400)">No content.</em>';}
-  const rendered=renderEmailBodyWithImages(body,images);
+  const rendered=renderEmailBodyWithImages(bodyHtml,images||[]);
   // The pictures are a separate Graph call and it is the one that gets
   // throttled. It no longer takes the body down with it, but the agent still
   // has to be told that what they are looking at is missing its images. The
   // notice goes beside the white sheet, not on it, so it stays themed.
-  if(sc?.imagesError){
+  if(imagesError){
     host.replaceChildren(emailNoticeEl({
       tone:'warn',
       text:'The message loaded but its images did not.',
-      detail:sc.imagesError,
-      onRetry:()=>loadEmailBody(ticket,uri),
-      webLink:email.webLink
+      detail:imagesError,
+      onRetry:()=>loadEmailBody(ticket,uri,{refresh:true}),
+      webLink:ticket?.email?.webLink
     }),rendered);
   }else{
     host.replaceChildren(rendered);
   }
   emSweepBrokenImages(rendered);
+  emApplySheetMode();
+  // The message is on screen, so this is the moment it can be copied - and it
+  // happens before the translation pass below rewrites any of it, so what an
+  // agent pastes is the client's own words rather than machine output.
+  emCopyEmail({auto:true});
   // The body only exists now, so this is the first moment it can be translated.
   // If the agent already chose to read this ticket in another language, follow
   // through without making them ask again.
   trAutoTranslateBody(id);
+}
+
+// Hand the body we just fetched to the server so the next open does not have to
+// fetch it again. Deliberately not awaited and deliberately silent: this is a
+// cache fill, and an agent reading a ticket should never see it fail.
+function emStoreBody(id,messageId,raw,isHtml,images){
+  try{
+    fetch(`/api/tickets/${encodeURIComponent(id)}/body`,{
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({body:raw,messageId,contentType:isHtml?'html':'text',images:(images||[]).map(a=>({id:a.id,name:a.name,contentType:a.contentType,contentId:a.contentId}))})
+    }).catch(()=>{});
+  }catch(_){}
+}
+
+async function loadEmailBody(ticket,uri,{refresh=false}={}){
+  const{email,id}=ticket;
+  const host=document.getElementById('em-body');
+  host.innerHTML='<div class="loading"><div class="spinner"></div><span class="loading-label">Loading the message...</span></div>';
+  // Stored copy first. A miss, a not-yet-synced ticket and a server that is
+  // unhappy all land in the same place - go and ask Outlook - so this can never
+  // be the reason a ticket will not open.
+  if(!refresh){
+    try{
+      const r=await fetch(`/api/tickets/${encodeURIComponent(id)}/body?messageId=${encodeURIComponent(email?.id||'')}`);
+      if(r.ok){
+        const cached=await r.json();
+        if(emTrState.ticketId!==id)return;
+        if(cached?.cached&&cached.body){
+          emRenderEmailBody({ticket,id,bodyHtml:emPrepareBodyHtml(cached.body,String(cached.contentType||'html')!=='text'),images:cached.images,imagesError:'',uri});
+          return;
+        }
+      }
+    }catch(_){}
+    if(emTrState.ticketId!==id)return;
+  }
+  host.innerHTML='<div class="loading"><div class="spinner"></div><span class="loading-label">Loading the message from Outlook...</span></div>';
+  const res=await window.cowork.callMcpTool(READ_TOOL,{uri});
+  if(emTrState.ticketId!==id)return;
+  if(res.isError){renderEmailLoadFailure(ticket,uri,res.error);return;}
+  const sc=res.structuredContent;let images=[];
+  let isHtml=false,raw='';
+  if(sc){
+    raw=sc.body?.content||sc.bodyPreview||sc.preview||'';
+    isHtml=(sc.body?.contentType||'').toLowerCase()==='html';
+  }
+  if(sc&&Array.isArray(sc.imageAttachments))images=sc.imageAttachments;
+  let bodyHtml=emPrepareBodyHtml(raw,isHtml);
+  // Only a real body is worth keeping. The text-content fallback below and the
+  // 'No content' placeholder are what we show when the fetch came back empty,
+  // and storing either would cache the failure instead of the message.
+  if(bodyHtml)emStoreBody(id,email?.id||'',raw,isHtml,images);
+  if(!bodyHtml){const txt=(res.content||[]).map(c=>c.text||'').join('');bodyHtml=txt?`<div style="white-space:pre-wrap">${esc(txt)}</div>`:'<em style="color:var(--slate-400)">No content.</em>';}
+  emRenderEmailBody({ticket,id,bodyHtml,images,imagesError:sc?.imagesError||'',uri});
 }
 
 /* What to say, and what to offer, for the failure that actually happened. The
