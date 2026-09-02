@@ -1,0 +1,698 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
+  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
+  <title>Profile - Support Kanban</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --primary: #2563eb;
+      --primary-dark: #1d4ed8;
+      --danger: #dc2626;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, Arial, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(37,99,235,.14), transparent 32%),
+        radial-gradient(circle at bottom right, rgba(14,165,233,.12), transparent 30%),
+        var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .topbar {
+      height: 68px;
+      background: rgba(15, 23, 42, .96);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 28px;
+      box-shadow: 0 10px 30px rgba(15,23,42,.18);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    .brand-mark {
+      width: 36px;
+      height: 36px;
+      border-radius: 12px;
+      background: white;
+      color: #0f172a;
+      display: grid;
+      place-items: center;
+      font-weight: 900;
+    }
+
+    .nav {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .nav a,
+    .nav button {
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.06);
+      color: white;
+      padding: 9px 13px;
+      border-radius: 11px;
+      text-decoration: none;
+      cursor: pointer;
+      font-size: 14px;
+      transition: background .15s ease, transform .15s ease;
+    }
+
+    .nav a:hover,
+    .nav button:hover {
+      background: rgba(255,255,255,.13);
+      transform: translateY(-1px);
+    }
+
+    .wrap {
+      max-width: 940px;
+      margin: 42px auto;
+      padding: 0 20px;
+    }
+
+    .profile-card {
+      background: rgba(255,255,255,.92);
+      backdrop-filter: blur(18px);
+      border: 1px solid rgba(226,232,240,.9);
+      border-radius: 24px;
+      overflow: hidden;
+      box-shadow: 0 24px 70px rgba(15,23,42,.12);
+    }
+
+    .hero {
+      padding: 34px;
+      background:
+        linear-gradient(135deg, rgba(15,23,42,.98), rgba(37,99,235,.92) 54%, rgba(20,184,166,.86));
+      color: white;
+      display: flex;
+      align-items: center;
+      gap: 22px;
+    }
+
+    .avatar-picker {
+      position: relative;
+      width: 92px;
+      height: 92px;
+      flex: 0 0 auto;
+      border: 0;
+      padding: 0;
+      border-radius: 999px;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .avatar-ring {
+      position: absolute;
+      inset: -5px;
+      border-radius: inherit;
+      background: conic-gradient(from 140deg, #ffffff, #93c5fd, #5eead4, #ffffff);
+      opacity: .96;
+    }
+
+    .avatar {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      border-radius: inherit;
+      background:
+        radial-gradient(circle at 30% 22%, rgba(255,255,255,.36), transparent 30%),
+        linear-gradient(135deg, rgba(255,255,255,.24), rgba(255,255,255,.10));
+      border: 3px solid rgba(255,255,255,.96);
+      display: grid;
+      place-items: center;
+      color: white;
+      font-size: 38px;
+      font-weight: 900;
+      overflow: hidden;
+      box-shadow: 0 18px 38px rgba(15,23,42,.26);
+      transition: transform .16s ease, box-shadow .16s ease;
+    }
+
+    .avatar-picker:hover .avatar,
+    .avatar-picker:focus-visible .avatar {
+      transform: translateY(-1px) scale(1.02);
+      box-shadow: 0 22px 44px rgba(15,23,42,.32);
+    }
+
+    .avatar-action {
+      position: absolute;
+      right: -4px;
+      bottom: 2px;
+      min-width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      border: 3px solid white;
+      background: #0f172a;
+      color: white;
+      display: grid;
+      place-items: center;
+      font-size: 16px;
+      line-height: 1;
+      box-shadow: 0 10px 22px rgba(15,23,42,.28);
+    }
+
+    .avatar-help {
+      margin-top: 10px;
+      color: rgba(255,255,255,.74);
+      font-size: 13px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.1;
+    }
+
+    .subtitle {
+      margin-top: 6px;
+      color: rgba(255,255,255,.86);
+      font-size: 14px;
+    }
+
+    .content {
+      padding: 28px 32px 32px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      margin-bottom: 22px;
+    }
+
+    .stat {
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: #fff;
+      padding: 16px;
+    }
+
+    .stat-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-size: 16px;
+      font-weight: 800;
+      word-break: break-word;
+    }
+
+    .details {
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      overflow: hidden;
+      background: white;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 190px 1fr;
+      gap: 16px;
+      padding: 16px 18px;
+      border-bottom: 1px solid #f1f5f9;
+    }
+
+    .row:last-child {
+      border-bottom: 0;
+    }
+
+    .label {
+      color: var(--muted);
+      font-weight: 800;
+      font-size: 13px;
+    }
+
+    .value {
+      color: var(--text);
+      font-weight: 650;
+      word-break: break-word;
+    }
+
+    .form-input {
+      width: min(100%, 380px);
+      border: 1px solid #cbd5e1;
+      border-radius: 12px;
+      background: #f8fafc;
+      color: var(--text);
+      padding: 12px 14px;
+      font: inherit;
+      font-weight: 650;
+      outline: none;
+      transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+    }
+
+    .form-input:focus {
+      border-color: var(--primary);
+      background: #fff;
+      box-shadow: 0 0 0 4px rgba(37,99,235,.12);
+    }
+
+    .avatar-upload-panel {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .avatar-preview {
+      width: 62px;
+      height: 62px;
+      border-radius: 999px;
+      border: 2px solid #dbeafe;
+      background:
+        radial-gradient(circle at 30% 22%, rgba(255,255,255,.9), transparent 34%),
+        linear-gradient(135deg, #2563eb, #14b8a6);
+      color: white;
+      display: grid;
+      place-items: center;
+      font-size: 24px;
+      font-weight: 900;
+      overflow: hidden;
+      cursor: pointer;
+      box-shadow: 0 12px 26px rgba(37,99,235,.14);
+    }
+
+    .avatar-copy {
+      min-width: 210px;
+    }
+
+    .avatar-title {
+      font-weight: 850;
+      margin-bottom: 4px;
+    }
+
+    .avatar-note {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+      line-height: 1.45;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #ecfdf5;
+      color: #047857;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .actions {
+      margin-top: 24px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      border: 0;
+      border-radius: 13px;
+      padding: 12px 16px;
+      font-weight: 800;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      transition: transform .15s ease, box-shadow .15s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+      box-shadow: 0 10px 20px rgba(37,99,235,.20);
+    }
+
+    .btn-primary:hover {
+      background: var(--primary-dark);
+    }
+
+    .btn-secondary {
+      background: #e2e8f0;
+      color: #0f172a;
+    }
+
+    .btn-danger {
+      background: #fee2e2;
+      color: #b91c1c;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 720px) {
+      .topbar {
+        padding: 0 16px;
+      }
+
+      .nav {
+        gap: 6px;
+      }
+
+      .nav a,
+      .nav button {
+        padding: 8px 9px;
+      }
+
+      .hero {
+        padding: 24px;
+        align-items: flex-start;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .row {
+        grid-template-columns: 1fr;
+        gap: 6px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">Q</div>
+      <span>Support Kanban</span>
+    </div>
+
+    <div class="nav">
+      <a href="/">Board</a>
+      <a id="adminTopLink" class="hidden" href="/admin/users">Users</a>
+      <button id="logoutTopBtn" type="button">Logout</button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="profile-card">
+      <div class="hero">
+        <button class="avatar-picker" id="avatarPicker" type="button" aria-label="Change profile picture">
+          <span class="avatar-ring" aria-hidden="true"></span>
+          <span class="avatar" id="avatar">?</span>
+          <span class="avatar-action" aria-hidden="true">&#128247;</span>
+        </button>
+        <input id="avatarInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" />
+        <div>
+          <h1 id="profileTitle">Profile</h1>
+          <div class="subtitle" id="profileSubtitle">Loading account details...</div>
+          <div class="avatar-help">Click your photo to upload a new image.</div>
+        </div>
+      </div>
+
+      <div class="content">
+        <div class="grid">
+          <div class="stat">
+            <div class="stat-label">Username</div>
+            <div class="stat-value" id="statUsername">-</div>
+          </div>
+
+          <div class="stat">
+            <div class="stat-label">Role</div>
+            <div class="stat-value" id="statRole">-</div>
+          </div>
+
+          <div class="stat">
+            <div class="stat-label">Session</div>
+            <div class="stat-value"><span class="badge">Active</span></div>
+          </div>
+        </div>
+
+        <div class="details">
+          <div class="row">
+            <div class="label">User ID</div>
+            <div class="value" id="userId">-</div>
+          </div>
+
+          <div class="row">
+            <div class="label">Username</div>
+            <div class="value" id="username">-</div>
+          </div>
+
+          <div class="row">
+            <div class="label">Role</div>
+            <div class="value" id="role">-</div>
+          </div>
+
+          <div class="row">
+            <div class="label">Environment</div>
+            <div class="value">Support Kanban Web App</div>
+          </div>
+
+          <div class="row">
+            <div class="label">Password</div>
+            <div class="value">
+              <input id="newPassword" class="form-input" type="password" placeholder="Leave blank to keep current password" autocomplete="new-password" />
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="label">Profile picture</div>
+            <div class="value">
+              <div class="avatar-upload-panel">
+                <button class="avatar-preview" id="avatarPreview" type="button">?</button>
+                <div class="avatar-copy">
+                  <div class="avatar-title">Profile photo</div>
+                  <div class="avatar-note">PNG, JPG, or WebP. Your selected image appears here before saving.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="label">Claude connector</div>
+            <div class="value">
+              <div id="mcpTokenStatus" style="font-size:13px;color:var(--muted);margin-bottom:8px;">Loading...</div>
+              <div id="mcpTokenReveal" class="hidden" style="margin-bottom:8px;">
+                <input id="mcpTokenValue" class="form-input" type="text" readonly style="font-family:monospace;font-size:12px;" />
+                <div style="font-size:12px;color:var(--muted);margin-top:4px;">Copy this now - it will not be shown again. Paste it as the Bearer token when adding the Support Kanban connector in Claude.</div>
+              </div>
+              <button class="btn btn-secondary" id="mcpGenerateBtn" type="button">Generate token</button>
+              <button class="btn btn-danger hidden" id="mcpRevokeBtn" type="button">Revoke token</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="actions">
+          <a class="btn btn-primary" href="/">&larr; Back to board</a>
+          <a id="manageUsersBtn" class="btn btn-secondary hidden" href="/admin/users">Manage users</a>
+          <button class="btn btn-secondary" id="saveProfileBtn" type="button">Save profile</button>
+          <button class="btn btn-danger" id="logoutBtn" type="button">Logout</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    let selectedAvatarBase64 = null;
+    let currentInitial = '?';
+
+    function setText(id, value) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = value || '-';
+    }
+
+    function setAvatarImage(url, initial) {
+      const el = document.getElementById('avatar');
+      if (!el) return;
+      if (url) {
+        el.style.backgroundImage = 'url(' + url + ')';
+        el.style.backgroundSize = 'cover';
+        el.style.backgroundPosition = 'center';
+        el.textContent = '';
+      } else {
+        el.style.backgroundImage = '';
+        el.textContent = initial;
+      }
+    }
+
+    function setAvatarPreview(url) {
+      const el = document.getElementById('avatarPreview');
+      if (!el) return;
+      if (url) {
+        el.style.backgroundImage = 'url(' + url + ')';
+        el.style.backgroundSize = 'cover';
+        el.style.backgroundPosition = 'center';
+        el.textContent = '';
+      } else {
+        el.style.backgroundImage = '';
+        el.textContent = currentInitial;
+      }
+    }
+
+    async function logout() {
+      await fetch('/auth/logout', {
+        method: 'POST',
+        credentials: 'same-origin'
+      }).catch(() => null);
+
+      window.location.href = '/login';
+    }
+
+    async function loadProfile() {
+      const res = await fetch('/auth/me', {
+        credentials: 'same-origin'
+      });
+
+      if (!res.ok) {
+        window.location.href = '/login';
+        return;
+      }
+
+      const data = await res.json();
+      const user = data.user || {};
+
+      const username = user.username || 'User';
+      const role = user.role || 'user';
+      const initial = String(username).charAt(0).toUpperCase();
+      currentInitial = initial;
+
+      setText('avatar', initial);
+      setAvatarImage(user.avatarUrl, initial);
+      setAvatarPreview(user.avatarUrl);
+      setText('profileTitle', username);
+      setText('profileSubtitle', 'Signed in as ' + role);
+      setText('userId', String(user.id || '-'));
+      setText('username', username);
+      setText('role', role);
+      setText('statUsername', username);
+      setText('statRole', role);
+
+      if (role === 'admin' || role === 'owner') {
+        document.getElementById('manageUsersBtn')?.classList.remove('hidden');
+        document.getElementById('adminTopLink')?.classList.remove('hidden');
+      }
+    }
+
+    function openAvatarPicker() {
+      document.getElementById('avatarInput')?.click();
+    }
+
+    document.getElementById('avatarPicker')?.addEventListener('click', openAvatarPicker);
+    document.getElementById('avatarPreview')?.addEventListener('click', openAvatarPicker);
+
+    document.getElementById('avatarInput')?.addEventListener('change', async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (!result || typeof result !== 'string') return;
+        selectedAvatarBase64 = result;
+        setAvatarPreview(result);
+      };
+      reader.readAsDataURL(file);
+    });
+
+    document.getElementById('saveProfileBtn')?.addEventListener('click', async () => {
+      const password = document.getElementById('newPassword')?.value.trim();
+      const payload = {};
+      if (password) payload.password = password;
+      if (selectedAvatarBase64 !== null) payload.avatarBase64 = selectedAvatarBase64;
+      if (!Object.keys(payload).length) {
+        alert('Nothing to save. Change your password or upload a profile picture first.');
+        return;
+      }
+      const res = await fetch('/api/profile', {
+        method: 'PATCH',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const result = await res.json();
+      if (!res.ok) {
+        alert(result.error || 'Unable to update profile.');
+        return;
+      }
+      const username = result.user?.username || 'User';
+      const initial = String(username).charAt(0).toUpperCase();
+      setAvatarImage(result.user?.avatarUrl, initial);
+      setAvatarPreview(result.user?.avatarUrl);
+      selectedAvatarBase64 = null;
+      if (document.getElementById('newPassword')) document.getElementById('newPassword').value = '';
+      alert('Profile updated successfully.');
+    });
+
+    document.getElementById('logoutBtn')?.addEventListener('click', logout);
+    document.getElementById('logoutTopBtn')?.addEventListener('click', logout);
+
+    async function loadMcpTokenStatus() {
+      const res = await fetch('/api/mcp/token', { credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      const statusEl = document.getElementById('mcpTokenStatus');
+      const revokeBtn = document.getElementById('mcpRevokeBtn');
+      if (data.token) {
+        const when = new Date(data.token.createdAt).toLocaleDateString();
+        statusEl.textContent = 'Active token created ' + when + (data.token.lastUsedAt ? ', last used ' + new Date(data.token.lastUsedAt).toLocaleString() : ', not used yet');
+        revokeBtn?.classList.remove('hidden');
+      } else {
+        statusEl.textContent = 'No active token. Generate one to connect Claude to the Support Kanban board.';
+        revokeBtn?.classList.add('hidden');
+      }
+    }
+
+    document.getElementById('mcpGenerateBtn')?.addEventListener('click', async () => {
+      if (document.getElementById('mcpRevokeBtn') && !document.getElementById('mcpRevokeBtn').classList.contains('hidden')) {
+        if (!confirm('Generating a new token will revoke your current one and disconnect any Claude connector using it. Continue?')) return;
+      }
+      const res = await fetch('/api/mcp/token', { method: 'POST', credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.error || 'Unable to generate token.');
+        return;
+      }
+      document.getElementById('mcpTokenValue').value = data.token;
+      document.getElementById('mcpTokenReveal')?.classList.remove('hidden');
+      loadMcpTokenStatus();
+    });
+
+    document.getElementById('mcpRevokeBtn')?.addEventListener('click', async () => {
+      if (!confirm('Revoke your Claude connector token? Any connected Claude sessions will stop working until you generate a new one.')) return;
+      await fetch('/api/mcp/token', { method: 'DELETE', credentials: 'same-origin' });
+      document.getElementById('mcpTokenReveal')?.classList.add('hidden');
+      loadMcpTokenStatus();
+    });
+
+    loadProfile();
+    loadMcpTokenStatus();
+  </script>
+</body>
+</html>

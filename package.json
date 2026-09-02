@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "outlook-support-kanban-web",
   "version": "1.0.0",
   "private": true,
@@ -8,14 +8,41 @@
     "start": "node server.js",
     "backup:create": "powershell -ExecutionPolicy Bypass -File .\\scripts\\backup-create.ps1",
     "backup:list": "powershell -ExecutionPolicy Bypass -File .\\scripts\\backup-list.ps1",
-    "release:snapshot": "powershell -ExecutionPolicy Bypass -File .\\scripts\\release-snapshot.ps1"
+    "release:snapshot": "powershell -ExecutionPolicy Bypass -File .\\scripts\\release-snapshot.ps1",
+    "check": "node --check server.js",
+    "check:m365": "node scripts/check-m365.js",
+    "translate:serve": "docker compose -f docker/libretranslate.compose.yml up -d",
+    "translate:stop": "docker compose -f docker/libretranslate.compose.yml down",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "db:studio": "prisma studio"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@prisma/adapter-pg": "^7.8.0",
+    "@prisma/client": "^7.8.0",
     "bcryptjs": "^2.4.3",
-    "dotenv": "^16.4.5",
+    "compression": "^1.8.1",
+    "connect-pg-simple": "^10.0.0",
+    "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "express-rate-limit": "^7.4.1",
     "express-session": "^1.18.1",
-    "helmet": "^8.0.0"
+    "helmet": "^8.0.0",
+    "pg": "^8.21.0",
+    "xlsx": "^0.18.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "prisma": "^7.8.0"
+  },
+  "overrides": {
+    "@hono/node-server": "1.19.14",
+    "hono": "^4.12.25"
+  },
+  "optionalDependencies": {
+    "@huggingface/transformers": "^4.2.0"
   }
 }

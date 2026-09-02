@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
+  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
   <title>Quinta Support Login</title>
   <style>
     body{font-family:Segoe UI,Arial,sans-serif;background:linear-gradient(135deg,#f8fafc,#e2e8f0);display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
@@ -12,7 +14,15 @@
     label{display:block;font-size:12px;color:#475569;font-weight:600;margin-bottom:6px}
     input{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:12px;box-sizing:border-box}
     button{width:100%;padding:10px;border:none;border-radius:8px;background:#4f46e5;color:#fff;font-weight:700;cursor:pointer}
-    .err{margin-top:10px;color:#dc2626;font-size:12px;min-height:16px}
+    button:disabled{opacity:.65;cursor:not-allowed}
+    .link-btn{border:0;background:transparent;color:#4f46e5;width:auto;padding:0;font-size:13px;font-weight:700}
+    .row{display:flex;justify-content:flex-end;margin:-4px 0 14px}
+    .err,.msg{margin-top:10px;font-size:12px;min-height:16px}
+    .err{color:#dc2626}
+    .msg{color:#64748b}
+    .msg.ok{color:#16a34a}
+    .msg.err{color:#dc2626}
+    .hidden{display:none}
   </style>
 </head>
 <body>
@@ -23,11 +33,35 @@
     <input id="username" name="username" autocomplete="username" required />
     <label for="password">Password</label>
     <input id="password" name="password" type="password" autocomplete="current-password" required />
+    <div class="row"><button class="link-btn" type="button" id="show-forgot">Forgot password?</button></div>
     <button type="submit">Sign in</button>
     <div class="err" id="err"></div>
   </form>
+  <form class="card hidden" id="forgot-form">
+    <h1>Forgot password</h1>
+    <p>Enter your account email. If it exists, we will send you a password reset link.</p>
+    <label for="reset-email">Email</label>
+    <input id="reset-email" name="email" type="email" autocomplete="email" required />
+    <button id="forgot-submit" type="submit">Send reset email</button>
+    <div class="msg" id="forgot-msg"></div>
+    <div class="row" style="justify-content:flex-start;margin:14px 0 0"><button class="link-btn" type="button" id="back-login">Back to sign in</button></div>
+  </form>
   <script>
-    document.getElementById('login-form').addEventListener('submit', async (e) => {
+    const loginForm = document.getElementById('login-form');
+    const forgotForm = document.getElementById('forgot-form');
+    const forgotMsg = document.getElementById('forgot-msg');
+    document.getElementById('show-forgot').addEventListener('click', () => {
+      loginForm.classList.add('hidden');
+      forgotForm.classList.remove('hidden');
+      forgotMsg.textContent = '';
+      forgotMsg.className = 'msg';
+    });
+    document.getElementById('back-login').addEventListener('click', () => {
+      forgotForm.classList.add('hidden');
+      loginForm.classList.remove('hidden');
+    });
+
+    loginForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const username = document.getElementById('username').value.trim();
       const password = document.getElementById('password').value;
@@ -38,10 +72,56 @@
         body: JSON.stringify({ username, password })
       });
       if (res.ok) {
-        location.href = '/';
+        // Only ever honor a same-origin redirect back into the OAuth
+        // authorize flow - anything else falls back to '/' so this can't be
+        // abused as an open redirect via a crafted ?next= link.
+        const next = new URLSearchParams(location.search).get('next');
+        location.href = (next && next.startsWith('/oauth/authorize')) ? next : '/';
         return;
       }
       document.getElementById('err').textContent = 'Invalid credentials.';
+    });
+
+    forgotForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = document.getElementById('reset-email').value.trim();
+      const btn = document.getElementById('forgot-submit');
+      forgotMsg.textContent = '';
+      forgotMsg.className = 'msg';
+      btn.disabled = true;
+      try {
+        const res = await fetch('/auth/forgot-password', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          credentials: 'include',
+          body: JSON.stringify({ email })
+        });
+        const out = await res.json().catch(() => ({}));
+        if (res.ok) {
+          forgotMsg.textContent = 'Reset email sent. Check your inbox.';
+          forgotMsg.className = 'msg ok';
+        } else if (out.error === 'email_not_found') {
+          forgotMsg.textContent = 'No active user exists with that email.';
+          forgotMsg.className = 'msg err';
+        } else if (out.error === 'send_email_failed') {
+          forgotMsg.textContent = out.sendVia === 'flow'
+            ? 'Could not send the email. Ask an admin to check the mail flow.'
+            : 'Could not send email. Ask an admin to reconnect Microsoft 365.';
+          forgotMsg.className = 'msg err';
+          // The real reason, for whoever is helping them - it never fits in the
+          // line above and it is what makes the difference between a guess and
+          // a fix.
+          if (out.detail) console.warn('[forgot-password]', out.detail);
+        } else {
+          forgotMsg.textContent = 'Unable to send reset email.';
+          forgotMsg.className = 'msg err';
+        }
+      } catch (_) {
+        forgotMsg.textContent = 'Network error. Please try again.';
+        forgotMsg.className = 'msg err';
+      } finally {
+        btn.disabled = false;
+      }
     });
   </script>
 </body>

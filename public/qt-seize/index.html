@@ -1,0 +1,1465 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
+  <title>QT Seize</title>
+  <style>
+    /* QT Seize
+       ---------
+       Two-pane tool: the controls on the left, the image and its batch queue on
+       the right. Three things drive the styling here.
+
+       It is shown two ways. On its own at /qt-seize/, and inside an iframe on
+       the support board, which already draws a titled header and a Back button
+       around it. So the page's own header is hidden when it is framed (see
+       .app.embedded) - two stacked titles saying "QT Seize" was wasted vertical
+       space in the place with the least of it.
+
+       It follows the viewer's theme. The board it is embedded in has a dark
+       mode, and a white page in a dark frame is what gives away an iframe.
+       There is no theme toggle to read from in here, so prefers-color-scheme is
+       the signal, and every colour is a token defined in both.
+
+       The preview is the subject. Everything else is deliberately quiet: one
+       accent colour, hairline borders, and no shadow big enough to compete with
+       the image being worked on. */
+    :root {
+      color-scheme: light;
+      --bg: #f4f6fa;
+      --bg-soft: #eceff5;
+      --panel: #ffffff;
+      --panel-soft: #f8fafc;
+      --ink: #0f172a;
+      --ink-soft: #344054;
+      --muted: #667085;
+      --muted-light: #98a2b3;
+      --border: #e3e7ee;
+      --border-strong: #cdd4e0;
+      --accent: #0f766e;
+      --accent-dark: #0b5f59;
+      --accent-ink: #ffffff;
+      --accent-soft: #e7faf5;
+      --accent-rgb: 15, 118, 110;
+      --blue-soft: #eff6ff;
+      --blue-ink: #1e40af;
+      --danger: #b42318;
+      --danger-soft: #fee4e2;
+      --shadow: 16, 24, 40;
+      --radius: 12px;
+      --radius-sm: 9px;
+      --radius-lg: 16px;
+      /* The checkerboard behind a transparent image. */
+      --checker: #e8ecf2;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --bg: #0b1220;
+        --bg-soft: #131c2e;
+        --panel: #151f33;
+        --panel-soft: #1b2740;
+        --ink: #e8edf7;
+        --ink-soft: #c3cddf;
+        --muted: #93a0b8;
+        --muted-light: #6f7d95;
+        --border: #26324b;
+        --border-strong: #354463;
+        --accent: #2dd4bf;
+        --accent-dark: #14b8a6;
+        --accent-ink: #04201d;
+        --accent-soft: #10312e;
+        --accent-rgb: 45, 212, 191;
+        --blue-soft: #16233d;
+        --blue-ink: #93b4fc;
+        --danger: #fca5a5;
+        --danger-soft: #3b1a1a;
+        --shadow: 0, 0, 0;
+        --checker: #1a2438;
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, "Segoe UI", Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    /* Framed by the board, which supplies its own header. */
+    .app.embedded { min-height: 0; grid-template-rows: 1fr; }
+    .app.embedded > header { display: none; }
+    .app.embedded > main { padding-top: 16px; }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 15px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+
+    .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+
+    /* A mark rather than an icon font: one element, scales cleanly, and needs no
+       asset to load before the header looks finished. */
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      color: var(--accent-ink);
+      background: linear-gradient(140deg, var(--accent) 0%, var(--accent-dark) 100%);
+      box-shadow: 0 6px 14px rgba(var(--accent-rgb), .22);
+    }
+
+    .brand-mark svg { width: 18px; height: 18px; }
+
+    h1 {
+      margin: 0;
+      font-size: 19px;
+      font-weight: 800;
+      letter-spacing: -.01em;
+      line-height: 1.2;
+    }
+
+    .brand-sub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 1px;
+    }
+
+    .status {
+      color: var(--muted);
+      font-size: 12.5px;
+      font-weight: 600;
+      text-align: right;
+      min-width: 0;
+    }
+
+    .status.error { color: var(--danger); }
+
+    main {
+      display: grid;
+      grid-template-columns: 340px minmax(0, 1fr);
+      gap: 16px;
+      padding: 16px 18px 20px;
+      min-height: 0;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: 0 1px 2px rgba(var(--shadow), .04);
+    }
+
+    .controls {
+      padding: 15px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+      /* Hug the fields instead of stretching the card to the stage's height -
+         stretched, it left a large empty area below the last control that read
+         as something missing. */
+      align-self: start;
+    }
+
+    /* ---- Drop zone ---- */
+
+    .drop {
+      min-height: 152px;
+      border: 1.5px dashed var(--border-strong);
+      border-radius: var(--radius);
+      display: grid;
+      place-items: center;
+      padding: 20px 18px;
+      text-align: center;
+      cursor: pointer;
+      background: var(--panel-soft);
+      transition: border-color .16s ease, background .16s ease, transform .16s ease;
+    }
+
+    .drop:hover { border-color: var(--accent); background: var(--accent-soft); }
+    .drop.dragging {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      transform: scale(1.01);
+      box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), .3);
+    }
+
+    .drop-mark {
+      width: 40px;
+      height: 40px;
+      margin: 0 auto 11px;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      color: var(--accent);
+      background: var(--accent-soft);
+      box-shadow: 0 0 0 1px rgba(var(--accent-rgb), .16);
+      transition: transform .16s ease;
+    }
+
+    .drop-mark svg { width: 19px; height: 19px; }
+    .drop:hover .drop-mark, .drop.dragging .drop-mark { transform: translateY(-2px); }
+    .drop.dragging .drop-mark { background: var(--panel); }
+
+    .drop strong { display: block; font-size: 14.5px; margin-bottom: 5px; }
+    .drop span, .note { color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+    /* ---- Fields ---- */
+
+    label, .field-label {
+      display: grid;
+      gap: 7px;
+      font-size: 10.5px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    select, input[type="number"], textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 9px 11px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--ink);
+      background: var(--panel);
+      outline: none;
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+
+    select, input[type="number"] { min-height: 40px; resize: none; }
+    textarea { min-height: 74px; resize: vertical; }
+
+    select:focus, input[type="number"]:focus, textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3.5px rgba(var(--accent-rgb), .15);
+    }
+
+    select:hover, input[type="number"]:hover { border-color: var(--border-strong); }
+
+    .custom-resolution { display: none; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .custom-resolution.open { display: grid; }
+
+    /* ---- Mode picker ---- */
+
+    .mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+
+    .mode-option {
+      position: relative;
+      display: grid;
+      gap: 4px;
+      align-content: start;
+      min-height: 84px;
+      padding: 11px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--panel);
+      cursor: pointer;
+      transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
+    }
+
+    .mode-option:hover { border-color: var(--border-strong); background: var(--panel-soft); }
+    .mode-option input { position: absolute; opacity: 0; pointer-events: none; }
+
+    .mode-option strong {
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--ink);
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    .mode-option span {
+      font-size: 11.5px;
+      line-height: 1.4;
+      color: var(--muted);
+      font-weight: 500;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    .mode-dot {
+      width: 9px;
+      height: 9px;
+      flex: 0 0 auto;
+      border-radius: 99px;
+      background: var(--border-strong);
+      box-shadow: 0 0 0 3px var(--bg-soft);
+      transition: background .16s ease, box-shadow .16s ease;
+    }
+
+    .mode-option:has(input:checked) {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .13);
+    }
+
+    .mode-option:has(input:checked) .mode-dot {
+      background: var(--accent);
+      box-shadow: 0 0 0 3px rgba(var(--accent-rgb), .18);
+    }
+
+    .mode-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* ---- Buttons ---- */
+
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      min-height: 40px;
+      padding: 10px 13px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+      transition: background .14s ease, border-color .14s ease, box-shadow .14s ease, transform .1s ease, color .14s ease;
+    }
+
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button:not(:disabled):active { transform: translateY(1px); }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    .primary {
+      background: var(--accent);
+      color: var(--accent-ink);
+      box-shadow: 0 6px 14px rgba(var(--accent-rgb), .22);
+    }
+
+    .primary:hover:not(:disabled) { background: var(--accent-dark); }
+    .primary:disabled { box-shadow: none; }
+
+    .secondary {
+      background: var(--panel);
+      border-color: var(--border);
+      color: var(--ink-soft);
+    }
+
+    .secondary:hover:not(:disabled) { border-color: var(--border-strong); background: var(--panel-soft); }
+
+    /* ---- Stage ---- */
+
+    .stage {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto auto;
+      overflow: hidden;
+    }
+
+    .preview {
+      min-height: 340px;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      background-color: var(--bg-soft);
+      background-image:
+        linear-gradient(45deg, var(--checker) 25%, transparent 25%),
+        linear-gradient(-45deg, var(--checker) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, var(--checker) 75%),
+        linear-gradient(-45deg, transparent 75%, var(--checker) 75%);
+      background-size: 24px 24px;
+      background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+    }
+
+    .preview img {
+      width: min(100%, 1100px);
+      max-height: 56vh;
+      object-fit: contain;
+      border-radius: var(--radius-sm);
+      box-shadow: 0 14px 34px rgba(var(--shadow), .22), 0 0 0 1px rgba(var(--shadow), .06);
+    }
+
+    .empty {
+      width: min(100%, 720px);
+      aspect-ratio: 16 / 9;
+      /* 16/9 of a wide stage is enormous, and an empty box the size of the
+         window is not a friendlier empty state than a sensible one. */
+      max-height: 300px;
+      border: 1px dashed var(--border-strong);
+      border-radius: var(--radius);
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-size: 13px;
+      background: var(--panel);
+      text-align: center;
+      padding: 20px;
+    }
+
+    /* ---- Batch queue ---- */
+
+    .queue {
+      border-top: 1px solid var(--border);
+      background: var(--panel);
+      max-height: 216px;
+      overflow: auto;
+      padding: 10px 12px;
+      display: grid;
+      gap: 7px;
+    }
+
+    .queue:empty { display: none; }
+
+    .q-item {
+      display: grid;
+      grid-template-columns: 52px minmax(0, 1fr) auto auto;
+      align-items: center;
+      gap: 11px;
+      padding: 7px 9px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--panel);
+      cursor: pointer;
+      transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
+    }
+
+    .q-item:hover { border-color: var(--border-strong); background: var(--panel-soft); }
+
+    .q-item.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      box-shadow: 0 0 0 2.5px rgba(var(--accent-rgb), .13);
+    }
+
+    .q-thumb {
+      width: 52px;
+      height: 40px;
+      object-fit: cover;
+      border-radius: 6px;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+    }
+
+    .q-info { min-width: 0; }
+
+    .q-name {
+      font-size: 12.5px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .q-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .q-badge {
+      font-size: 10.5px;
+      font-weight: 800;
+      padding: 3px 9px;
+      border-radius: 99px;
+      white-space: nowrap;
+      border: 1px solid transparent;
+    }
+
+    .q-badge.pending { background: var(--bg-soft); color: var(--muted); border-color: var(--border); }
+    .q-badge.working { background: var(--blue-soft); color: var(--blue-ink); }
+    .q-badge.done { background: var(--accent-soft); color: var(--accent-dark); border-color: rgba(var(--accent-rgb), .35); }
+    .q-badge.error { background: var(--danger-soft); color: var(--danger); }
+
+    .q-remove {
+      border: none;
+      background: transparent;
+      color: var(--muted-light);
+      font-size: 17px;
+      line-height: 1;
+      min-height: 0;
+      padding: 3px 6px;
+      font-weight: 900;
+      border-radius: 7px;
+    }
+
+    .q-remove:hover { color: var(--danger); background: var(--danger-soft); }
+
+    .meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 11px 14px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--panel);
+    }
+
+    /* The output size is the one number worth reading twice before pressing
+       Generate, so it gets to look like a value rather than a caption. */
+    #outputMeta {
+      font-variant-numeric: tabular-nums;
+      color: var(--ink-soft);
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      padding: 3px 10px;
+      white-space: nowrap;
+    }
+
+    .error { color: var(--danger); }
+
+    @media (max-width: 980px) {
+      main { grid-template-columns: 1fr; padding: 14px; }
+      header { padding: 13px 14px; align-items: flex-start; flex-direction: column; gap: 8px; }
+      .status { text-align: left; }
+      .preview img { max-height: 44vh; }
+      .preview { min-height: 240px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9"></path>
+            <path d="M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9"></path>
+            <path d="M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15"></path>
+            <path d="M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"></path>
+          </svg>
+        </span>
+        <div>
+          <h1>QT Seize</h1>
+          <div class="brand-sub">Expand or resize images to a chosen frame</div>
+        </div>
+      </div>
+      <div class="status" id="status">Waiting for images.</div>
+    </header>
+    <main>
+      <section class="panel controls">
+        <div class="drop" id="drop">
+          <input id="file" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
+          <div>
+            <span class="drop-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 16V4"></path><path d="m7.5 8.5 4.5-4.5 4.5 4.5"></path>
+                <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"></path>
+              </svg>
+            </span>
+            <strong>Drop images here</strong>
+            <span>PNG, JPG or WebP &mdash; or click to browse. Add several to batch-process them with the same settings.</span>
+          </div>
+        </div>
+        <div class="field-label">Output mode
+          <div class="mode-grid">
+            <label class="mode-option">
+              <input type="radio" name="output-mode" value="expand" checked />
+              <strong><span class="mode-dot"></span>Expand</strong>
+              <span>Fill the selected frame from the same photo.</span>
+            </label>
+            <label class="mode-option">
+              <input type="radio" name="output-mode" value="resize" />
+              <strong><span class="mode-dot"></span>Resize</strong>
+              <span>Fit the original image into the selected size.</span>
+            </label>
+          </div>
+        </div>
+        <label>Resolution
+          <select id="resolution">
+            <option value="1920x1080">Full HD - 1920 x 1080</option>
+            <option value="2560x1440">QHD - 2560 x 1440</option>
+            <option value="3840x2160">4K UHD - 3840 x 2160</option>
+            <option value="1280x720">HD - 1280 x 720</option>
+            <option value="1080x1080">Square - 1080 x 1080</option>
+            <option value="1080x1920">Story - 1080 x 1920</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+        <div class="custom-resolution" id="custom-resolution">
+          <label>Width
+            <input id="custom-width" type="number" min="256" max="7680" step="1" value="1920" />
+          </label>
+          <label>Height
+            <input id="custom-height" type="number" min="256" max="7680" step="1" value="1080" />
+          </label>
+        </div>
+        <div class="actions">
+          <button class="primary" id="generate" type="button" disabled>Generate</button>
+          <button class="secondary" id="download" type="button" disabled>Download</button>
+        </div>
+        <button class="secondary" id="reset" type="button">Clear all</button>
+        <div class="note" id="details">Download asks where to save. With several images queued it offers a folder and writes them all into it.</div>
+      </section>
+      <section class="panel stage">
+        <div class="preview" id="preview"><div class="empty">Upload one or more images to start.</div></div>
+        <div class="queue" id="queue"></div>
+        <div class="meta"><span id="sourceMeta">No images selected</span><span id="outputMeta">1920 x 1080 PNG</span></div>
+      </section>
+    </main>
+  </div>
+  <script>
+    /* The support board embeds this page in an iframe under its own titled
+       header and Back button, so a second "QT Seize" heading inside the frame is
+       duplicate chrome in the view with the least room to spare. Detected here
+       rather than passed in as a query parameter, so the board's <iframe src>
+       needs to know nothing about it. */
+    if (window.self !== window.top) {
+      document.querySelector('.app')?.classList.add('embedded');
+      document.title = 'QT Seize (embedded)';
+    }
+
+    // Each queue entry: { id, file, name, sourceUrl, w, h, resultUrl, status }
+    const state = { items: [], activeId: null, seq: 0 };
+
+    const fileInput = document.getElementById('file');
+    const drop = document.getElementById('drop');
+    const preview = document.getElementById('preview');
+    const queueEl = document.getElementById('queue');
+    const statusEl = document.getElementById('status');
+    const sourceMeta = document.getElementById('sourceMeta');
+    const outputMeta = document.getElementById('outputMeta');
+    const generateBtn = document.getElementById('generate');
+    const downloadBtn = document.getElementById('download');
+    const resolutionSelect = document.getElementById('resolution');
+    const customResolution = document.getElementById('custom-resolution');
+    const customWidth = document.getElementById('custom-width');
+    const customHeight = document.getElementById('custom-height');
+    const outputModeInputs = [...document.querySelectorAll('input[name="output-mode"]')];
+
+    function getOutputMode() {
+      return outputModeInputs.find(input => input.checked)?.value || 'expand';
+    }
+
+    function setStatus(text, isError) {
+      statusEl.textContent = text;
+      statusEl.classList.toggle('error', !!isError);
+    }
+
+    function loadImageFromUrl(url) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('Could not load image.'));
+        img.src = url;
+      });
+    }
+
+    function canvasToDataUrl(canvas) {
+      return canvas.toDataURL('image/png');
+    }
+
+    function getTargetSize() {
+      if (resolutionSelect.value === 'custom') {
+        const width = Math.round(Number(customWidth.value || 0));
+        const height = Math.round(Number(customHeight.value || 0));
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width < 256 || height < 256 || width > 7680 || height > 7680) {
+          throw new Error('Choose a resolution between 256 and 7680 pixels per side.');
+        }
+        return { width, height };
+      }
+      const [width, height] = resolutionSelect.value.split('x').map(Number);
+      return { width, height };
+    }
+
+    function updateOutputMeta() {
+      try {
+        const target = getTargetSize();
+        const modeLabel = getOutputMode() === 'resize' ? 'resize' : 'expand';
+        outputMeta.textContent = `${target.width} x ${target.height} PNG - ${modeLabel}`;
+      } catch (_) {
+        outputMeta.textContent = 'Custom PNG';
+      }
+      customResolution.classList.toggle('open', resolutionSelect.value === 'custom');
+    }
+
+    function makeCanvas(width, height) {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      return { canvas, ctx };
+    }
+
+    // Centered "contain" placement of a source inside a target frame.
+    function containRect(iw, ih, tw, th) {
+      const scale = Math.min(tw / iw, th / ih);
+      const w = Math.round(iw * scale);
+      const h = Math.round(ih * scale);
+      return { x: Math.round((tw - w) / 2), y: Math.round((th - h) / 2), w, h };
+    }
+
+    // Seamlessly fill a canvas by mirror-tiling the source around a centered
+    // rect: every neighbouring tile is a reflection, so edges line up and a
+    // subsequent blur erases the seams. This continues the photo's own edge
+    // content into the expanded area instead of a generic centre-zoom.
+    function mirrorTile(ctx, img, r, cw, ch) {
+      const nx = Math.ceil(Math.max(r.x, cw - (r.x + r.w)) / r.w) + 1;
+      const ny = Math.ceil(Math.max(r.y, ch - (r.y + r.h)) / r.h) + 1;
+      for (let i = -nx; i <= nx; i++) {
+        for (let j = -ny; j <= ny; j++) {
+          const flipX = (((i % 2) + 2) % 2) === 1;
+          const flipY = (((j % 2) + 2) % 2) === 1;
+          ctx.save();
+          ctx.translate(r.x + (i + (flipX ? 1 : 0)) * r.w, r.y + (j + (flipY ? 1 : 0)) * r.h);
+          ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+          ctx.drawImage(img, 0, 0, r.w, r.h);
+          ctx.restore();
+        }
+      }
+    }
+
+    // Stretch the subject's own edge pixels outward into a gap, fading away
+    // from the subject boundary, so real edge content (a horizon, wall, sky)
+    // appears to continue instead of a symmetric mirror. Rendered on a small
+    // buffer for a cheap blur, then upscaled into place.
+    function edgeExtend(ctx, img, r, gaps) {
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+      const strip = 0.16; // fraction of the image used as the seed edge
+      const place = (sx, sy, sw, sh, dx, dy, dw, dh, axis, subjectAt) => {
+        if (dw <= 1 || dh <= 1) return;
+        const scale = Math.min(1, 420 / Math.max(dw, dh));
+        const bw = Math.max(2, Math.round(dw * scale));
+        const bh = Math.max(2, Math.round(dh * scale));
+        const { canvas: buf, ctx: bx } = makeCanvas(bw, bh);
+        const blurPx = Math.max(2, Math.round((axis === 'x' ? bw : bh) * 0.25));
+        bx.filter = `blur(${blurPx}px)`;
+        bx.drawImage(img, sx, sy, sw, sh, 0, 0, bw, bh);
+        bx.filter = 'none';
+        // Fade the strip out as it moves away from the subject edge.
+        bx.globalCompositeOperation = 'destination-in';
+        const g = axis === 'x'
+          ? bx.createLinearGradient(0, 0, bw, 0)
+          : bx.createLinearGradient(0, 0, 0, bh);
+        const near = subjectAt === 'start' ? 0 : 1;
+        g.addColorStop(0, near === 0 ? 'rgba(0,0,0,1)' : 'rgba(0,0,0,0)');
+        g.addColorStop(1, near === 0 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        bx.fillStyle = g;
+        bx.fillRect(0, 0, bw, bh);
+        bx.globalCompositeOperation = 'source-over';
+        ctx.drawImage(buf, dx, dy, dw, dh);
+      };
+      // Left / right gaps seed from the matching vertical edge strip.
+      if (gaps.gapR > 1) place(iw * (1 - strip), 0, iw * strip, ih, r.x + r.w, r.y, gaps.gapR, r.h, 'x', 'start');
+      if (gaps.gapL > 1) place(0, 0, iw * strip, ih, 0, r.y, gaps.gapL, r.h, 'x', 'end');
+      // Top / bottom gaps seed from the matching horizontal edge strip.
+      if (gaps.gapB > 1) place(0, ih * (1 - strip), iw, ih * strip, r.x, r.y + r.h, r.w, gaps.gapB, 'y', 'start');
+      if (gaps.gapT > 1) place(0, 0, iw, ih * strip, r.x, 0, r.w, gaps.gapT, 'y', 'end');
+    }
+
+    // A cached low-res monochrome noise tile, generated once and reused.
+    let _noiseTile = null;
+    function noiseTile() {
+      if (_noiseTile) return _noiseTile;
+      const size = 160;
+      const { canvas, ctx } = makeCanvas(size, size);
+      const id = ctx.createImageData(size, size);
+      for (let i = 0; i < id.data.length; i += 4) {
+        const v = 90 + Math.random() * 90;
+        id.data[i] = id.data[i + 1] = id.data[i + 2] = v;
+        id.data[i + 3] = 255;
+      }
+      ctx.putImageData(id, 0, 0);
+      _noiseTile = canvas;
+      return canvas;
+    }
+
+    // Tile subtle film-grain across the frame with an 'overlay' blend so the
+    // fill reads as textured photography rather than a glassy gradient.
+    function addGrain(ctx, w, h, alpha) {
+      const n = noiseTile();
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.globalCompositeOperation = 'overlay';
+      for (let y = 0; y < h; y += n.height) {
+        for (let x = 0; x < w; x += n.width) ctx.drawImage(n, x, y);
+      }
+      ctx.restore();
+    }
+
+    function resizeCanvasHighQuality(sourceCanvas, width, height) {
+      let current = sourceCanvas;
+      while (current.width * 0.5 > width && current.height * 0.5 > height) {
+        const next = makeCanvas(Math.max(width, Math.round(current.width * 0.5)), Math.max(height, Math.round(current.height * 0.5)));
+        next.ctx.drawImage(current, 0, 0, next.canvas.width, next.canvas.height);
+        current = next.canvas;
+      }
+      if (current.width === width && current.height === height) return current;
+      const finalCanvas = makeCanvas(width, height);
+      finalCanvas.ctx.drawImage(current, 0, 0, width, height);
+      return finalCanvas.canvas;
+    }
+
+    function resizeImageHighQuality(img, width, height) {
+      const start = makeCanvas(img.naturalWidth, img.naturalHeight);
+      start.ctx.drawImage(img, 0, 0);
+      return resizeCanvasHighQuality(start.canvas, width, height);
+    }
+
+    async function resizeOnly(img, target) {
+      const resizedCanvas = resizeImageHighQuality(img, target.width, target.height);
+      return canvasToDataUrl(resizedCanvas);
+    }
+
+    function clampInt(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+    // Feather a subject canvas so it dissolves into the fill on the sides that
+    // were actually extended (transparent gap side, opaque interior).
+    function featherSubject(fx, w, h, gaps, frac) {
+      fx.globalCompositeOperation = 'destination-in';
+      if (gaps.gapL > 1 || gaps.gapR > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(w * frac)) / w);
+        const g = fx.createLinearGradient(0, 0, w, 0);
+        g.addColorStop(0, gaps.gapL > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gaps.gapR > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, w, h);
+      }
+      if (gaps.gapT > 1 || gaps.gapB > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(h * frac)) / h);
+        const g = fx.createLinearGradient(0, 0, 0, h);
+        g.addColorStop(0, gaps.gapT > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gaps.gapB > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, w, h);
+      }
+      fx.globalCompositeOperation = 'source-over';
+    }
+
+    // Sum of squared RGB differences between the PxP patch around (tx,ty) and
+    // the one around (sx,sy) in a float RGB buffer. Bails early past `cutoff`.
+    function patchDist(buf, W, H, tx, ty, sx, sy, P, cutoff) {
+      let sum = 0;
+      for (let dy = -P; dy <= P; dy++) {
+        const ty2 = clampInt(ty + dy, 0, H - 1), sy2 = clampInt(sy + dy, 0, H - 1);
+        for (let dx = -P; dx <= P; dx++) {
+          const tx2 = clampInt(tx + dx, 0, W - 1), sx2 = clampInt(sx + dx, 0, W - 1);
+          const ti = (ty2 * W + tx2) * 3, si = (sy2 * W + sx2) * 3;
+          const dr = buf[ti] - buf[si], dg = buf[ti + 1] - buf[si + 1], db = buf[ti + 2] - buf[si + 2];
+          sum += dr * dr + dg * dg + db * db;
+        }
+        if (sum >= cutoff) return sum;
+      }
+      return sum;
+    }
+
+    // PatchMatch-based hole filling (Barnes et al. + Wexler-style EM
+    // reconstruction). `hole` marks pixels to synthesise; known pixels are the
+    // photo itself and are never sampled from anything but real content, so the
+    // fill is grown from the picture's own colours and textures.
+    function patchMatchInpaint(buf, hole, W, H) {
+      const P = 2;              // 5x5 patches
+      const N = W * H;
+
+      // Source centres whose whole patch is in-bounds AND fully known.
+      const validSrc = new Uint8Array(N);
+      const srcList = [];
+      for (let y = P; y < H - P; y++) {
+        for (let x = P; x < W - P; x++) {
+          let ok = 1;
+          for (let dy = -P; dy <= P && ok; dy++) {
+            for (let dx = -P; dx <= P; dx++) {
+              if (hole[(y + dy) * W + (x + dx)]) { ok = 0; break; }
+            }
+          }
+          if (ok) { validSrc[y * W + x] = 1; srcList.push(y * W + x); }
+        }
+      }
+      if (srcList.length === 0) return;
+
+      // Target centres = any patch overlapping the hole (hole dilated by P).
+      const active = new Uint8Array(N);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          if (!hole[y * W + x]) continue;
+          for (let dy = -P; dy <= P; dy++) {
+            const yy = y + dy; if (yy < 0 || yy >= H) continue;
+            for (let dx = -P; dx <= P; dx++) {
+              const xx = x + dx; if (xx < 0 || xx >= W) continue;
+              active[yy * W + xx] = 1;
+            }
+          }
+        }
+      }
+
+      const nnx = new Int32Array(N), nny = new Int32Array(N), nnd = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        if (!active[i]) { nnd[i] = Infinity; continue; }
+        const tx = i % W, ty = (i / W) | 0;
+        const s = srcList[(Math.random() * srcList.length) | 0];
+        const sx = s % W, sy = (s / W) | 0;
+        nnx[i] = sx; nny[i] = sy;
+        nnd[i] = patchDist(buf, W, H, tx, ty, sx, sy, P, Infinity);
+      }
+
+      const maxR = Math.max(W, H);
+      const ITERS = 6;
+      const accR = new Float32Array(N), accG = new Float32Array(N), accB = new Float32Array(N), accW = new Float32Array(N);
+      const norm = 25 * 3 * ((2 * P + 1) * (2 * P + 1));
+
+      for (let it = 0; it < ITERS; it++) {
+        const forward = (it % 2 === 0);
+        const xs = forward ? 0 : W - 1, xe = forward ? W : -1;
+        const ys = forward ? 0 : H - 1, ye = forward ? H : -1;
+        const step = forward ? 1 : -1;
+
+        for (let ty = ys; ty !== ye; ty += step) {
+          for (let tx = xs; tx !== xe; tx += step) {
+            const i = ty * W + tx;
+            if (!active[i]) continue;
+            let bx = nnx[i], by = nny[i], bd = nnd[i];
+
+            const px = tx - step;
+            if (px >= 0 && px < W) {
+              const ni = i - step;
+              if (active[ni]) {
+                const cx = nnx[ni] + step, cy = nny[ni];
+                if (cx >= P && cx < W - P && validSrc[cy * W + cx]) {
+                  const d = patchDist(buf, W, H, tx, ty, cx, cy, P, bd);
+                  if (d < bd) { bd = d; bx = cx; by = cy; }
+                }
+              }
+            }
+            const py = ty - step;
+            if (py >= 0 && py < H) {
+              const ni = i - step * W;
+              if (active[ni]) {
+                const cx = nnx[ni], cy = nny[ni] + step;
+                if (cy >= P && cy < H - P && validSrc[cy * W + cx]) {
+                  const d = patchDist(buf, W, H, tx, ty, cx, cy, P, bd);
+                  if (d < bd) { bd = d; bx = cx; by = cy; }
+                }
+              }
+            }
+            for (let radius = maxR; radius >= 1; radius = (radius / 2) | 0) {
+              const rx = bx + (((Math.random() * 2 - 1) * radius) | 0);
+              const ry = by + (((Math.random() * 2 - 1) * radius) | 0);
+              if (rx >= P && ry >= P && rx < W - P && ry < H - P && validSrc[ry * W + rx]) {
+                const d = patchDist(buf, W, H, tx, ty, rx, ry, P, bd);
+                if (d < bd) { bd = d; bx = rx; by = ry; }
+              }
+            }
+            nnx[i] = bx; nny[i] = by; nnd[i] = bd;
+          }
+        }
+
+        // EM reconstruction: each hole pixel is the similarity-weighted average
+        // of the matched source pixel from every patch that covers it.
+        accR.fill(0); accG.fill(0); accB.fill(0); accW.fill(0);
+        for (let ty = 0; ty < H; ty++) {
+          for (let tx = 0; tx < W; tx++) {
+            const i = ty * W + tx;
+            if (!active[i]) continue;
+            const sx = nnx[i], sy = nny[i];
+            const w = 1 / (1 + nnd[i] / norm);
+            for (let dy = -P; dy <= P; dy++) {
+              const pyy = ty + dy; if (pyy < 0 || pyy >= H) continue;
+              const syy = clampInt(sy + dy, 0, H - 1);
+              for (let dx = -P; dx <= P; dx++) {
+                const pxx = tx + dx; if (pxx < 0 || pxx >= W) continue;
+                const hp = pyy * W + pxx;
+                if (!hole[hp]) continue;
+                const sxx = clampInt(sx + dx, 0, W - 1);
+                const sidx = (syy * W + sxx) * 3;
+                accR[hp] += buf[sidx] * w; accG[hp] += buf[sidx + 1] * w;
+                accB[hp] += buf[sidx + 2] * w; accW[hp] += w;
+              }
+            }
+          }
+        }
+        for (let p = 0; p < N; p++) {
+          if (hole[p] && accW[p] > 0) {
+            buf[p * 3] = accR[p] / accW[p];
+            buf[p * 3 + 1] = accG[p] / accW[p];
+            buf[p * 3 + 2] = accB[p] / accW[p];
+          }
+        }
+      }
+    }
+
+    // Content-aware Expand: synthesise the extended area from the photo's own
+    // patches, then composite the sharp original on top. Falls back to the
+    // fast blurred fill if anything goes wrong (e.g. a tainted canvas).
+    async function contentAwareExpand(img, target) {
+      try {
+        const tw = target.width, th = target.height;
+        const iw = img.naturalWidth, ih = img.naturalHeight;
+        const r = containRect(iw, ih, tw, th);
+        const gaps = { gapL: r.x, gapR: tw - (r.x + r.w), gapT: r.y, gapB: th - (r.y + r.h) };
+        if (gaps.gapL < 2 && gaps.gapR < 2 && gaps.gapT < 2 && gaps.gapB < 2) {
+          return resizeOnly(img, target);
+        }
+
+        // Small working frame - synthesis is done here, the subject is re-added
+        // at full resolution afterwards so its detail is never downsampled.
+        //
+        // 320 rather than 224: measured on a ~36% hole (a 16:9 photo expanded
+        // to square), PatchMatch costs 197ms at 224 and 354ms at 320, for 43%
+        // more linear detail in the synthesised band. Past this it turns
+        // superlinear as the patch search stops fitting in cache - 384 is
+        // 537ms, 448 is 935ms and 512 is 2.3s - so 320 is the last size that
+        // stays comfortably interactive, including on hardware slower than a
+        // dev machine and when a queue of images is processed one after another.
+        const WORK_MAX = 320;
+        const s = Math.min(1, WORK_MAX / Math.max(tw, th));
+        const W = Math.max(24, Math.round(tw * s));
+        const H = Math.max(24, Math.round(th * s));
+        const rw = containRect(iw, ih, W, H);
+
+        const { canvas: wc, ctx: wx } = makeCanvas(W, H);
+        // Seed the hole with a blurred mirror estimate so EM converges fast.
+        wx.filter = `blur(${Math.max(2, Math.round(Math.min(W, H) * 0.05))}px)`;
+        mirrorTile(wx, img, rw, W, H);
+        wx.filter = 'none';
+        // Overwrite the known region with the real (downscaled) photo.
+        wx.drawImage(img, rw.x, rw.y, rw.w, rw.h);
+
+        const idata = wx.getImageData(0, 0, W, H);
+        const px = idata.data;
+        const N = W * H;
+        const buf = new Float32Array(N * 3);
+        for (let i = 0; i < N; i++) {
+          buf[i * 3] = px[i * 4]; buf[i * 3 + 1] = px[i * 4 + 1]; buf[i * 3 + 2] = px[i * 4 + 2];
+        }
+        const hole = new Uint8Array(N);
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const inSub = x >= rw.x && x < rw.x + rw.w && y >= rw.y && y < rw.y + rw.h;
+            if (!inSub) hole[y * W + x] = 1;
+          }
+        }
+
+        patchMatchInpaint(buf, hole, W, H);
+
+        for (let i = 0; i < N; i++) {
+          px[i * 4] = clampInt(Math.round(buf[i * 3]), 0, 255);
+          px[i * 4 + 1] = clampInt(Math.round(buf[i * 3 + 1]), 0, 255);
+          px[i * 4 + 2] = clampInt(Math.round(buf[i * 3 + 2]), 0, 255);
+          px[i * 4 + 3] = 255;
+        }
+        wx.putImageData(idata, 0, 0);
+
+        // Compose full-res: upscale the synthesised frame, add grain, then lay
+        // the sharp subject back with a wide feather into the new content.
+        const { canvas, ctx } = makeCanvas(tw, th);
+        // A touch of blur on the upscale hides low-res synthesis pixels without
+        // flattening the structure PatchMatch produced.
+        ctx.filter = `blur(${Math.max(0, Math.round(Math.max(tw, th) / W * 0.6))}px)`;
+        ctx.drawImage(wc, 0, 0, tw, th);
+        ctx.filter = 'none';
+
+        addGrain(ctx, tw, th, 0.05);
+
+        const { canvas: fgCanvas, ctx: fx } = makeCanvas(r.w, r.h);
+        fx.drawImage(img, 0, 0, r.w, r.h);
+        featherSubject(fx, r.w, r.h, gaps, 0.06);
+        ctx.drawImage(fgCanvas, r.x, r.y);
+
+        return canvasToDataUrl(canvas);
+      } catch (err) {
+        return generateLocalOutpaint(img, target);
+      }
+    }
+
+    async function generateLocalOutpaint(img, target) {
+      const tw = target.width, th = target.height;
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+
+      // --- 1. Background, built at a capped low resolution (the fast part) ---
+      // A large-radius blur costs ~O(pixels), so blurring a <=512px canvas
+      // instead of the full (up to 4K) target is the key efficiency win. The
+      // final upscale to target size smooths it further at no extra cost.
+      const MAX_BG = 512;
+      const bgScale = Math.min(1, MAX_BG / Math.max(tw, th));
+      const bw = Math.max(8, Math.round(tw * bgScale));
+      const bh = Math.max(8, Math.round(th * bgScale));
+      const rb = containRect(iw, ih, bw, bh);
+
+      const { canvas: bgCanvas, ctx: bg } = makeCanvas(bw, bh);
+      const blur = Math.max(6, Math.round(Math.min(bw, bh) * 0.06));
+      bg.filter = `blur(${blur}px) saturate(1.12) brightness(0.97)`;
+      mirrorTile(bg, img, rb, bw, bh);
+      bg.filter = 'none';
+
+      // --- 2. Compose at full target resolution ---
+      const { canvas, ctx } = makeCanvas(tw, th);
+      ctx.drawImage(bgCanvas, 0, 0, tw, th);
+
+      const r = containRect(iw, ih, tw, th);
+      const gapL = r.x, gapR = tw - (r.x + r.w);
+      const gapT = r.y, gapB = th - (r.y + r.h);
+      const gaps = { gapL, gapR, gapT, gapB };
+
+      // --- 3. Continue the subject's real edge content into the gaps ---
+      // Layered over the blurred colour base, strongest at the subject edge.
+      edgeExtend(ctx, img, r, gaps);
+
+      // --- 4. Film grain so the fill reads as photography, not a gradient ---
+      addGrain(ctx, tw, th, 0.05);
+
+      // Barely-there corner falloff (no obvious vignette "effect").
+      const vig = ctx.createRadialGradient(
+        tw / 2, th / 2, Math.min(tw, th) * 0.35,
+        tw / 2, th / 2, Math.max(tw, th) * 0.72);
+      vig.addColorStop(0, 'rgba(10,15,25,0)');
+      vig.addColorStop(1, 'rgba(10,15,25,0.10)');
+      ctx.fillStyle = vig;
+      ctx.fillRect(0, 0, tw, th);
+
+      // --- 5. Subject on top, with a wide seamless feather on extended sides ---
+      const { canvas: fgCanvas, ctx: fx } = makeCanvas(r.w, r.h);
+      fx.drawImage(img, 0, 0, r.w, r.h);
+      fx.globalCompositeOperation = 'destination-in';
+      // Wider feather (~9%) blends the sharp subject into the generated fill so
+      // there is no detectable seam.
+      if (gapL > 1 || gapR > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(r.w * 0.09)) / r.w);
+        const g = fx.createLinearGradient(0, 0, r.w, 0);
+        g.addColorStop(0, gapL > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gapR > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, r.w, r.h);
+      }
+      if (gapT > 1 || gapB > 1) {
+        const f = Math.min(0.5, Math.max(3, Math.round(r.h * 0.09)) / r.h);
+        const g = fx.createLinearGradient(0, 0, 0, r.h);
+        g.addColorStop(0, gapT > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        g.addColorStop(f, 'rgba(0,0,0,1)');
+        g.addColorStop(1 - f, 'rgba(0,0,0,1)');
+        g.addColorStop(1, gapB > 1 ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,1)');
+        fx.fillStyle = g;
+        fx.fillRect(0, 0, r.w, r.h);
+      }
+      fx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(fgCanvas, r.x, r.y);
+
+      return canvasToDataUrl(canvas);
+    }
+
+    // ---- Queue / batch management ----
+    function activeItem() {
+      return state.items.find(i => i.id === state.activeId) || null;
+    }
+
+    function setActive(id) {
+      state.activeId = id;
+      const item = activeItem();
+      if (item) showImage(item.resultUrl || item.sourceUrl);
+      renderQueue();
+      refreshMeta();
+    }
+
+    function refreshMeta() {
+      const n = state.items.length;
+      const done = state.items.filter(i => i.resultUrl).length;
+      if (!n) { sourceMeta.textContent = 'No images selected'; return; }
+      const item = activeItem();
+      const base = item ? `${item.name} - ${item.w} x ${item.h}` : `${n} image${n > 1 ? 's' : ''}`;
+      sourceMeta.textContent = n > 1 ? `${base}  (${n} in queue, ${done} done)` : base;
+    }
+
+    function showImage(url) {
+      preview.innerHTML = '';
+      if (!url) {
+        preview.innerHTML = '<div class="empty">Upload one or more images to start.</div>';
+        return;
+      }
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = 'QT Seize preview';
+      preview.appendChild(img);
+    }
+
+    function renderQueue() {
+      queueEl.innerHTML = '';
+      if (state.items.length < 1) return;
+      for (const item of state.items) {
+        const row = document.createElement('div');
+        row.className = 'q-item' + (item.id === state.activeId ? ' active' : '');
+        row.addEventListener('click', (e) => { if (!e.target.classList.contains('q-remove')) setActive(item.id); });
+
+        const thumb = document.createElement('img');
+        thumb.className = 'q-thumb';
+        thumb.src = item.resultUrl || item.sourceUrl;
+        thumb.alt = '';
+
+        const info = document.createElement('div');
+        info.className = 'q-info';
+        const name = document.createElement('div');
+        name.className = 'q-name';
+        name.textContent = item.name;
+        const sub = document.createElement('div');
+        sub.className = 'q-sub';
+        sub.textContent = `${item.w} x ${item.h}`;
+        info.appendChild(name);
+        info.appendChild(sub);
+
+        const badge = document.createElement('span');
+        badge.className = 'q-badge ' + item.status;
+        badge.textContent = { pending: 'Pending', working: 'Working', done: 'Done', error: 'Error' }[item.status] || item.status;
+
+        const remove = document.createElement('button');
+        remove.className = 'q-remove';
+        remove.type = 'button';
+        remove.title = 'Remove';
+        remove.textContent = '×';
+        remove.addEventListener('click', () => removeItem(item.id));
+
+        row.appendChild(thumb);
+        row.appendChild(info);
+        row.appendChild(badge);
+        row.appendChild(remove);
+        queueEl.appendChild(row);
+      }
+    }
+
+    function removeItem(id) {
+      const idx = state.items.findIndex(i => i.id === id);
+      if (idx < 0) return;
+      const [removed] = state.items.splice(idx, 1);
+      if (removed.sourceUrl) URL.revokeObjectURL(removed.sourceUrl);
+      if (state.activeId === id) {
+        const next = state.items[idx] || state.items[idx - 1] || null;
+        state.activeId = next ? next.id : null;
+        showImage(next ? (next.resultUrl || next.sourceUrl) : null);
+      }
+      syncButtons();
+      renderQueue();
+      refreshMeta();
+    }
+
+    function syncButtons() {
+      const hasPending = state.items.some(i => i.status !== 'done');
+      generateBtn.disabled = state.items.length < 1 || !hasPending;
+      downloadBtn.disabled = !state.items.some(i => i.resultUrl);
+      const mode = getOutputMode();
+      const verb = mode === 'resize' ? 'Resize' : 'Generate';
+      generateBtn.textContent = state.items.length > 1 ? `${verb} all` : verb;
+      const doneCount = state.items.filter(i => i.resultUrl).length;
+      downloadBtn.textContent = doneCount > 1 ? `Download (${doneCount})` : 'Download';
+    }
+
+    async function addFiles(fileList) {
+      const files = [...fileList].filter(f => f && f.type.startsWith('image/'));
+      if (!files.length) return;
+      for (const file of files) {
+        const id = ++state.seq;
+        const sourceUrl = URL.createObjectURL(file);
+        const item = { id, file, name: file.name || `image-${id}`, sourceUrl, w: 0, h: 0, resultUrl: '', status: 'pending' };
+        state.items.push(item);
+        try {
+          const img = await loadImageFromUrl(sourceUrl);
+          item.w = img.naturalWidth;
+          item.h = img.naturalHeight;
+        } catch (_) {
+          item.status = 'error';
+        }
+      }
+      if (state.activeId === null && state.items.length) setActive(state.items[0].id);
+      syncButtons();
+      renderQueue();
+      refreshMeta();
+      const n = state.items.length;
+      setStatus(n > 1 ? `${n} images ready. ${getOutputMode() === 'resize' ? 'Resize' : 'Generate'} all when ready.` : 'Ready.');
+    }
+
+    async function processItem(item, mode, target) {
+      item.status = 'working';
+      renderQueue();
+      const img = await loadImageFromUrl(item.sourceUrl);
+      // Let the "working" badge paint before the synthesis blocks the thread.
+      await new Promise(r => setTimeout(r, 0));
+      const dataUrl = mode === 'resize'
+        ? await resizeOnly(img, target)
+        : await contentAwareExpand(img, target);
+      item.resultUrl = dataUrl;
+      item.status = 'done';
+    }
+
+    generateBtn.addEventListener('click', async () => {
+      if (state.items.length < 1) return;
+      let target;
+      try { target = getTargetSize(); }
+      catch (error) { setStatus(error.message, true); return; }
+      const mode = getOutputMode();
+      generateBtn.disabled = true;
+      downloadBtn.disabled = true;
+
+      let done = 0, failed = 0;
+      for (const item of state.items) {
+        if (item.resultUrl) continue;
+        try {
+          setStatus(`Processing ${item.name} (${done + failed + 1}/${state.items.length})...`);
+          await processItem(item, mode, target);
+          done++;
+          if (item.id === state.activeId) showImage(item.resultUrl);
+          renderQueue();
+        } catch (error) {
+          item.status = 'error';
+          failed++;
+          renderQueue();
+        }
+      }
+      syncButtons();
+      refreshMeta();
+      setStatus(failed
+        ? `Finished with ${failed} error${failed > 1 ? 's' : ''}. ${done} done at ${target.width} x ${target.height}.`
+        : `Done. ${done} image${done !== 1 ? 's' : ''} at ${target.width} x ${target.height}.`,
+        !!failed);
+    });
+
+    // ---- Download (ask where to save) ----
+    function dataUrlToBlob(dataUrl) {
+      const [head, b64] = dataUrl.split(',');
+      const mime = (head.match(/:(.*?);/) || [,'image/png'])[1];
+      const bin = atob(b64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return new Blob([arr], { type: mime });
+    }
+
+    function outNameFor(item, mode, target) {
+      const base = (item.name || 'image').replace(/\.[^.]+$/, '');
+      return `${base}-qt-${mode}-${target.width}x${target.height}.png`;
+    }
+
+    function fallbackDownload(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    }
+
+    downloadBtn.addEventListener('click', async () => {
+      const ready = state.items.filter(i => i.resultUrl);
+      if (!ready.length) return;
+      const mode = getOutputMode();
+      let target;
+      try { target = getTargetSize(); } catch (_) { target = { width: ready[0].w, height: ready[0].h }; }
+
+      // Single image: ask for a save location via the file picker when available.
+      if (ready.length === 1) {
+        const item = ready[0];
+        const blob = dataUrlToBlob(item.resultUrl);
+        const filename = outNameFor(item, mode, target);
+        if (window.showSaveFilePicker) {
+          try {
+            const handle = await window.showSaveFilePicker({
+              suggestedName: filename,
+              types: [{ description: 'PNG image', accept: { 'image/png': ['.png'] } }]
+            });
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            setStatus(`Saved ${filename}.`);
+            return;
+          } catch (err) {
+            if (err && err.name === 'AbortError') { setStatus('Save cancelled.'); return; }
+            // fall through to normal download on any picker failure
+          }
+        }
+        fallbackDownload(blob, filename);
+        setStatus(`Downloaded ${filename}.`);
+        return;
+      }
+
+      // Multiple images: ask for a destination folder when available.
+      if (window.showDirectoryPicker) {
+        try {
+          const dir = await window.showDirectoryPicker({ mode: 'readwrite' });
+          let saved = 0;
+          for (const item of ready) {
+            const filename = outNameFor(item, mode, target);
+            const handle = await dir.getFileHandle(filename, { create: true });
+            const writable = await handle.createWritable();
+            await writable.write(dataUrlToBlob(item.resultUrl));
+            await writable.close();
+            saved++;
+            setStatus(`Saving to folder... ${saved}/${ready.length}`);
+          }
+          setStatus(`Saved ${saved} images to the chosen folder.`);
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') { setStatus('Save cancelled.'); return; }
+          // fall through to per-file downloads
+        }
+      }
+      // Fallback: trigger individual downloads to the browser's download folder.
+      for (const item of ready) {
+        fallbackDownload(dataUrlToBlob(item.resultUrl), outNameFor(item, mode, target));
+        await new Promise(r => setTimeout(r, 250));
+      }
+      setStatus(`Downloaded ${ready.length} images.`);
+    });
+
+    // ---- Wiring ----
+    drop.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', event => { addFiles(event.target.files); fileInput.value = ''; });
+    drop.addEventListener('dragover', event => {
+      event.preventDefault();
+      drop.classList.add('dragging');
+    });
+    drop.addEventListener('dragleave', () => drop.classList.remove('dragging'));
+    drop.addEventListener('drop', event => {
+      event.preventDefault();
+      drop.classList.remove('dragging');
+      addFiles(event.dataTransfer.files);
+    });
+    resolutionSelect.addEventListener('change', () => { updateOutputMeta(); syncButtons(); });
+    customWidth.addEventListener('input', updateOutputMeta);
+    customHeight.addEventListener('input', updateOutputMeta);
+    outputModeInputs.forEach(input => input.addEventListener('change', () => {
+      updateOutputMeta();
+      syncButtons();
+      if (state.items.length) setStatus(getOutputMode() === 'resize' ? 'Ready to resize.' : 'Ready to generate.');
+    }));
+
+    document.getElementById('reset').addEventListener('click', () => {
+      for (const item of state.items) if (item.sourceUrl) URL.revokeObjectURL(item.sourceUrl);
+      state.items = [];
+      state.activeId = null;
+      showImage(null);
+      renderQueue();
+      syncButtons();
+      refreshMeta();
+      setStatus('Cleared. Upload one or more images to start.');
+    });
+
+    updateOutputMeta();
+    syncButtons();
+  </script>
+</body>
+</html>

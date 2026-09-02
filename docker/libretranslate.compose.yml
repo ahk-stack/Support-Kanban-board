@@ -1,0 +1,59 @@
+# Self-hosted translation engine for the board's translate button.
+#
+# This is the only translation provider where ticket text never leaves
+# infrastructure we control, which is the whole reason the in-app translator
+# exists - agents were pasting client mail into public translators. Point the
+# app at it with:
+#
+#   TRANSLATE_PROVIDER=libretranslate
+#   LIBRETRANSLATE_URL=http://localhost:5000
+#
+# Language packages are downloaded on first boot, not baked into the image, and
+# LT_LOAD_ONLY decides which ones. Each pair is roughly 100 MB, and every loaded
+# package sits in RAM, so listing all forty is how you end up with a service
+# that needs ~8 GB and three minutes to start. Add the languages the inbox
+# actually receives, and add more when that changes - the container re-downloads
+# only what is new, and the volume below keeps the rest.
+#
+#   docker compose -f docker/libretranslate.compose.yml up -d
+#
+# Argos codes are ISO-639-1 with two exceptions the app already maps for you:
+# Traditional Chinese is "zt", Norwegian is "nb".
+
+services:
+  libretranslate:
+    image: libretranslate/libretranslate:latest
+    container_name: support-kanban-translate
+    restart: unless-stopped
+    ports:
+      # Bound to loopback: this has no authentication of its own, and anything
+      # that can reach it can translate on our quota and read what we send.
+      # Put it behind the same network boundary as the app, not on 0.0.0.0.
+      - "127.0.0.1:5000:5000"
+    environment:
+      # The languages this instance can translate between. Everything the picker
+      # offers that is not listed here fails with a clear "no language package"
+      # message rather than silently returning the original text.
+      LT_LOAD_ONLY: "en,fr,es,de,it,pt,nl,el,tr,ar,ru,pl"
+      # Argos translates via English when there is no direct package for a pair,
+      # so fr -> de works without a fr-de model. Slightly worse than a direct
+      # model, and enormously cheaper than loading every pair.
+      LT_THREADS: "4"
+      # No per-user limit: the app in front of it already rate limits per signed
+      # in agent, and a second limit here would only produce confusing failures.
+      LT_DISABLE_WEB_UI: "true"
+    volumes:
+      # Without this the container re-downloads every language package on each
+      # restart, which is slow and rude to the upstream mirror.
+      - libretranslate-models:/home/libretranslate/.local/share/argos-translate
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5000/languages > /dev/null || exit 1"]
+      # First boot downloads the packages listed above, so the start period has
+      # to be generous or the container is marked unhealthy while it is working.
+      start_period: 300s
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  libretranslate-models:

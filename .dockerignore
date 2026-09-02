@@ -1,0 +1,29 @@
+# VCS / tooling
+.git
+.gitignore
+.github
+.claude
+
+# Dependencies & build artifacts (reinstalled in-image)
+node_modules
+generated
+npm-debug.log*
+
+# Runtime state (never bake into the image)
+data
+versions
+backups
+.env
+.env.*
+
+# Windows-only helpers / docs not needed at runtime
+scripts/*.ps1
+start-kanban.cmd
+start-kanban.ps1
+*.md
+thumbnail.png
+
+# Deployment assets (not part of the app image build context)
+docker
+k8s
+infisical.config.json
