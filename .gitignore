@@ -1,5 +1,46 @@
-.env
+# Dependencies
 node_modules/
+vendor/
+
+# Environment & secrets — NEVER commit these
+.env
+.env.*
+*.local
+*.key
+*.pem
+*.p12
+secrets*
+credentials*
+
+# Build output
+dist/
+build/
+out/
+.next/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# App runtime data (Support Kanban)
 data/*.json
 versions/*.json
 backups/
+
+# Translation language packages, downloaded on demand at runtime. Hundreds of MB
+# of model weights - a cache, not source. Delete the directory to reclaim the
+# space; the next translation re-downloads only the languages it needs.
+data/mt-models/
+
+# Prisma generated client
+/generated/prisma

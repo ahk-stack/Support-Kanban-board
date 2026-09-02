@@ -1,0 +1,239 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique
+  passwordHash String
+  role         String   @default("admin")
+  isActive     Boolean  @default(true)
+  displayName  String?
+  email        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  comments            TicketComment[]
+  events              TicketEvent[]
+  apiTokens           ApiToken[]
+  oauthAuthCodes      OAuthAuthCode[]
+  templatesCreated    Template[]      @relation("TemplateCreatedBy")
+  templatesLastEdited Template[]      @relation("TemplateLastEditedBy")
+}
+
+// Shared, team-wide message templates (CS/support use these to draft ticket
+// descriptions/comments with fill-in-the-blank [bracketed] placeholders,
+// parsed client-side). Not per-user - anyone on the team can edit/delete any
+// template, same trust model as the shared ticket board itself.
+model Template {
+  id                 Int      @id @default(autoincrement())
+  name               String
+  body               String
+  createdByUserId    Int?
+  lastEditedByUserId Int?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  createdBy    User? @relation("TemplateCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  lastEditedBy User? @relation("TemplateLastEditedBy", fields: [lastEditedByUserId], references: [id], onDelete: SetNull)
+}
+
+model ApiToken {
+  id         Int       @id @default(autoincrement())
+  userId     Int
+  tokenHash  String    @unique
+  label      String?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Dynamically registered per RFC 7591 - each Claude connector instance
+// (personal or org-wide) self-registers once and gets its own clientId,
+// bound to the exact redirectUris it registered with. authorize/token both
+// strictly enforce that binding, so a registered client can never be used
+// to redirect anywhere except where it originally declared.
+model OAuthClient {
+  id           Int      @id @default(autoincrement())
+  clientId     String   @unique
+  clientName   String?
+  redirectUris String[]
+  createdAt    DateTime @default(now())
+
+  authCodes OAuthAuthCode[]
+}
+
+// Short-lived, single-use authorization code (PKCE, S256 only). Hashed at
+// rest like ApiToken/password-reset tokens - the raw code only ever exists
+// in the redirect URL and the immediate token-exchange request.
+model OAuthAuthCode {
+  id                  Int       @id @default(autoincrement())
+  codeHash            String    @unique
+  clientId            Int
+  userId              Int
+  redirectUri         String
+  codeChallenge       String
+  codeChallengeMethod String
+  expiresAt           DateTime
+  usedAt              DateTime?
+  createdAt           DateTime  @default(now())
+
+  client OAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Ticket {
+  id                      Int       @id @default(autoincrement())
+  externalId              String?   @unique
+  subject                 String
+  senderName              String?
+  senderEmail             String?
+  companyName             String?
+  status                  String    @default("New")
+  priority                String    @default("Normal")
+  category                String?
+  assignedAgent           String?
+  csAgent                 String?
+  source                  String    @default("email")
+  emailMessageId          String?
+  hubspotTicketId         String?
+  jiraTicketKey           String?
+  body                    String?
+  emailRaw                Json?
+  // The message body as Outlook returned it, captured the first time the
+  // ticket is opened so later opens render from here instead of calling Graph
+  // again. emailBodyImages carries attachment metadata only (id, contentId,
+  // name, type) - never the bytes, which stay on the on-demand image endpoint.
+  // Both are omitted from queries by default in prismaClient.js: a body on
+  // every row would land in the board's list payload, which is already large.
+  emailBody               String?
+  emailBodyType           String?
+  emailBodyImages         Json?
+  emailBodyAt             DateTime?
+  // Which message in the thread the stored body is. A reply merged into a
+  // ticket keeps the externalId but moves the current message id, so this is
+  // what stops a cached body outliving the reply that replaced it.
+  emailBodyMessageId      String?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+  resolvedAt              DateTime?
+  resolvedTeamsNotifiedAt DateTime?
+  // The short "#0042"-style number agents actually use to refer to a
+  // ticket - durable (Postgres-assigned via its own sequence, backfilled
+  // for existing rows), unlike the old client-only ephemeral counter this
+  // replaces. Not the @id - that stays the internal DB primary key.
+  displayNumber           Int?      @unique
+  // Set when an agent marks this ticket as a duplicate of another one: the
+  // externalId of the ticket it duplicates ("" is not used - null means "not a
+  // duplicate"). A duplicate is real inbox noise, not real work, so the KPI
+  // dashboard excludes it from resolved/throughput/SLA figures and counts it
+  // under its own heading instead. Resolving a duplicate used to look
+  // identical to resolving a genuine ticket and quietly inflated every
+  // resolved-ticket number.
+  duplicateOfExternalId   String?
+  duplicateMarkedAt       DateTime?
+  duplicateMarkedBy       String?
+
+  comments TicketComment[]
+  events   TicketEvent[]
+
+  @@index([senderEmail])
+  @@index([status])
+  @@index([assignedAgent])
+  @@index([csAgent])
+  @@index([createdAt])
+  @@index([duplicateOfExternalId])
+}
+
+model TicketComment {
+  id         Int      @id @default(autoincrement())
+  ticketId   Int
+  userId     Int?
+  comment    String
+  isInternal Boolean  @default(true)
+  tags       String[] @default([])
+  createdAt  DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model TicketEvent {
+  id        Int      @id @default(autoincrement())
+  ticketId  Int
+  userId    Int?
+  eventType String
+  oldValue  String?
+  newValue  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model OAuthToken {
+  id           Int       @id @default(autoincrement())
+  provider     String    @unique
+  accessToken  String?
+  refreshToken String?
+  expiresAt    DateTime?
+  metadata     Json?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model SyncLog {
+  id        Int      @id @default(autoincrement())
+  provider  String
+  syncType  String
+  status    String
+  message   String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+}
+
+// One cached machine translation of one ticket's text into one target
+// language. Not tied to the Ticket table by foreign key on purpose: the board
+// can hold a ticket (manual, or not yet synced) that has no row there yet, and
+// a translation is disposable cache rather than ticket data.
+//
+// sourceHash is a hash of the exact source segments that were sent, so the
+// cache is self-invalidating: merge a new reply into a thread and the body
+// changes, the hash changes, and the next request re-translates instead of
+// serving a translation that is missing the newest message. Re-opening an
+// unchanged ticket is free, and free for every other agent too - the cache is
+// shared, so the second person to read a French ticket pays nothing.
+model TicketTranslation {
+  id               Int      @id @default(autoincrement())
+  ticketExternalId String
+  targetLang       String
+  sourceHash       String
+  // What the model detected the source was, so the UI can say "translated
+  // from French" without a second round trip.
+  sourceLang       String?
+  sourceLangName   String?
+  // { "<segment id>": "<translated text>" } - segment ids are assigned by the
+  // client (subject, summary, b0, b1, ... c0, c1) and are meaningless to the
+  // server beyond round-tripping them.
+  segments         Json
+  model            String?
+  usage            Json?
+  createdBy        String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([ticketExternalId, targetLang, sourceHash])
+  @@index([ticketExternalId])
+  @@index([createdAt])
+}

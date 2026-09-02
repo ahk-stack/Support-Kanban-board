@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
+  <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
+  <title>Ticket Activity by Agent</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Inter, Arial, sans-serif;
+      background: #f5f7fb;
+      color: #0f172a;
+    }
+
+    header {
+      background: #0f172a;
+      color: white;
+      padding: 18px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    header a {
+      color: white;
+      text-decoration: none;
+      border: 1px solid rgba(255,255,255,.2);
+      padding: 8px 12px;
+      border-radius: 10px;
+    }
+
+    main {
+      padding: 24px;
+      max-width: 1320px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 18px;
+      box-shadow: 0 12px 34px rgba(15,23,42,.08);
+      overflow: hidden;
+      margin-bottom: 18px;
+    }
+
+    .toolbar {
+      padding: 16px;
+      border-bottom: 1px solid #e2e8f0;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+
+    .controls { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+    .control { display: flex; flex-direction: column; gap: 4px; }
+    .control label {
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: #64748b;
+    }
+    select, input[type="search"] {
+      font: inherit;
+      font-size: 13px;
+      padding: 7px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      background: white;
+      color: #0f172a;
+    }
+    input[type="search"] { min-width: 210px; }
+    .check { flex-direction: row; align-items: center; gap: 6px; padding-bottom: 8px; }
+    .check label { text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 600; color: #334155; }
+
+    button {
+      border: 0;
+      background: #4f46e5;
+      color: white;
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    /* Every wide table scrolls sideways inside its own card rather than pushing
+       the page wider. The track is kept permanently visible: WebKit hides
+       overlay scrollbars until they are used, and on a table that is only
+       slightly too wide that reads as "there is nothing more to see". */
+    .scroll-x {
+      overflow-x: auto;
+      overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      scrollbar-color: #94a3b8 #eef2f7;
+      padding-bottom: 2px;
+    }
+    .scroll-x::-webkit-scrollbar { height: 12px; }
+    .scroll-x::-webkit-scrollbar-track { background: #eef2f7; border-radius: 999px; }
+    .scroll-x::-webkit-scrollbar-thumb {
+      background: #94a3b8;
+      border-radius: 999px;
+      border: 3px solid transparent;
+      background-clip: padding-box;
+    }
+    .scroll-x::-webkit-scrollbar-thumb:hover { background: #64748b; background-clip: padding-box; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      /* A width:100% table shrinks to its container and would never overflow,
+         so the wrapper above would have nothing to scroll. This is the floor
+         that hands the overflow to it. */
+      min-width: 940px;
+    }
+
+    th, td {
+      padding: 11px 14px;
+      border-bottom: 1px solid #e2e8f0;
+      text-align: left;
+      font-size: 13px;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f8fafc;
+      color: #64748b;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: .04em;
+      white-space: nowrap;
+    }
+
+    tbody tr:hover { background: #fbfdff; }
+
+    .muted {
+      color: #64748b;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #4338ca;
+      font-weight: 800;
+      font-size: 11px;
+    }
+    .pill.sync { background: #f1f5f9; color: #64748b; }
+
+    .empty {
+      padding: 40px;
+      text-align: center;
+      color: #94a3b8;
+    }
+
+    /* Agent header: the code first and large, because the page is scanned by
+       agent, and the two counts next to it because they are what gets compared. */
+    .agent-head {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 16px;
+      border-bottom: 1px solid #e2e8f0;
+      flex-wrap: wrap;
+    }
+    .agent-code {
+      font-size: 15px;
+      font-weight: 900;
+      letter-spacing: .04em;
+      background: #0f172a;
+      color: white;
+      padding: 6px 12px;
+      border-radius: 10px;
+    }
+    .agent-code.cs { background: #0d9488; }
+    .agent-code.unknown { background: #b45309; }
+    .agent-stat { font-size: 12px; color: #334155; }
+    .agent-stat strong { font-size: 15px; color: #0f172a; }
+    .agent-quiet { padding: 14px 16px; color: #94a3b8; font-size: 13px; }
+
+    .section-title {
+      margin: 26px 4px 10px;
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: #64748b;
+    }
+
+    .tno { font-weight: 800; white-space: nowrap; }
+    .status { white-space: nowrap; font-weight: 700; font-size: 11px; color: #475569; }
+    .when { white-space: nowrap; color: #475569; }
+    .count { text-align: right; font-weight: 800; white-space: nowrap; }
+
+    /* The change list. <details> rather than a JS accordion: the summary line
+       is the useful default and the full history is one click away without any
+       state to keep. */
+    details summary {
+      cursor: pointer;
+      font-size: 12px;
+      color: #4338ca;
+      font-weight: 700;
+    }
+    .change {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      flex-wrap: wrap;
+      padding: 4px 0;
+      font-size: 12px;
+      border-top: 1px dashed #e8edf5;
+    }
+    .change:first-child { border-top: 0; }
+    .change .arrow { color: #94a3b8; }
+    .change .val { font-weight: 700; }
+    .change .by { color: #64748b; }
+    .notice {
+      margin: 0 0 18px;
+      padding: 10px 14px;
+      border: 1px solid #f59e0b;
+      border-left-width: 4px;
+      border-radius: 10px;
+      background: #fffbeb;
+      font-size: 12.5px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Ticket Activity by Agent</strong>
+    <div style="display:flex;gap:10px;">
+      <a href="/">Board</a>
+      <a href="/profile">Profile</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="toolbar">
+        <div>
+          <strong>Which tickets each agent updated</strong>
+          <div class="muted" style="font-size:12px;margin-top:3px;" id="summary">Loading...</div>
+        </div>
+        <div class="controls">
+          <div class="control">
+            <label for="days">Window</label>
+            <select id="days">
+              <option value="7">Last 7 days</option>
+              <option value="30" selected>Last 30 days</option>
+              <option value="90">Last 90 days</option>
+              <option value="180">Last 180 days</option>
+            </select>
+          </div>
+          <div class="control">
+            <label for="scope">Show</label>
+            <select id="scope">
+              <option value="both" selected>Support and CS</option>
+              <option value="support">Support only</option>
+              <option value="cs">CS only</option>
+            </select>
+          </div>
+          <div class="control">
+            <label for="q">Filter</label>
+            <input type="search" id="q" placeholder="Agent code, ticket no. or subject" autocomplete="off">
+          </div>
+          <div class="control check">
+            <input type="checkbox" id="includeSync">
+            <label for="includeSync">Include mail-sync changes</label>
+          </div>
+          <button id="refreshBtn">Refresh</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="content">
+      <div class="empty">Loading activity...</div>
+    </div>
+  </main>
+
+  <script>
+    function esc(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }
+
+    function formatDate(value) {
+      if (!value) return '-';
+      return new Date(value).toLocaleString();
+    }
+
+    // Last loaded payload, so changing the filter or the scope re-renders
+    // without a round trip. Only Window and Include-mail-sync change what the
+    // server has to send.
+    let current = null;
+
+    function ticketLabel(t) {
+      if (t.number) return '#' + String(t.number).padStart(4, '0');
+      return 'ID ' + t.ticketId;
+    }
+
+    function changeLine(c) {
+      const from = c.from ? '<span class="val">' + esc(c.from) + '</span>' : '<span class="muted">empty</span>';
+      const to = c.to ? '<span class="val">' + esc(c.to) + '</span>' : '<span class="muted">empty</span>';
+      // Created and Note added have no meaningful "from", so they read as a
+      // single value rather than a transition.
+      const body = (c.type === 'ticket_created' || c.type === 'comment_added')
+        ? to
+        : from + ' <span class="arrow">&rarr;</span> ' + to;
+      // actor is the agent the board says did it; account is the login whose
+      // save carried it. They differ for auto-assign and cross-tab writes, and
+      // when they do, both are worth seeing.
+      const who = [c.actor ? 'by ' + esc(c.actor) : null, c.account ? '(' + esc(c.account) + ')' : null, c.source ? esc(c.source) : null]
+        .filter(Boolean).join(' ');
+      return '<div class="change">'
+        + '<span class="pill' + (c.sync ? ' sync' : '') + '">' + esc(c.label) + '</span>'
+        + '<span>' + body + '</span>'
+        + '<span class="by">' + esc(formatDate(c.at)) + (who ? ' ' + who : '') + '</span>'
+        + '</div>';
+    }
+
+    function ticketRow(t) {
+      const first = t.changes.length ? changeLine(t.changes[0]) : '';
+      const rest = t.changes.slice(1);
+      const more = rest.length
+        ? '<details><summary>' + rest.length + ' earlier change' + (rest.length > 1 ? 's' : '') + '</summary>'
+          + rest.map(changeLine).join('') + '</details>'
+        : '';
+      return '<tr>'
+        + '<td class="tno">' + esc(ticketLabel(t)) + '</td>'
+        // The board deep-links on externalId (its own ticket id). A manual
+        // ticket without one cannot be opened that way, so it stays plain text
+        // rather than becoming a link that goes nowhere.
+        + '<td>' + (t.externalId
+          ? '<a href="/?ticket=' + encodeURIComponent(t.externalId) + '" title="Open on the board">' + esc(t.subject || '(no subject)') + '</a>'
+          : esc(t.subject || '(no subject)')) + '</td>'
+        + '<td class="status">' + esc(t.status || '-') + '</td>'
+        + '<td class="count">' + t.eventCount + '</td>'
+        + '<td class="when">' + esc(formatDate(t.lastAt)) + '</td>'
+        + '<td>' + first + more + '</td>'
+        + '</tr>';
+    }
+
+    function agentCard(agent, query) {
+      let tickets = agent.tickets;
+      if (query) {
+        const q = query.toLowerCase();
+        // An agent matched by code keeps all of its tickets - "show me what SFA
+        // did" should not also filter the ticket list by "sfa".
+        if (!agent.code.toLowerCase().includes(q)) {
+          tickets = tickets.filter(t => String(t.subject || '').toLowerCase().includes(q)
+            || String(t.number || '').includes(q)
+            || String(t.ticketId).includes(q));
+          if (!tickets.length) return '';
+        }
+      }
+      const codeClass = 'agent-code' + (agent.kind === 'cs' ? ' cs' : '') + (agent.known ? '' : ' unknown');
+      const head = '<div class="agent-head">'
+        + '<span class="' + codeClass + '">' + esc(agent.code) + '</span>'
+        + '<span class="agent-stat"><strong>' + tickets.length + '</strong> ticket' + (tickets.length === 1 ? '' : 's') + ' updated</span>'
+        + '<span class="agent-stat"><strong>' + agent.eventCount + '</strong> update' + (agent.eventCount === 1 ? '' : 's') + '</span>'
+        + '<span class="agent-stat muted">' + (agent.lastActivityAt ? 'last ' + esc(formatDate(agent.lastActivityAt)) : 'no activity in this window') + '</span>'
+        + (agent.known ? '' : '<span class="agent-stat muted">not on the current roster</span>')
+        + '</div>';
+      if (!tickets.length) {
+        return '<section class="card">' + head + '<div class="agent-quiet">No ticket updates in this window.</div></section>';
+      }
+      return '<section class="card">' + head
+        + '<div class="scroll-x"><table><thead><tr>'
+        + '<th>Ticket</th><th>Subject</th><th>Status</th><th>Updates</th><th>Last update</th><th>Most recent change</th>'
+        + '</tr></thead><tbody>'
+        + tickets.map(ticketRow).join('')
+        + '</tbody></table></div></section>';
+    }
+
+    function render() {
+      const content = document.getElementById('content');
+      if (!current) return;
+      const scope = document.getElementById('scope').value;
+      const query = document.getElementById('q').value.trim();
+      const blocks = [];
+
+      if (current.truncated) {
+        blocks.push('<div class="notice">This window hit the 5000-event cap, so the oldest activity in it is not shown. Narrow the window for a complete picture.</div>');
+      }
+
+      const sections = [];
+      if (scope !== 'cs') sections.push(['Support agents', current.support]);
+      if (scope !== 'support') sections.push(['CS agents', current.cs]);
+
+      for (const [title, agents] of sections) {
+        const cards = agents.map(a => agentCard(a, query)).filter(Boolean);
+        blocks.push('<div class="section-title">' + esc(title) + ' (' + cards.length + ')</div>');
+        blocks.push(cards.length ? cards.join('') : '<div class="card"><div class="empty">Nothing matches that filter.</div></div>');
+      }
+
+      content.innerHTML = blocks.join('');
+    }
+
+    async function loadAudit() {
+      const content = document.getElementById('content');
+      const summary = document.getElementById('summary');
+      content.innerHTML = '<div class="empty">Loading activity...</div>';
+
+      const days = document.getElementById('days').value;
+      const includeSync = document.getElementById('includeSync').checked ? '1' : '';
+
+      try {
+        const res = await fetch('/api/audit/agent-activity?days=' + encodeURIComponent(days) + (includeSync ? '&includeSync=1' : ''), {
+          credentials: 'same-origin'
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.error || 'Could not load activity');
+        }
+
+        current = data;
+        summary.textContent = data.totals.events + ' update'
+          + (data.totals.events === 1 ? '' : 's')
+          + ' across ' + data.totals.tickets + ' ticket' + (data.totals.tickets === 1 ? '' : 's')
+          + ' in the last ' + data.days + ' days'
+          + (data.includeSync ? ', mail-sync changes included' : ', agent changes only')
+          + '. Read at ' + formatDate(data.generatedAt) + '.';
+
+        if (!data.totals.events) {
+          content.innerHTML = '<div class="card"><div class="empty">No ticket updates in this window.</div></div>';
+          return;
+        }
+
+        render();
+      } catch (error) {
+        summary.textContent = '';
+        content.innerHTML = '<div class="card"><div class="empty">' + esc(error.message || 'Could not load activity') + '</div></div>';
+      }
+    }
+
+    document.getElementById('refreshBtn').addEventListener('click', loadAudit);
+    document.getElementById('days').addEventListener('change', loadAudit);
+    document.getElementById('includeSync').addEventListener('change', loadAudit);
+    document.getElementById('scope').addEventListener('change', render);
+    document.getElementById('q').addEventListener('input', render);
+    loadAudit();
+  </script>
+</body>
+</html>

@@ -1,72 +1,120 @@
-# Support Kanban Board - Quinta
+# Support Kanban — Git Guide for Account Managers
 
-A live support ticketing Kanban board built with Claude Cowork, powered by Microsoft 365.
+Welcome! 👋 This guide explains how we work together on the **Support Kanban**
+project using Git. You don't need to be a developer — just follow the steps
+below and you'll be fine.
 
-## Features
+---
 
-- **Live email feed** - pulls emails in real-time from `helpdesk@quinta.im` via Microsoft 365 (polls every 60 seconds)
-- **Smart spam filter** - pattern-based exclusion of automated/newsletter senders
-- **Auto-classification** - priority (High / Medium / Low) and category assigned on arrival
-- **Categories** - Technical failure, Bug Velma, RYA, Connectivity request, Other, Spam
-- **Auto-assignment** - load-balanced distribution across agents: SGU, SHE, ZIO, AHK
-- **Drag & drop** - move tickets across New, In Progress, Waiting On Us, Waiting On Contact, and Resolved
-- **Internal comments** - tag teammates (SGU, SHE, ZIO, AHK, CS, Client) per ticket
-- **Persistent state** - column, priority, category, assignee and comments survive board close/reopen via localStorage
-- **Sort toggle** - Newest first / Oldest first
-- **Priority & agent filters**
-- **Open email** - read full email body inline without leaving the board
-- **Spam inbox cleanup** - clearing spam archives those tickets out of the spam inbox, and restoring a cleared spam ticket returns it to the `New` column
-- **Reply threading** - replies in the same email conversation update the existing ticket instead of creating a duplicate card
+## 📌 The golden rules
 
-## Requirements
+1. We work on the **`staging`** branch by default.
+2. For every new feature or change, **create your own branch** off `staging`.
+3. When your work is ready, **contact Wajdi** — he reviews, merges, and deploys.
+4. **Never commit passwords, API keys, tokens, or `.env` files.**
 
-Runs as a **Claude Cowork artifact** with the **Microsoft 365 MCP connector** authenticated to `helpdesk@quinta.im`.
+---
 
-## Stack
+## 🛠️ One-time setup (do this once per computer)
 
-- Vanilla HTML / CSS / JavaScript - zero dependencies
-- Microsoft Graph API (via Cowork MCP) for Outlook
-- `localStorage` for client-side state persistence
+**1. Download the project (clone):**
 
-## Agents
+```bash
+git clone ssh://git@git.gotogo.im/am/support-kanban.git
+cd support-kanban
+```
 
-| Trigram | Role |
-|---------|------|
-| SGU | Support Agent |
-| SHE | Support Agent |
-| ZIO | Support Agent |
-| AHK | Support Agent |
+**2. Tell Git who you are** (so your work is credited to you):
 
-## Backup And Version Control (Mandatory)
+```bash
+git config --global user.name "Your Full Name"
+git config --global user.email "you@quinta.im"
+```
 
-This project now includes a mandatory operational workflow to avoid regressions.
+That's it — you're ready to work.
 
-### Local backups
+---
 
-- Create backup: `npm run backup:create`
-- List backups: `npm run backup:list`
-- Backups are stored in `backups/` (git-ignored)
-- Automatic retention keeps the latest 30 backups
+## 🔁 Daily workflow
 
-### Release snapshots
+Follow these 5 steps every time you work on something new.
 
-- Create a release snapshot:
-  `npm run release:snapshot -- -Version 1.0.0 -Message "stable prod baseline"`
-- This will:
-  1. Create a local backup
-  2. Commit pending changes
-  3. Create an annotated git tag `v<version>`
+```bash
+# 1. Go to staging and get the latest version
+git checkout staging
+git pull
 
-### Branch policy
+# 2. Create a new branch for your feature or change
+#    Use a short, descriptive name: feature/... or fix/...
+git checkout -b feature/short-description
 
-- `main`: production only (stable)
-- `develop`: ongoing CRM features
-- `feature/*`: short-lived feature branches from `develop`
+# 3. Do your work, then save it (commit)
+git add .
+git commit -m "Add: short description of what you did"
 
-### Deploy safety rule
+# 4. Send your branch to the server
+git push -u origin feature/short-description
+```
 
-- Always deploy from `main`
-- Merge tested changes into `main` only during scheduled release windows
-- Push with tags for every release:
-  - `git push origin main`
-  - `git push origin --tags`
+**5. Tell Wajdi it's ready** (Slack / email: `wis@quinta.im`).
+He will review your branch, merge it into `staging`, and deploy the app. ✅
+
+> ❌ Do **not** merge or deploy yourself. Step 5 is handled by Wajdi.
+
+---
+
+## 🌿 How branches fit together
+
+```
+feature/your-work  ──►  staging  ──►  (deploy)
+     you work here    Wajdi merges     Wajdi deploys
+```
+
+- **`staging`** — the shared, default branch. Always start from here.
+- **`feature/...`** — your personal branch for one feature or change.
+- Many people can have their own feature branches at the same time without
+  stepping on each other.
+
+**Branch naming examples:**
+
+| Type of work        | Branch name example              |
+| ------------------- | -------------------------------- |
+| New feature         | `feature/export-tickets-to-csv`  |
+| Fixing a problem    | `fix/wrong-ticket-status`        |
+| Text / content edit | `content/update-faq-wording`     |
+
+---
+
+## ✅ Best practices
+
+- **Always `git pull` on `staging` before starting.** This avoids conflicts.
+- **One feature = one branch.** Don't mix unrelated changes together.
+- **Commit often, with clear messages.** "Add login button" beats "stuff".
+- **Never work directly on `staging`** for new features — always branch.
+- **Never commit secrets** — no passwords, API keys, tokens, or `.env` files
+  (see `.gitignore`, which already blocks the common ones).
+- **When unsure, ask before** force-pushing, deleting branches, or rewriting
+  history. These actions are hard to undo.
+
+---
+
+## 📖 Command cheat sheet
+
+| What you want to do                     | Command                                 |
+| --------------------------------------- | --------------------------------------- |
+| See what branch you're on               | `git status`                            |
+| Get the latest version of this branch   | `git pull`                              |
+| Switch to staging                       | `git checkout staging`                  |
+| Create a new branch                     | `git checkout -b feature/my-thing`      |
+| See your branches                       | `git branch`                            |
+| Save your changes locally               | `git add .` then `git commit -m "..."`  |
+| Send your branch to the server          | `git push -u origin feature/my-thing`   |
+| See your recent commits                 | `git log --oneline -10`                 |
+
+---
+
+## ❓ Need help?
+
+- **To merge / deploy:** contact **Wajdi** — `wis@quinta.im`
+- **Stuck or made a mistake?** Don't try to "fix" it with risky commands —
+  ping Wajdi. It's almost always easy to recover if you ask early.

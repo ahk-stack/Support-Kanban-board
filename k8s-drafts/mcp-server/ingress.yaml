@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: support-kanban-mcp
+  namespace: support-kanban
+  labels:
+    app: support-kanban-mcp
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    use-forwarded-headers: 'true'
+spec:
+  ingressClassName: nginx
+  tls:
+    - secretName: mcp-support-preprod-tls
+      hosts:
+        - mcp.support-preprod.gotogo.im
+  rules:
+    - host: mcp.support-preprod.gotogo.im
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: support-kanban-mcp
+                port:
+                  number: 80
