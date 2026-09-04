@@ -348,7 +348,12 @@ const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeade
 const passwordResetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false });
 
 function isAuthed(req) { return req.session && req.session.authenticated === true; }
-function requireAuth(req, res, next) { return isAuthed(req) ? next() : res.status(401).json({ error: 'unauthorized' }); }
+// Deliberately not a plain session check any more - see revalidateSession for
+// what the session alone was letting through.
+function requireAuth(req, res, next) {
+  if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
+  return revalidateSession(req, res, next);
+}
 function isAdminRole(role) { return role === 'admin' || role === 'owner'; }
 function isOwnerRole(role) { return role === 'owner'; }
 // The two decisions that are CS's to make, named once so the client's hidden
@@ -389,8 +394,12 @@ function canConfirmResolution(role, username) {
 function canAssignSupportAgent(role, username) { return canConfirmResolution(role, username); }
 function requireAdmin(req, res, next) {
   if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
-  if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
-  return next();
+  // Revalidate first, so the role checked below is the one on the row rather
+  // than the one copied into the session at login.
+  return revalidateSession(req, res, () => {
+    if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
+    return next();
+  });
 }
 function hashApiToken(rawToken) {
   return crypto.createHash('sha256').update(String(rawToken || '')).digest('hex');
@@ -416,6 +425,123 @@ async function requireApiToken(req, res, next) {
     return res.status(500).json({ error: 'auth_failed' });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Session revalidation
+//
+// requireAuth used to trust the session alone, and the session carries a copy
+// of role and username taken at login. That copy never expires, so three
+// things that are supposed to remove access did not:
+//
+//   - deactivating a user left their open session working for up to 12 hours
+//   - demoting an admin left them with admin routes until they logged out
+//   - a password reset ended only the session that performed it
+//
+// API tokens already checked isActive on every call (requireApiToken), so the
+// cookie path was the odd one out. Now both re-read the user, and the session's
+// role is refreshed from the row rather than believed.
+//
+// Cached briefly because this runs on every authenticated request, including
+// the SSE stream and the polling the board does on its own. The window is short
+// enough that a deactivation takes effect in seconds rather than hours.
+const AUTH_REVALIDATE_MS = 15 * 1000;
+const authUserCache = new Map();
+
+function invalidateAuthCache(userId) {
+  if (userId == null) authUserCache.clear();
+  else authUserCache.delete(Number(userId));
+}
+
+async function loadAuthUser(userId) {
+  const id = Number(userId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const cached = authUserCache.get(id);
+  if (cached && cached.at > Date.now() - AUTH_REVALIDATE_MS) return cached.user;
+  const user = await prisma.user.findUnique({
+    where: { id },
+    select: { id: true, username: true, role: true, isActive: true }
+  });
+  authUserCache.set(id, { at: Date.now(), user });
+  return user;
+}
+
+// Every session-authenticated request goes through this. A failure to reach the
+// database is deliberately NOT treated as "log everyone out" - the board would
+// empty itself on a blip - but it is also not treated as a fresh check: the
+// cached answer stands, and if there is none the request is refused.
+async function revalidateSession(req, res, next) {
+  if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const user = await loadAuthUser(req.session.userId);
+    if (!user || user.isActive === false) {
+      req.session.destroy(() => {});
+      return res.status(401).json({ error: 'session_revoked' });
+    }
+    // The row is the authority on both, so a demotion applies to the request
+    // being served rather than the next login.
+    req.session.role = user.role;
+    req.session.username = user.username;
+    return next();
+  } catch (error) {
+    console.error('Session revalidation failed:', error?.message || error);
+    return res.status(503).json({ error: 'auth_unavailable' });
+  }
+}
+
+// Ends every session belonging to one user, across every browser they are
+// signed in on. connect-pg-simple stores the session as JSON in one table, so
+// the userId inside it is queryable. Used after a password reset and after an
+// admin deactivates or demotes someone - the point of both is that access stops
+// now, not when a cookie happens to expire.
+async function revokeAllSessionsForUser(userId, { keepSid = null } = {}) {
+  const id = Number(userId);
+  if (!Number.isInteger(id) || id <= 0) return 0;
+  invalidateAuthCache(id);
+  try {
+    const result = keepSid
+      ? await sessionPool.query(`DELETE FROM session WHERE (sess->>'userId')::int = $1 AND sid <> $2`, [id, keepSid])
+      : await sessionPool.query(`DELETE FROM session WHERE (sess->>'userId')::int = $1`, [id]);
+    return result.rowCount || 0;
+  } catch (error) {
+    console.warn('Session revocation failed:', error?.message || error);
+    return 0;
+  }
+}
+
+// A password reset that leaves the old API tokens working has not locked anyone
+// out - a token is a standing credential, and "I changed my password" is the
+// one moment a person expects everything else to stop.
+async function revokeApiTokensForUser(userId) {
+  const id = Number(userId);
+  if (!Number.isInteger(id) || id <= 0) return 0;
+  const result = await prisma.apiToken.updateMany({
+    where: { userId: id, revokedAt: null },
+    data: { revokedAt: new Date() }
+  }).catch(() => ({ count: 0 }));
+  return result.count || 0;
+}
+
+// ---------------------------------------------------------------------------
+// Which mailboxes this board may read
+//
+// /api/mcp-proxy took the mailbox to read from the request body
+// (args.mailboxOwnerEmail, and ?owner= on a mail:// URI) and passed it to
+// Graph. Every other Graph call in this file hardcodes SUPPORT_MAILBOX; that
+// one endpoint let any signed-in user - any role, including the read-only ones
+// - name any mailbox in the tenant the connected identity can open, and read
+// its mail through the board.
+//
+// The board only ever needs the helpdesk mailbox and the addresses already
+// configured as legitimate reply identities.
+function allowedReadMailboxes() {
+  return new Set([SUPPORT_MAILBOX, KANBAN_MAILBOX, ...REPLY_FROM_ADDRESSES].filter(Boolean).map(a => String(a).toLowerCase()));
+}
+function resolveReadableMailbox(requested) {
+  const wanted = normalizeEmailAddress(requested) || '';
+  if (!wanted) return SUPPORT_MAILBOX;
+  return allowedReadMailboxes().has(wanted) ? wanted : null;
+}
+
 function avatarFilenameForUserId(id) {
   if (!id) return null;
   try {
@@ -469,6 +595,11 @@ function sanitizeUser(user) {
     updatedAt: user.updatedAt
   };
 }
+// How close together two identical audit rows have to be before the second is
+// taken as a duplicate write rather than a real repeat. A person cannot set the
+// same field to the same value twice inside this window; two racing saves do it
+// routinely.
+const AUDIT_WRITE_DEDUPE_MS = 5000;
 async function createTicketAuditEvent({
   ticketId,
   userId = null,
@@ -479,6 +610,23 @@ async function createTicketAuditEvent({
 }) {
   try {
     if (!ticketId || !eventType) return null;
+
+    // Two board tabs saving at once both read the same "before" row and both
+    // write the same diff, ~100ms apart, which is why the log holds two
+    // identical rows for every change anyone has ever made. Nothing downstream
+    // could tell them apart, so every count taken off the log read double.
+    // Guarded here rather than at each call site: this is the only door in.
+    const duplicate = await prisma.ticketEvent.findFirst({
+      where: {
+        ticketId,
+        eventType,
+        oldValue: oldValue === undefined || oldValue === null ? null : String(oldValue),
+        newValue: newValue === undefined || newValue === null ? null : String(newValue),
+        createdAt: { gte: new Date(Date.now() - AUDIT_WRITE_DEDUPE_MS) }
+      },
+      select: { id: true }
+    }).catch(() => null);
+    if (duplicate) return null;
 
     return await prisma.ticketEvent.create({
       data: {
@@ -587,9 +735,21 @@ function isDateInBounds(value, bounds) {
   const date = value instanceof Date ? value : new Date(value);
   return !Number.isNaN(date.getTime()) && date >= bounds.start && date <= bounds.end;
 }
+// A resolved ticket belongs to the range it was resolved in, not the one it
+// arrived in. But only when we actually know when that was: resolvedAt is
+// nullable, and every ticket resolved before that column started being written
+// still has NULL in it. Keying on resolvedAt alone dropped those tickets out
+// of Total, Resolved and every by-category/company/CS figure at once, which is
+// what made the breakdown table read low - the same board showed 57 tickets
+// and 52 resolved for an agent, then 43 and 32, with nothing resolved in
+// between. Unstamped ones fall back to when the row was last touched, which is
+// the closest thing to a resolution date we hold for them.
 function kpiTicketInRange(ticket, bounds) {
   const statusKey = normalizeDbStatusForBoard(ticket?.status);
-  if (statusKey === 'res') return isDateInBounds(ticket?.resolvedAt, bounds);
+  if (statusKey === 'res') {
+    if (ticket?.resolvedAt) return isDateInBounds(ticket.resolvedAt, bounds);
+    return isDateInBounds(ticket?.updatedAt, bounds) || isDateInBounds(ticket?.createdAt, bounds);
+  }
   return isDateInBounds(ticket?.createdAt, bounds) || isDateInBounds(ticket?.updatedAt, bounds);
 }
 function resolvedAtFromState(state, ticketId) {
@@ -1137,14 +1297,69 @@ function shiftAgentFromRequest(req, bodyAgent) {
   return null;
 }
 
+/* A break is fifteen minutes, and there is one every two hours.
+
+   Enforced on read rather than by a timer: a break that was started and never
+   ended is simply treated as having ended fifteen minutes after it began, so
+   an agent who closes the laptop mid-break does not get an open-ended pause on
+   their SLA clock. The cooldown is measured from the START of the last break -
+   from the end would let someone take fifteen minutes, come back, and be
+   eligible again two hours later having actually paused twice in that window. */
+const SHIFT_BREAK_MS = Number(process.env.SHIFT_BREAK_MS || 15 * 60 * 1000);
+const SHIFT_BREAK_COOLDOWN_MS = Number(process.env.SHIFT_BREAK_COOLDOWN_MS || 2 * 60 * 60 * 1000);
+
+// The moment a break actually finished, capped at its fifteen minutes.
+function breakEndMs(b, now = Date.now()) {
+  const start = Number(b?.start || 0);
+  if (!start) return 0;
+  const cap = start + SHIFT_BREAK_MS;
+  const ended = (b.end === null || b.end === undefined) ? now : Number(b.end);
+  return Math.min(ended, cap);
+}
+// Closes any break that has run past its cap, so the stored history matches
+// what the clock already assumes.
+function capExpiredBreaks(rec, now = Date.now()) {
+  let changed = false;
+  (rec?.sessions || []).forEach(session => {
+    (session.breaks || []).forEach(b => {
+      if ((b.end === null || b.end === undefined) && Number(b.start || 0) + SHIFT_BREAK_MS <= now) {
+        b.end = Number(b.start) + SHIFT_BREAK_MS;
+        changed = true;
+      }
+    });
+  });
+  return changed;
+}
+function lastBreakStart(rec) {
+  let latest = 0;
+  (rec?.sessions || []).forEach(session => {
+    (session.breaks || []).forEach(b => { latest = Math.max(latest, Number(b.start || 0)); });
+  });
+  return latest;
+}
+// How long until this agent may take another break. 0 means now.
+function breakCooldownRemaining(rec, now = Date.now()) {
+  const last = lastBreakStart(rec);
+  if (!last) return 0;
+  return Math.max(0, (last + SHIFT_BREAK_COOLDOWN_MS) - now);
+}
+
 function shiftSnapshotFor(code) {
   const rec = shiftStore.agents[code];
   if (!rec) return { agent: code, onShift: false, onBreak: false, sessions: [] };
+  const now = Date.now();
+  capExpiredBreaks(rec, now);
   const last = rec.sessions[rec.sessions.length - 1];
+  const openBreak = last && last.end === null ? last.breaks.find(b => b.end === null) : null;
   return {
     agent: code,
     onShift: !!(last && last.end === null),
-    onBreak: !!(last && last.end === null && last.breaks.some(b => b.end === null)),
+    onBreak: !!openBreak,
+    // What the button needs to draw itself without knowing the rules.
+    breakEndsAt: openBreak ? Number(openBreak.start) + SHIFT_BREAK_MS : 0,
+    breakMs: SHIFT_BREAK_MS,
+    cooldownMs: SHIFT_BREAK_COOLDOWN_MS,
+    cooldownRemainingMs: breakCooldownRemaining(rec, now),
     lastSeen: rec.lastSeen || 0,
     sessions: rec.sessions
   };
@@ -1186,6 +1401,42 @@ function isWeekendDate(date) {
 // Milliseconds of [from,to) landing on a weekday. Walks day by day via setDate
 // rather than adding a fixed 86400000 so a daylight-saving change cannot drift
 // the day boundaries.
+/* The hours the SLA clock actually runs.
+
+   08:00-12:00 and 14:00-17:00, weekdays: seven hours a day, not twenty-four and
+   not the nine between the first and last. The lunch gap matters - counting
+   through it made a ticket that arrived at 11:50 look an hour older by 14:00
+   than the work anyone could have done on it.
+
+   Walked a day at a time with setHours rather than by adding 86400000, so a
+   daylight-saving change moves the window with the clock instead of shifting it
+   by an hour. */
+const BUSINESS_WINDOWS = [[8, 0, 12, 0], [14, 0, 17, 0]];
+const BUSINESS_MS_PER_DAY = BUSINESS_WINDOWS.reduce((total, [sh, sm, eh, em]) => total + ((eh * 60 + em) - (sh * 60 + sm)) * 60000, 0);
+function businessMsInRange(from, to) {
+  if (!(to > from)) return 0;
+  let total = 0;
+  const cursor = new Date(from);
+  cursor.setHours(0, 0, 0, 0);
+  while (cursor.getTime() < to) {
+    const next = new Date(cursor);
+    next.setDate(next.getDate() + 1);
+    next.setHours(0, 0, 0, 0);
+    if (!isWeekendDate(cursor)) {
+      for (const [sh, sm, eh, em] of BUSINESS_WINDOWS) {
+        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
+        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
+        const start = Math.max(windowStart.getTime(), from);
+        const end = Math.min(windowEnd.getTime(), to);
+        if (end > start) total += end - start;
+      }
+    }
+    cursor.setTime(next.getTime());
+  }
+  return total;
+}
+// Superseded by businessMsInRange - kept because the shift report still counts
+// presence in whole weekdays, which is a different question from SLA time.
 function weekdayMsInRange(from, to) {
   if (!(to > from)) return 0;
   let total = 0;
@@ -1218,11 +1469,11 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
     const start = Math.max(Number(s.start || 0), fromMs);
     const end = Math.min(s.end === null || s.end === undefined ? now : Number(s.end), toMs);
     if (!(end > start)) return;
-    let worked = weekdayMsInRange(start, end);
+    let worked = businessMsInRange(start, end);
     (s.breaks || []).forEach((b) => {
       const bs = Math.max(Number(b.start || 0), start);
-      const be = Math.min(b.end === null || b.end === undefined ? now : Number(b.end), end);
-      if (be > bs) worked -= weekdayMsInRange(bs, be);
+      const be = Math.min(breakEndMs(b, now), end);
+      if (be > bs) worked -= businessMsInRange(bs, be);
     });
     total += Math.max(0, worked);
   });
@@ -1238,8 +1489,13 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     "4h left" for a ticket nobody owns would be a fiction, so
 //                     these are counted and reported separately rather than
 //                     folded into compliance.
+
 function ticketSlaSnapshot(ticket, now = Date.now()) {
-  const createdMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+  const arrivedMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+  const resetMs = ticket?.slaResetAt ? new Date(ticket.slaResetAt).getTime() : NaN;
+  // The later of the two: a thread that has been replied to is measured from
+  // its last reply, an untouched one from when it arrived. Mirrors the board.
+  const createdMs = Number.isFinite(resetMs) && (!Number.isFinite(arrivedMs) || resetMs > arrivedMs) ? resetMs : arrivedMs;
   const targetHours = slaTargetHoursFor(ticket?.priority);
   const targetMs = targetHours * 3600000;
   const resolved = normalizeDbStatusForBoard(ticket?.status) === 'res';
@@ -2689,8 +2945,7 @@ function refreshDataHygieneCache(token) {
 }
 
 
-async function upsertBoardTicketsToDatabase(state, req) {
-  if (!state || typeof state !== 'object') return { count: 0 };
+async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof state !== 'object') return { count: 0 };
 
   const allTickets = Array.isArray(state.allTickets) ? state.allTickets : [];
   const ticketState = state.ticketState || {};
@@ -2705,6 +2960,10 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const ticketDuplicateOf = state.ticketDuplicateOf || {};
   const ticketHubspotId = state.ticketHubspotId || {};
   const ticketComments = state.ticketComments || {};
+  // When each ticket's SLA clock was last restarted by a reply. Written by the
+  // board; mirrored into the row so the KPI dashboard measures the same thing
+  // the badges do.
+  const ticketSlaResetAt = state.ticketSlaResetAt || {};
 
   const externalIds = [...new Set(allTickets.filter(t => t && t.id).map(t => String(t.id)))];
   // Fetch every existing ticket (and its comments) in one round trip instead of
@@ -2735,6 +2994,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const assignedAgent = SUPPORT_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null;
     const csAgent = CS_AGENT_CODES.has(rawCsAgent) ? rawCsAgent : (CS_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null);
     const createdAt = safeDateForDb(email.receivedDateTime || ticketCreatedAt[externalId]) || new Date();
+    const slaResetAt = safeDateForDb(Number(ticketSlaResetAt[externalId] || 0) || null);
     const body = String(email.bodyPreview || email.preview || email.summary || email.body || email.text || '').trim() || null;
     const companyName = extractCompanyNameFromEmail(senderEmail);
     const existingTicket = existingByExternalId.get(externalId) || null;
@@ -2779,7 +3039,8 @@ async function upsertBoardTicketsToDatabase(state, req) {
       && existingTicket.hubspotTicketId === hubspotTicketId
       && existingTicket.jiraTicketKey === jiraTicketKey
       && existingTicket.duplicateOfExternalId === duplicateOfExternalId
-      && existingTicket.body === body;
+      && existingTicket.body === body
+      && Number(existingTicket.slaResetAt ? new Date(existingTicket.slaResetAt).getTime() : 0) === Number(slaResetAt ? slaResetAt.getTime() : 0);
 
     if (fieldsUnchanged && !newComments.length) continue;
 
@@ -2806,6 +3067,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         body,
         emailRaw: email,
         createdAt,
+        slaResetAt,
         resolvedAt: resolvedAtForDb
       },
       update: {
@@ -2825,6 +3087,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         duplicateOfExternalId,
         body,
         emailRaw: email,
+        slaResetAt,
         resolvedAt: resolvedAtForDb,
         // Leave untouched (undefined) while staying Resolved - the atomic
         // claim above owns setting it. Reset to null on leaving Resolved so
@@ -3114,6 +3377,15 @@ app.post('/auth/reset-password', passwordResetLimiter, async (req, res) => {
       prisma.$executeRaw`UPDATE "PasswordResetToken" SET "usedAt" = ${new Date()} WHERE "id" = ${Number(reset.id)}`
     ]);
 
+    // Everything the old password could still reach: other browsers, and any
+    // standing API token. Resetting a password because it leaked and leaving
+    // those alive defeats the reset.
+    const killedSessions = await revokeAllSessionsForUser(user.id);
+    const killedTokens = await revokeApiTokensForUser(user.id);
+    if (killedSessions || killedTokens) {
+      console.log(`[auth] password reset for ${user.username}: ${killedSessions} session(s) and ${killedTokens} API token(s) revoked`);
+    }
+
     if (req.session) {
       req.session.authenticated = false;
       delete req.session.userId;
@@ -3155,10 +3427,21 @@ app.post('/auth/login', authLimiter, async (req, res) => {
       return res.status(401).json({ error: 'invalid_credentials' });
     }
 
+    // A new session id at the moment privilege changes. Without this the
+    // session the browser arrived with - which anyone able to set the cookie
+    // could have chosen - becomes an authenticated one, which is session
+    // fixation. regenerate() issues a fresh id and drops the old row.
+    await new Promise((resolve, reject) => req.session.regenerate(err => (err ? reject(err) : resolve())));
+
     req.session.authenticated = true;
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.role = user.role;
+    invalidateAuthCache(user.id);
+
+    // Persist before replying, so the very next request (the board loads
+    // immediately) is guaranteed to find the session already stored.
+    await new Promise((resolve, reject) => req.session.save(err => (err ? reject(err) : resolve())));
 
     return res.json({ ok: true, user: sanitizeUser(user) });
   } catch (error) {
@@ -3316,9 +3599,22 @@ app.post('/api/shift/break', requireAuth, (req, res) => {
   const rec = shiftAgentRecord(code);
   rec.lastSeen = now;
   const session = openShiftSession(rec, now);
+  capExpiredBreaks(rec, now);
   const openBreak = session.breaks.find(b => b.end === null);
-  if (openBreak) openBreak.end = now;
-  else session.breaks.push({ start: now, end: null });
+  if (openBreak) {
+    // Coming back early is always allowed; the cap only ever shortens a break.
+    openBreak.end = Math.min(now, Number(openBreak.start) + SHIFT_BREAK_MS);
+  } else {
+    const remaining = breakCooldownRemaining(rec, now);
+    if (remaining > 0) {
+      return res.status(429).json({
+        error: 'break_cooldown',
+        cooldownRemainingMs: remaining,
+        ...shiftSnapshotFor(code)
+      });
+    }
+    session.breaks.push({ start: now, end: null });
+  }
   persistShiftStore();
   return res.json({ ok: true, ...shiftSnapshotFor(code) });
 });
@@ -3672,6 +3968,15 @@ app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
     if (!Object.keys(data).length) return res.status(400).json({ error: 'no_changes' });
 
     const user = await prisma.user.update({ where: { id }, data });
+    invalidateAuthCache(user.id);
+    // The three changes that are meant to take something away. Without this the
+    // person keeps whatever their live session already had until it expires.
+    const revoked = data.isActive === false || data.passwordHash || (data.role && data.role !== existing.role);
+    if (revoked) {
+      const killed = await revokeAllSessionsForUser(user.id, { keepSid: isSelf ? req.sessionID : null });
+      if (killed) console.log(`[auth] ${user.username}: ${killed} session(s) ended by an admin change`);
+      if (data.passwordHash) await revokeApiTokensForUser(user.id);
+    }
     res.json({ user: sanitizeUser(user) });
   } catch (error) {
     console.error('Update user failed:', error);
@@ -3853,10 +4158,10 @@ const KPI_TICKET_SELECT = {
   duplicateOfExternalId: true,
   createdAt: true,
   updatedAt: true,
-  resolvedAt: true
+  resolvedAt: true,
+  slaResetAt: true
 };
-async function loadKpiWorkingSet(req) {
-  const bounds = kpiDateBounds(req.query.range);
+async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.range);
   const role = normalizeRole(req.session.role) || 'support';
   const username = String(req.session.username || '').trim().toUpperCase();
   const team = String(req.query.team || 'all').trim().toLowerCase();
@@ -3913,7 +4218,12 @@ async function loadKpiWorkingSet(req) {
   const scopedTickets = scopedTicketsAll.filter(t => !isDuplicate(t));
   const workTickets = statusTickets.filter(t => !isDuplicate(t));
 
-  return { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
+  // tickets (the range query before duplicates and the in-range filter are
+  // applied) is still read by the caller, to enumerate every agent that appears
+  // anywhere in the data for the filter dropdown. Extracting this function left
+  // it behind, so /api/tickets/kpis threw ReferenceError: tickets is not defined
+  // on every request and the whole dashboard 500d.
+  return { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
 }
 function kpiDrilldownRow(t, detail) {
   return {
@@ -3930,7 +4240,7 @@ function kpiDrilldownRow(t, detail) {
 }
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
+    const { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -3945,12 +4255,32 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       agent: code, total: 0, new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0,
       duplicates: 0, overdue: 0, atRisk: 0, slaMet: 0, slaBreached: 0, resolveHours: []
     });
-    const addAgentRow = (agentCode, statusKey) => {
+    const ensureAgentRow = agentCode => {
       const rowAgent = String(agentCode || 'Unassigned').trim().toUpperCase() || 'Unassigned';
       if (!agentRows[rowAgent]) agentRows[rowAgent] = emptyAgentRow(rowAgent);
-      agentRows[rowAgent].total++;
-      if (statusKey in agentRows[rowAgent]) agentRows[rowAgent][statusKey]++;
       return agentRows[rowAgent];
+    };
+    // Which rows of the breakdown table a ticket belongs to. Every figure in
+    // that table has to fan out the same way, or the row disagrees with
+    // itself: the status columns were keyed on this rule while the SLA
+    // columns were keyed on the assignee alone, so a CS owner's row showed
+    // 43 tickets and 32 resolved next to 0 overdue and no SLA at all - the
+    // SLA of those same tickets had been added to the support assignee's row.
+    const rowKeysForTicket = ticket => {
+      const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
+      const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
+      if (team === 'cs') return [csOwner || 'Unassigned'];
+      if (team === 'support') return [assignee || 'Unassigned'];
+      const keys = [assignee || 'Unassigned'];
+      if (csOwner && csOwner !== assignee) keys.push(csOwner);
+      return keys;
+    };
+    const addAgentRow = (ticket, statusKey) => {
+      for (const key of rowKeysForTicket(ticket)) {
+        const row = ensureAgentRow(key);
+        row.total++;
+        if (statusKey in row) row[statusKey]++;
+      }
     };
 
     for (const ticket of workTickets) {
@@ -3967,14 +4297,8 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const companyName = String(ticket.companyName || 'Unknown').trim() || 'Unknown';
       companyCounts[companyName] = (companyCounts[companyName] || 0) + 1;
 
-      const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
       const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
-      if (team === 'cs') addAgentRow(csOwner || 'Unassigned', statusKey);
-      else if (team === 'support') addAgentRow(assignee || 'Unassigned', statusKey);
-      else {
-        addAgentRow(assignee || 'Unassigned', statusKey);
-        if (csOwner && csOwner !== assignee) addAgentRow(csOwner, statusKey);
-      }
+      addAgentRow(ticket, statusKey);
       const csLabel = csOwner || 'Unassigned';
       csCounts[csLabel] = (csCounts[csLabel] || 0) + 1;
       if (csOwner) ticketsWithCs++;
@@ -4002,11 +4326,12 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const snapshot = ticketSlaSnapshot(ticket, now);
       if (snapshot.state in backlog) backlog[snapshot.state]++;
       oldestOpenMs = Math.max(oldestOpenMs, snapshot.wallMs);
-      const owner = String(ticket.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
       if (snapshot.state === 'overdue' || snapshot.state === 'at_risk') {
-        if (!agentRows[owner]) agentRows[owner] = emptyAgentRow(owner);
-        if (snapshot.state === 'overdue') agentRows[owner].overdue++;
-        else agentRows[owner].atRisk++;
+        for (const key of rowKeysForTicket(ticket)) {
+          const row = ensureAgentRow(key);
+          if (snapshot.state === 'overdue') row.overdue++;
+          else row.atRisk++;
+        }
       }
       if (snapshot.state === 'overdue') {
         overdueRows.push({
@@ -4035,11 +4360,10 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     let slaUnmeasured = 0;
     for (const ticket of resolvedInRange) {
       const snapshot = ticketSlaSnapshot(ticket, now);
-      const owner = String(ticket.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
-      if (!agentRows[owner]) agentRows[owner] = emptyAgentRow(owner);
-      if (snapshot.state === 'met') { slaMet++; agentRows[owner].slaMet++; }
+      const rows = rowKeysForTicket(ticket).map(ensureAgentRow);
+      if (snapshot.state === 'met') { slaMet++; rows.forEach(row => row.slaMet++); }
       else if (snapshot.state === 'breached') {
-        slaBreached++; agentRows[owner].slaBreached++;
+        slaBreached++; rows.forEach(row => row.slaBreached++);
         breachedRows.push({
           ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
           externalId: ticket.externalId,
@@ -4056,7 +4380,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       else slaUnmeasured++;
       if (snapshot.state === 'met' || snapshot.state === 'breached') {
         resolveShiftHours.push(hoursFromMs(snapshot.shiftMs));
-        agentRows[owner].resolveHours.push(hoursFromMs(snapshot.shiftMs));
+        rows.forEach(row => row.resolveHours.push(hoursFromMs(snapshot.shiftMs)));
       }
       resolveWallHours.push(hoursFromMs(snapshot.wallMs));
     }
@@ -4248,6 +4572,1570 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'read_kpi_drilldown_failed' });
   }
 });
+// ---------------------------------------------------------------------------
+// Insights
+//
+// Everything below reads the TicketEvent log rather than the Ticket rows. The
+// rows say where a ticket is now; the log says how it got there, which is what
+// answers "who dropped this", "which column is the real queue", and "what did
+// the board look like on Tuesday".
+//
+// One property of the log has to be handled before any of it means anything:
+// a single change is written twice, ~70-100ms apart, with identical old/new
+// values (the same diff is audited on two paths). Left alone that doubles
+// every count here. dedupeTicketEvents collapses an identical
+// (type, old, new) pair seen inside AUDIT_DEDUPE_MS into one - a window far
+// too short for a person to have made the same change twice on purpose.
+// ---------------------------------------------------------------------------
+const AUDIT_DEDUPE_MS = 5000;
+
+// Beyond this many handoffs a ticket is not being passed between people, it is
+// being rewritten by something automated. Those are reported under their own
+// heading instead of at the top of the bounce list, where they would crowd out
+// every ticket a human actually dropped.
+const FLAPPING_HANDOFFS = 12;
+
+function dedupeTicketEvents(events) {
+  const out = [];
+  for (const ev of events) {
+    const prev = out[out.length - 1];
+    if (prev
+      && prev.ticketId === ev.ticketId
+      && prev.eventType === ev.eventType
+      && String(prev.oldValue ?? '') === String(ev.oldValue ?? '')
+      && String(prev.newValue ?? '') === String(ev.newValue ?? '')
+      && Math.abs(new Date(ev.createdAt).getTime() - new Date(prev.createdAt).getTime()) <= AUDIT_DEDUPE_MS) continue;
+    out.push(ev);
+  }
+  return out;
+}
+
+// The same team/agent scoping every KPI figure obeys, so an insight never
+// quietly reports a board-wide total to someone who can only see their own
+// tickets.
+function insightsAccessWhere(req) {
+  const role = normalizeRole(req.session?.role) || 'support';
+  const username = String(req.session?.username || '').trim().toUpperCase();
+  if (role === 'cs') return { csAgent: username };
+  if (role === 'support') return { assignedAgent: username };
+  return {};
+}
+
+function insightsDays(value, fallback = 30) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(365, Math.max(1, Math.round(n)));
+}
+
+function ticketNumberOf(ticket) {
+  return ticket?.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null;
+}
+
+const INSIGHT_TICKET_SELECT = {
+  id: true, externalId: true, displayNumber: true, subject: true, status: true,
+  priority: true, companyName: true, senderEmail: true, assignedAgent: true,
+  csAgent: true, category: true, createdAt: true, updatedAt: true, resolvedAt: true,
+  duplicateOfExternalId: true
+};
+
+// --- Bounce detection ------------------------------------------------------
+//
+// A ticket that changed hands three times, or re-entered a column it had
+// already left, is the painful kind. No existing figure surfaces it: it can sit
+// inside SLA the whole time it is being passed around.
+app.get('/api/insights/bounce', requireAuth, async (req, res) => {
+  try {
+    const days = insightsDays(req.query.days, 30);
+    const since = new Date(Date.now() - days * 86400000);
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const access = insightsAccessWhere(req);
+
+    const events = await prisma.ticketEvent.findMany({
+      where: {
+        eventType: { in: ['ticket_assignedAgent_changed', 'ticket_status_changed'] },
+        createdAt: { gte: since },
+        ticket: { AND: [{ duplicateOfExternalId: null }, access] }
+      },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+    });
+
+    const byTicket = new Map();
+    for (const ev of dedupeTicketEvents(events)) {
+      if (!byTicket.has(ev.ticketId)) byTicket.set(ev.ticketId, []);
+      byTicket.get(ev.ticketId).push(ev);
+    }
+
+    const rows = [];
+    const flapping = [];
+    for (const [ticketId, list] of byTicket) {
+      let handoffs = 0;
+      let statusChanges = 0;
+      let revisits = 0;
+      const agents = new Set();
+      const seenStatuses = new Set();
+      let lastAgent = null;
+      let firstAt = null;
+      let lastAt = null;
+
+      for (const ev of list) {
+        const oldValue = String(ev.oldValue || '').trim();
+        const newValue = String(ev.newValue || '').trim();
+        if (!firstAt) firstAt = ev.createdAt;
+        lastAt = ev.createdAt;
+
+        if (ev.eventType === 'ticket_assignedAgent_changed') {
+          // An unassigned -> someone transition is the ticket being picked up,
+          // not being handed off. Only a person-to-person move counts.
+          if (oldValue && newValue && oldValue !== newValue) {
+            handoffs++;
+            agents.add(oldValue);
+            agents.add(newValue);
+            lastAgent = newValue;
+          } else if (newValue) {
+            agents.add(newValue);
+            lastAgent = newValue;
+          }
+        } else {
+          if (oldValue) seenStatuses.add(oldValue);
+          if (newValue && oldValue && newValue !== oldValue) {
+            statusChanges++;
+            // Re-entering a column the ticket has already been in - the
+            // ping-pong half of the signal.
+            if (seenStatuses.has(newValue)) revisits++;
+            seenStatuses.add(newValue);
+          }
+        }
+      }
+
+      if (handoffs >= FLAPPING_HANDOFFS) {
+        flapping.push({ ticketId, handoffs, distinctAgents: agents.size });
+        continue;
+      }
+      if (handoffs < 3 && revisits < 2) continue;
+      rows.push({
+        ticketId,
+        handoffs,
+        distinctAgents: agents.size,
+        statusChanges,
+        revisits,
+        lastAgent,
+        firstChangeAt: firstAt,
+        lastChangeAt: lastAt,
+        score: handoffs + revisits * 2
+      });
+    }
+
+    rows.sort((a, b) => b.score - a.score || b.handoffs - a.handoffs);
+    const top = rows.slice(0, limit);
+    const tickets = top.length
+      ? await prisma.ticket.findMany({ where: { id: { in: top.map(r => r.ticketId) } }, select: INSIGHT_TICKET_SELECT })
+      : [];
+    const ticketById = new Map(tickets.map(t => [t.id, t]));
+
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      range: { days, since: since.toISOString() },
+      total: rows.length,
+      flappingCount: flapping.length,
+      // Not a bounce - a ticket being rewritten faster than a person could.
+      // Surfaced so the churn is visible without it drowning the real list.
+      flapping: flapping.sort((a, b) => b.handoffs - a.handoffs).slice(0, 10),
+      rows: top.map(row => {
+        const ticket = ticketById.get(row.ticketId);
+        return {
+          ...row,
+          ticketNumber: ticketNumberOf(ticket),
+          externalId: ticket?.externalId || null,
+          subject: ticket?.subject || '(no subject)',
+          company: ticket?.companyName || 'Unknown',
+          status: normalizeDbStatusForBoard(ticket?.status),
+          priority: ticket?.priority || 'Normal',
+          agent: ticket?.assignedAgent || 'Unassigned'
+        };
+      }).filter(row => row.externalId)
+    });
+  } catch (error) {
+    console.error('Bounce insight failed:', error);
+    return res.status(500).json({ error: 'bounce_insight_failed' });
+  }
+});
+
+// --- Dwell heatmap ---------------------------------------------------------
+//
+// How long tickets actually sit in each column, per week. A column with a high
+// average dwell is the bottleneck, and it is usually not the column anyone
+// would have named.
+function isoWeekKey(date) {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const week = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+// Midnight UTC on the Monday after the one containing `ms` - the boundary an
+// interval is split at when it runs across weeks.
+function nextIsoWeekStart(ms) {
+  const d = new Date(ms);
+  const monday = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - ((d.getUTCDay() || 7) - 1) * 86400000;
+  return monday + 7 * 86400000;
+}
+
+app.get('/api/insights/dwell', requireAuth, async (req, res) => {
+  try {
+    const weeks = Math.min(26, Math.max(1, Number(req.query.weeks) || 8));
+    const since = new Date(Date.now() - weeks * 7 * 86400000);
+    const now = Date.now();
+    const access = insightsAccessWhere(req);
+
+    const tickets = await prisma.ticket.findMany({
+      where: { AND: [{ duplicateOfExternalId: null }, access, { OR: [{ updatedAt: { gte: since } }, { createdAt: { gte: since } }] }] },
+      select: { id: true, status: true, createdAt: true }
+    });
+    if (!tickets.length) return res.json({ ok: true, weeks: [], stages: [], cells: {}, totals: {}, sampleSize: 0 });
+
+    const ticketIds = tickets.map(t => t.id);
+    const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+      where: { ticketId: { in: ticketIds }, eventType: 'ticket_status_changed' },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+    }));
+
+    const eventsByTicket = new Map();
+    for (const ev of events) {
+      if (!eventsByTicket.has(ev.ticketId)) eventsByTicket.set(ev.ticketId, []);
+      eventsByTicket.get(ev.ticketId).push(ev);
+    }
+
+    // Two different questions, two different numbers.
+    //
+    // cells[stage][week] = { ms, tickets } is LOAD: the ticket-hours that
+    // column carried that week, and how many distinct tickets were sitting in
+    // it. An average per cell would be worthless here - almost every ticket
+    // spans the whole week, so it would read 168h in every cell of every
+    // column and say nothing.
+    //
+    // totals[stage] is DWELL: how long a ticket takes to get through the
+    // column, averaged over the intervals that actually ended. Intervals still
+    // running are counted separately as `open` rather than folded in, because
+    // a ticket that has been in New for a month is not evidence that New takes
+    // a month - it is evidence that one ticket is stuck.
+    const cells = {};
+    const totals = {};
+    const weekKeys = new Set();
+    const cellTickets = {};
+    let sampleSize = 0;
+
+    const ensureTotal = stage => (totals[stage] = totals[stage] || { completedMs: 0, completedN: 0, openMs: 0, openN: 0 });
+
+    const addInterval = (stage, ticketId, startMs, endMs, closed) => {
+      if (!stage) return;
+      // Only the slice of the interval that falls inside the window counts. A
+      // ticket that has been sitting in New since March would otherwise
+      // contribute all five of those months to this window.
+      const from = Math.max(startMs, since.getTime());
+      const to = Math.min(endMs, now);
+      if (!(to > from)) return;
+
+      const total = ensureTotal(stage);
+      if (closed) { total.completedMs += endMs - startMs; total.completedN += 1; }
+      else { total.openMs += now - startMs; total.openN += 1; }
+      sampleSize++;
+
+      // An interval that spans three weeks belongs to all three, not to the
+      // one it happened to start in - otherwise a long stall shows up as a
+      // single hot cell followed by two empty ones.
+      let cursor = from;
+      while (cursor < to) {
+        const boundary = Math.min(to, nextIsoWeekStart(cursor));
+        const key = isoWeekKey(new Date(cursor));
+        weekKeys.add(key);
+        cells[stage] = cells[stage] || {};
+        cells[stage][key] = cells[stage][key] || { ms: 0, tickets: 0 };
+        cells[stage][key].ms += boundary - cursor;
+        cellTickets[stage] = cellTickets[stage] || {};
+        cellTickets[stage][key] = cellTickets[stage][key] || new Set();
+        cellTickets[stage][key].add(ticketId);
+        cursor = boundary;
+      }
+    };
+
+    for (const ticket of tickets) {
+      const list = eventsByTicket.get(ticket.id) || [];
+      let stage = normalizeDbStatusForBoard(list.length ? list[0].oldValue : ticket.status);
+      let startMs = new Date(ticket.createdAt).getTime();
+      for (const ev of list) {
+        const at = new Date(ev.createdAt).getTime();
+        addInterval(stage, ticket.id, startMs, at, true);
+        stage = normalizeDbStatusForBoard(ev.newValue);
+        startMs = at;
+      }
+      // The column it is sitting in right now, still accumulating. Resolved is
+      // an end state, not a queue - counting the time since it was resolved
+      // would make Resolved the biggest number on the chart forever.
+      if (stage !== 'res') addInterval(stage, ticket.id, startMs, now, false);
+    }
+
+    for (const stage of Object.keys(cells)) {
+      for (const week of Object.keys(cells[stage])) {
+        cells[stage][week].tickets = cellTickets[stage][week].size;
+      }
+    }
+
+    const stages = ['new', 'inp', 'wus', 'dft', 'wct', 'res'].filter(s => cells[s]);
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      weeks: [...weekKeys].sort(),
+      stages,
+      cells,
+      totals: Object.fromEntries(Object.entries(totals).map(([stage, t]) => [stage, {
+        avgHours: t.completedN ? Math.round((t.completedMs / t.completedN / 3600000) * 10) / 10 : null,
+        completed: t.completedN,
+        open: t.openN,
+        openAvgHours: t.openN ? Math.round((t.openMs / t.openN / 3600000) * 10) / 10 : null
+      }])),
+      sampleSize
+    });
+  } catch (error) {
+    console.error('Dwell insight failed:', error);
+    return res.status(500).json({ error: 'dwell_insight_failed' });
+  }
+});
+
+// --- Reply-outcome loop ----------------------------------------------------
+//
+// A resolve that comes straight back is not a resolve. Throughput counts it the
+// same as one that stuck, so this is what tells the two apart.
+app.get('/api/insights/reopened', requireAuth, async (req, res) => {
+  try {
+    const days = insightsDays(req.query.days, 30);
+    const windowHours = Math.min(720, Math.max(1, Number(req.query.windowHours) || 72));
+    const since = new Date(Date.now() - days * 86400000);
+    const access = insightsAccessWhere(req);
+
+    const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+      where: {
+        eventType: 'ticket_status_changed',
+        createdAt: { gte: since },
+        ticket: { AND: [{ duplicateOfExternalId: null }, access] }
+      },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+    }));
+
+    const byTicket = new Map();
+    for (const ev of events) {
+      if (!byTicket.has(ev.ticketId)) byTicket.set(ev.ticketId, []);
+      byTicket.get(ev.ticketId).push(ev);
+    }
+
+    const rows = [];
+    let resolvedCount = 0;
+    for (const [ticketId, list] of byTicket) {
+      let resolvedAt = null;
+      let bounces = 0;
+      let fastest = null;
+      for (const ev of list) {
+        if (ev.newValue === 'Resolved') { resolvedAt = new Date(ev.createdAt).getTime(); resolvedCount++; continue; }
+        if (ev.oldValue === 'Resolved' && ev.newValue !== 'Resolved') {
+          bounces++;
+          if (resolvedAt) {
+            const gapHours = (new Date(ev.createdAt).getTime() - resolvedAt) / 3600000;
+            if (fastest === null || gapHours < fastest) fastest = gapHours;
+          }
+          resolvedAt = null;
+        }
+      }
+      if (!bounces) continue;
+      rows.push({ ticketId, bounces, hoursToReopen: fastest === null ? null : Math.round(fastest * 10) / 10 });
+    }
+
+    const within = rows.filter(r => r.hoursToReopen !== null && r.hoursToReopen <= windowHours);
+    rows.sort((a, b) => b.bounces - a.bounces || (a.hoursToReopen ?? 1e9) - (b.hoursToReopen ?? 1e9));
+
+    const tickets = rows.length
+      ? await prisma.ticket.findMany({ where: { id: { in: rows.slice(0, 100).map(r => r.ticketId) } }, select: INSIGHT_TICKET_SELECT })
+      : [];
+    const ticketById = new Map(tickets.map(t => [t.id, t]));
+
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      range: { days, since: since.toISOString(), windowHours },
+      totals: {
+        resolves: resolvedCount,
+        reopened: rows.length,
+        reopenedWithinWindow: within.length,
+        stickRate: resolvedCount ? Math.round(((resolvedCount - rows.length) / resolvedCount) * 1000) / 10 : null
+      },
+      rows: rows.slice(0, 100).map(row => {
+        const ticket = ticketById.get(row.ticketId);
+        return {
+          ...row,
+          ticketNumber: ticketNumberOf(ticket),
+          externalId: ticket?.externalId || null,
+          subject: ticket?.subject || '(no subject)',
+          company: ticket?.companyName || 'Unknown',
+          agent: ticket?.assignedAgent || 'Unassigned',
+          status: normalizeDbStatusForBoard(ticket?.status)
+        };
+      }).filter(row => row.externalId)
+    });
+  } catch (error) {
+    console.error('Reopened insight failed:', error);
+    return res.status(500).json({ error: 'reopened_insight_failed' });
+  }
+});
+
+// --- Board rewind ----------------------------------------------------------
+//
+// What the board looked like at an arbitrary past moment. Reconstructed by
+// running the log backwards: for each ticket, the first status change recorded
+// AFTER the target time carries, in its oldValue, exactly the status the
+// ticket was sitting in at that time. No snapshot table needed.
+app.get('/api/insights/board-at', requireAuth, async (req, res) => {
+  try {
+    const at = new Date(String(req.query.at || ''));
+    if (Number.isNaN(at.getTime())) return res.status(400).json({ error: 'invalid_at' });
+    if (at.getTime() > Date.now()) return res.status(400).json({ error: 'at_in_future' });
+    const access = insightsAccessWhere(req);
+
+    const tickets = await prisma.ticket.findMany({
+      where: { AND: [{ createdAt: { lte: at } }, access] },
+      select: INSIGHT_TICKET_SELECT
+    });
+    if (!tickets.length) return res.json({ ok: true, at: at.toISOString(), counts: {}, tickets: [] });
+
+    const ids = tickets.map(t => t.id);
+    // Only the earliest post-cutoff change per ticket matters, but Prisma has
+    // no per-group limit - fetch the changes after the cutoff ascending and
+    // keep the first one seen for each ticket.
+    const later = await prisma.ticketEvent.findMany({
+      where: { ticketId: { in: ids }, eventType: { in: ['ticket_status_changed', 'ticket_assignedAgent_changed'] }, createdAt: { gt: at } },
+      select: { ticketId: true, eventType: true, oldValue: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }]
+    });
+    const statusAt = new Map();
+    const agentAt = new Map();
+    for (const ev of later) {
+      const target = ev.eventType === 'ticket_status_changed' ? statusAt : agentAt;
+      if (!target.has(ev.ticketId)) target.set(ev.ticketId, ev.oldValue);
+    }
+
+    const counts = { new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0 };
+    const rows = tickets.map(ticket => {
+      const stage = normalizeDbStatusForBoard(statusAt.has(ticket.id) ? statusAt.get(ticket.id) : ticket.status);
+      const agent = agentAt.has(ticket.id) ? (agentAt.get(ticket.id) || null) : (ticket.assignedAgent || null);
+      if (stage in counts) counts[stage]++;
+      return {
+        ticketNumber: ticketNumberOf(ticket),
+        externalId: ticket.externalId,
+        subject: ticket.subject || '(no subject)',
+        company: ticket.companyName || 'Unknown',
+        priority: ticket.priority || 'Normal',
+        stage,
+        agent: agent || 'Unassigned',
+        stageNow: normalizeDbStatusForBoard(ticket.status),
+        agentNow: ticket.assignedAgent || 'Unassigned'
+      };
+    });
+
+    return res.json({
+      ok: true,
+      at: at.toISOString(),
+      generatedAt: new Date().toISOString(),
+      counts,
+      // What is different between then and now - the answer to "who dropped
+      // this" is usually in this subset, not in the full list.
+      changed: rows.filter(r => r.stage !== r.stageNow || r.agent !== r.agentNow).length,
+      tickets: rows
+    });
+  } catch (error) {
+    console.error('Board rewind failed:', error);
+    return res.status(500).json({ error: 'board_rewind_failed' });
+  }
+});
+
+// --- One ticket's timeline -------------------------------------------------
+/* Graph's message list, reduced to what the board renders. Separated from the
+   handler so the parts that can be got wrong - dropping drafts, ordering by
+   time, tolerating the fields Graph omits - are testable without a mailbox. */
+function shapeThreadMessages(value) {
+  return (value || [])
+    .filter(m => !m.isDraft)
+    .map(m => ({
+      id: m.id,
+      subject: m.subject || '',
+      from: m.from?.emailAddress?.address || '',
+      fromName: m.from?.emailAddress?.name || '',
+      to: (m.toRecipients || []).map(r => r.emailAddress?.address).filter(Boolean),
+      cc: (m.ccRecipients || []).map(r => r.emailAddress?.address).filter(Boolean),
+      receivedDateTime: m.receivedDateTime || m.sentDateTime || null,
+      bodyType: m.body?.contentType === 'text' ? 'text' : 'html',
+      body: m.body?.content || '',
+      preview: m.bodyPreview || '',
+      hasAttachments: !!m.hasAttachments,
+      webLink: m.webLink || ''
+    }))
+    .sort((a, b) => new Date(a.receivedDateTime || 0) - new Date(b.receivedDateTime || 0));
+}
+
+/* The whole conversation, not just the newest message.
+
+   A ticket is a thread, but the board only ever fetched one message from it -
+   whichever reply arrived last. Everything before that was only readable in the
+   quoted text the client's mail app happened to include, which is inconsistent,
+   often truncated, and gone entirely when someone replies without quoting. An
+   agent picking up a ticket mid-conversation could not see what had been said.
+
+   Graph groups a thread by conversationId, so this asks for every message
+   carrying the ticket's, oldest first. The bodies come back as the senders
+   wrote them and are sanitised on the client by the same allowlist the single
+   message goes through - see emSanitizeEmailHtml.
+
+   Only messages count: Graph returns drafts in a conversation too, and a
+   half-written reply sitting in someone's Drafts is not part of what was said. */
+app.get('/api/tickets/:externalId/thread', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+
+    // The conversation id is on the ticket's stored raw mail; the client can
+    // also pass it directly for a ticket the database has not caught up with.
+    let conversationId = String(req.query.conversationId || '').trim();
+    if (!conversationId) {
+      const row = await prisma.ticket.findUnique({ where: { externalId }, select: { emailRaw: true } }).catch(() => null);
+      const raw = (row?.emailRaw && typeof row.emailRaw === 'object') ? row.emailRaw : {};
+      conversationId = String(raw.conversationId || '').trim();
+    }
+    if (!conversationId) return res.json({ ok: true, externalId, messages: [], note: 'no_conversation_id' });
+
+    const select = '$select=id,subject,bodyPreview,body,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,webLink,isDraft,hasAttachments,conversationId';
+    // Escape the quote Graph delimits the filter with, or an id containing one
+    // would break the query rather than simply not matching.
+    const filter = `$filter=conversationId eq '${conversationId.replace(/'/g, "''")}'`;
+    const data = await graphGetResilient(
+      `/users/${encodeURIComponent(SUPPORT_MAILBOX)}/messages?${filter}&${select}&$orderby=receivedDateTime asc&$top=50`,
+      req
+    );
+
+    const messages = shapeThreadMessages(data?.value);
+
+    return res.json({ ok: true, externalId, conversationId, total: messages.length, messages });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Ticket thread failed:', detail);
+    return res.status(502).json({ error: 'thread_failed', message: detail.slice(0, 300) });
+  }
+});
+
+app.get('/api/tickets/:externalId/timeline', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const ticket = await prisma.ticket.findUnique({ where: { externalId }, select: { id: true, createdAt: true, status: true } });
+    if (!ticket) return res.json({ ok: true, externalId, events: [], note: 'not_in_database' });
+
+    const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+      where: { ticketId: ticket.id },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true, user: { select: { username: true } } },
+      orderBy: [{ createdAt: 'asc' }],
+      take: 500
+    }));
+
+    return res.json({
+      ok: true,
+      externalId,
+      createdAt: ticket.createdAt,
+      statusNow: normalizeDbStatusForBoard(ticket.status),
+      events: events.map(ev => ({
+        at: ev.createdAt,
+        type: ev.eventType,
+        from: ev.oldValue,
+        to: ev.newValue,
+        by: ev.user?.username ? String(ev.user.username).toUpperCase() : null
+      }))
+    });
+  } catch (error) {
+    console.error('Ticket timeline failed:', error);
+    return res.status(500).json({ error: 'ticket_timeline_failed' });
+  }
+});
+
+// --- Similar tickets -------------------------------------------------------
+//
+// "This company asked something like this before, and here is what we said."
+// Turns the ticket history into a lookup without building a knowledge base.
+const SIMILAR_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'from', 'this', 'that', 'you', 'your', 'our', 'not', 'are', 'has', 'have', 'was', 'were', 'can', 'will', 'about', 'please', 'hello', 'dear', 'thanks', 'thank', 'regards', 'support', 'issue', 'question', 'help']);
+function similarityTokens(text) {
+  return new Set(String(text || '')
+    .toLowerCase()
+    .replace(/^\s*((re|fw|fwd)\s*:\s*)+/gi, '')
+    .split(/[^a-z0-9]+/)
+    .filter(word => word.length >= 3 && !SIMILAR_STOPWORDS.has(word)));
+}
+function jaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let shared = 0;
+  for (const token of a) if (b.has(token)) shared++;
+  return shared / (a.size + b.size - shared);
+}
+
+app.get('/api/tickets/:externalId/similar', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const limit = Math.min(10, Math.max(1, Number(req.query.limit) || 5));
+
+    const source = await prisma.ticket.findUnique({ where: { externalId }, select: INSIGHT_TICKET_SELECT });
+    if (!source) return res.json({ ok: true, externalId, rows: [], note: 'not_in_database' });
+
+    const or = [];
+    if (source.senderEmail) or.push({ senderEmail: source.senderEmail });
+    if (source.companyName) or.push({ companyName: source.companyName });
+    if (source.category) or.push({ category: source.category });
+    if (!or.length) return res.json({ ok: true, externalId, rows: [] });
+
+    const candidates = await prisma.ticket.findMany({
+      where: { AND: [{ OR: or }, { NOT: { externalId } }, { duplicateOfExternalId: null }] },
+      select: INSIGHT_TICKET_SELECT,
+      orderBy: [{ updatedAt: 'desc' }],
+      take: 200
+    });
+
+    const sourceTokens = similarityTokens(source.subject);
+    const scored = candidates.map(candidate => {
+      const overlap = jaccard(sourceTokens, similarityTokens(candidate.subject));
+      const sameSender = !!(source.senderEmail && candidate.senderEmail === source.senderEmail);
+      const sameCompany = !!(source.companyName && candidate.companyName === source.companyName);
+      const resolved = normalizeDbStatusForBoard(candidate.status) === 'res';
+      // A resolved one is worth more than an open one: it carries an answer.
+      const score = overlap * 4 + (sameSender ? 1.5 : 0) + (sameCompany ? 1 : 0) + (resolved ? 0.75 : 0);
+      return { candidate, overlap, sameSender, sameCompany, resolved, score };
+    }).filter(row => row.score >= 1).sort((a, b) => b.score - a.score).slice(0, limit);
+
+    // The resolving note, where there is one - the actual reusable part.
+    const ids = scored.map(row => row.candidate.id);
+    const comments = ids.length
+      ? await prisma.ticketComment.findMany({ where: { ticketId: { in: ids } }, orderBy: { createdAt: 'desc' }, select: { ticketId: true, comment: true, createdAt: true, user: { select: { username: true } } } })
+      : [];
+    const lastComment = new Map();
+    for (const comment of comments) if (!lastComment.has(comment.ticketId)) lastComment.set(comment.ticketId, comment);
+
+    return res.json({
+      ok: true,
+      externalId,
+      rows: scored.map(({ candidate, overlap, sameSender, sameCompany, resolved, score }) => {
+        const comment = lastComment.get(candidate.id);
+        return {
+          ticketNumber: ticketNumberOf(candidate),
+          externalId: candidate.externalId,
+          subject: candidate.subject || '(no subject)',
+          company: candidate.companyName || 'Unknown',
+          sender: candidate.senderEmail || null,
+          status: normalizeDbStatusForBoard(candidate.status),
+          category: candidate.category || null,
+          agent: candidate.assignedAgent || 'Unassigned',
+          resolvedAt: candidate.resolvedAt,
+          createdAt: candidate.createdAt,
+          why: [sameSender ? 'same sender' : null, sameCompany ? 'same company' : null, overlap >= 0.2 ? 'similar subject' : null, resolved ? 'resolved' : null].filter(Boolean),
+          score: Math.round(score * 100) / 100,
+          lastNote: comment ? { text: String(comment.comment || '').slice(0, 600), by: comment.user?.username ? String(comment.user.username).toUpperCase() : 'SYSTEM', at: comment.createdAt } : null
+        };
+      })
+    });
+  } catch (error) {
+    console.error('Similar tickets failed:', error);
+    return res.status(500).json({ error: 'similar_tickets_failed' });
+  }
+});
+
+// --- Detected languages ----------------------------------------------------
+//
+// TicketTranslation already records what language each translated ticket was
+// written in. That is a signal the board pays for and then throws away - this
+// hands it back so a card can carry a language chip and the board can filter
+// on it.
+// --- Who should take this --------------------------------------------------
+//
+// Assignment on this board is a dropdown of seven trigrams with nothing behind
+// it, so it falls to whoever is nearest or whoever always gets picked. The
+// board already knows who has actually finished this kind of work: the resolved
+// tickets from the same company, the same category, and the same sender.
+//
+// This ranks people on that evidence and says why, so the suggestion can be
+// argued with rather than just obeyed. It suggests; it never assigns.
+app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.query.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+
+    const ticket = await prisma.ticket.findUnique({ where: { externalId }, select: INSIGHT_TICKET_SELECT });
+    if (!ticket) return res.json({ ok: true, externalId, suggestions: [], note: 'not_in_database' });
+
+    const or = [];
+    if (ticket.companyName) or.push({ companyName: ticket.companyName });
+    if (ticket.senderEmail) or.push({ senderEmail: ticket.senderEmail });
+    if (ticket.category) or.push({ category: ticket.category });
+    if (!or.length) return res.json({ ok: true, externalId, suggestions: [], note: 'nothing_to_go_on' });
+
+    // Only finished work counts. An open ticket sitting with someone is not
+    // evidence that they are the right person for it - quite often it is the
+    // opposite.
+    const history = await prisma.ticket.findMany({
+      where: { AND: [{ OR: or }, { NOT: { externalId } }, { status: 'Resolved' }, { assignedAgent: { not: null } }, { duplicateOfExternalId: null }] },
+      select: { assignedAgent: true, companyName: true, category: true, senderEmail: true, subject: true, createdAt: true, resolvedAt: true, displayNumber: true },
+      orderBy: { resolvedAt: 'desc' },
+      take: 300
+    });
+    if (!history.length) return res.json({ ok: true, externalId, suggestions: [], note: 'no_resolved_history' });
+
+    // What everyone is already carrying, so a suggestion does not pile another
+    // ticket on the person who is furthest behind.
+    const openCounts = await prisma.ticket.groupBy({
+      by: ['assignedAgent'],
+      where: { AND: [{ NOT: { status: 'Resolved' } }, { assignedAgent: { not: null } }, { duplicateOfExternalId: null }] },
+      _count: { _all: true }
+    }).catch(() => []);
+    const load = Object.fromEntries(openCounts.map(row => [row.assignedAgent, row._count._all]));
+    const busiest = Math.max(1, ...Object.values(load));
+
+    const subjectTokens = similarityTokens(ticket.subject);
+    const now = Date.now();
+    const agents = new Map();
+
+    for (const past of history) {
+      const agent = String(past.assignedAgent || '').trim().toUpperCase();
+      if (!agent) continue;
+      if (!agents.has(agent)) agents.set(agent, { agent, sameCompany: 0, sameSender: 0, sameCategory: 0, similarSubject: 0, total: 0, lastAt: null, examples: [] });
+      const row = agents.get(agent);
+      row.total++;
+
+      const sameCompany = !!(ticket.companyName && past.companyName === ticket.companyName);
+      const sameSender = !!(ticket.senderEmail && past.senderEmail === ticket.senderEmail);
+      const sameCategory = !!(ticket.category && past.category === ticket.category);
+      const overlap = jaccard(subjectTokens, similarityTokens(past.subject));
+      if (sameCompany) row.sameCompany++;
+      if (sameSender) row.sameSender++;
+      if (sameCategory) row.sameCategory++;
+      if (overlap >= 0.25) row.similarSubject++;
+
+      const at = past.resolvedAt ? new Date(past.resolvedAt).getTime() : null;
+      if (at && (!row.lastAt || at > row.lastAt)) row.lastAt = at;
+      if (row.examples.length < 3 && (sameCompany || sameSender || overlap >= 0.25)) {
+        row.examples.push({
+          ticketNumber: past.displayNumber ? `#${String(past.displayNumber).padStart(4, '0')}` : null,
+          subject: past.subject || '(no subject)',
+          resolvedAt: past.resolvedAt
+        });
+      }
+    }
+
+    const suggestions = [...agents.values()].map(row => {
+      // Weighted by how specific the evidence is. Having answered this exact
+      // client before beats having answered the same category once.
+      const evidence = row.sameSender * 3 + row.sameCompany * 2 + row.similarSubject * 2 + row.sameCategory;
+      // Six months old is still evidence, just weaker.
+      const ageMonths = row.lastAt ? (now - row.lastAt) / (30 * 86400000) : 24;
+      const recency = 1 / (1 + Math.max(0, ageMonths) / 6);
+      // A soft penalty, not a veto: the person who knows the client is often
+      // still the right answer even when they are busy.
+      const loadPenalty = 1 - 0.35 * ((load[row.agent] || 0) / busiest);
+      const score = evidence * recency * loadPenalty;
+      return {
+        agent: row.agent,
+        score: Math.round(score * 100) / 100,
+        resolvedForThisClient: row.sameSender,
+        resolvedForThisCompany: row.sameCompany,
+        resolvedInThisCategory: row.sameCategory,
+        resolvedSimilarSubjects: row.similarSubject,
+        totalResolved: row.total,
+        lastResolvedAt: row.lastAt ? new Date(row.lastAt).toISOString() : null,
+        openNow: load[row.agent] || 0,
+        // Said in words, because a number nobody can interrogate is not a
+        // reason to hand someone a ticket.
+        why: [
+          row.sameSender ? `resolved ${row.sameSender} ticket${row.sameSender === 1 ? '' : 's'} from this client` : null,
+          row.sameCompany ? `${row.sameCompany} for this company` : null,
+          row.similarSubject ? `${row.similarSubject} on a similar subject` : null,
+          row.sameCategory ? `${row.sameCategory} in this category` : null
+        ].filter(Boolean),
+        examples: row.examples
+      };
+    }).filter(row => row.score > 0).sort((a, b) => b.score - a.score).slice(0, 5);
+
+    return res.json({
+      ok: true,
+      externalId,
+      ticketNumber: ticketNumberOf(ticket),
+      basedOn: history.length,
+      suggestions
+    });
+  } catch (error) {
+    console.error('Assignee suggestion failed:', error);
+    return res.status(500).json({ error: 'suggest_assignee_failed' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Projects
+//
+// The team's Claude projects, runnable from the board.
+//
+// The board keeps a local registry because ordinary Claude API keys cannot list
+// claude.ai Projects. Enterprise/eligible orgs can sync them through the
+// Compliance Projects API when a user connects a Compliance Access Key with
+// read:compliance_user_data. That API returns metadata and instructions, so a
+// synced project can be made runnable without manually pasting the prompt.
+//
+// What that buys, and it is the point of the feature: each project declares its
+// own inputs, so the board can render a real form for it instead of a chat box,
+// and run it against the API without anyone leaving the board.
+// ---------------------------------------------------------------------------
+const PROJECT_SCOPES = new Set(['mine', 'org', 'shared']);
+const PROJECT_FIELD_TYPES = new Set(['text', 'textarea', 'number', 'select', 'url']);
+const PROJECT_MODEL = String(process.env.PROJECT_MODEL || 'claude-opus-5').trim();
+const CLAUDE_COMPLIANCE_API_BASE = String(process.env.CLAUDE_COMPLIANCE_API_BASE || 'https://api.anthropic.com').replace(/\/+$/, '');
+const CLAUDE_PROJECT_SYNC_LIMIT = Math.min(500, Math.max(1, Number(process.env.CLAUDE_PROJECT_SYNC_LIMIT || 100)));
+// Runs cost money and are started by a button, so they get their own ceiling
+// rather than sharing the general API limiter.
+const projectRunLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
+
+async function ensureProjectTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "ClaudeProject" (
+      "id" SERIAL PRIMARY KEY,
+      "slug" TEXT NOT NULL UNIQUE,
+      "name" TEXT NOT NULL,
+      "description" TEXT,
+      "scope" TEXT NOT NULL DEFAULT 'org',
+      "owner" TEXT,
+      "instructions" TEXT,
+      "inputs" JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "model" TEXT,
+      "accent" TEXT,
+      "pinned" BOOLEAN NOT NULL DEFAULT false,
+      "createdBy" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "claudeProjectId" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "source" TEXT NOT NULL DEFAULT 'manual'`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceUserId" INTEGER`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceUserEmail" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceDeletedAt" TIMESTAMP(3)`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "syncedAt" TIMESTAMP(3)`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProject_scope_idx" ON "ClaudeProject"("scope")`;
+  await prisma.$executeRaw`CREATE UNIQUE INDEX IF NOT EXISTS "ClaudeProject_claudeProjectId_key" ON "ClaudeProject"("claudeProjectId") WHERE "claudeProjectId" IS NOT NULL`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProject_sourceUserId_idx" ON "ClaudeProject"("sourceUserId")`;
+}
+
+/* The projects already in use, with the inputs each one asks for in its own
+   description. Seeded once, on an empty table, so the panel opens with the real
+   catalogue rather than a blank page and an "add your first project" prompt.
+   Instructions are left empty on purpose - only the people who wrote each
+   project can supply those, and a guessed system prompt would be worse than an
+   honest gap. Until one is filled in, the project says so and cannot be run. */
+const PROJECT_SEED = [
+  {
+    slug: 'q-seo-implementation', name: 'Q-SEO Implementation', scope: 'org', owner: 'you', accent: 'indigo', pinned: true,
+    description: 'Implementation steps for Q-SEO on a hotel site, for the stack the site actually runs on.',
+    inputs: [
+      { key: 'websiteUrl', label: 'Website URL', type: 'url', required: true, placeholder: 'https://hotel.example' },
+      { key: 'accountId', label: 'Quinta account ID', type: 'text', required: true },
+      { key: 'licenseKey', label: 'License key', type: 'text', required: true },
+      { key: 'serverLanguage', label: 'Server language', type: 'select', required: true, options: ['Node.js', 'Python', 'PHP'] }
+    ]
+  },
+  {
+    slug: 'q-share-mapping', name: 'Q-Share Mapping', scope: 'org', owner: 'you', accent: 'teal', pinned: true,
+    description: 'Q-Share mapping files for hotel webmasters, from a website URL and a teamId.',
+    inputs: [
+      { key: 'websiteUrl', label: 'Website URL', type: 'url', required: true, placeholder: 'https://hotel.example' },
+      { key: 'teamId', label: 'Team ID', type: 'text', required: true, placeholder: '401' }
+    ]
+  },
+  {
+    slug: 'global-check-agent', name: 'Global Check Agent V0.3', scope: 'org', owner: 'JAT Quinta', accent: 'amber',
+    description: 'Full check for one hotel. The name must match the one on the Dashboard exactly.',
+    inputs: [
+      { key: 'hotelName', label: 'Hotel name', type: 'text', required: true, help: 'Must match the name on the Dashboard.' },
+      { key: 'qtId', label: 'QT ID', type: 'text', required: true },
+      { key: 'officialUrl', label: "Hotel's official URL", type: 'url', required: true }
+    ]
+  },
+  {
+    slug: 'q-sync-check', name: 'Q-sync Check', scope: 'org', owner: 'Vincent', accent: 'violet',
+    description: 'Confirms Q-data is set correctly before Q-Sync is launched. Takes one or more hotel IDs.',
+    inputs: [
+      { key: 'hotelIds', label: 'Hotel IDs', type: 'textarea', required: true, placeholder: '401\n252\n19919', help: 'One per line, or comma separated.' }
+    ]
+  },
+  {
+    slug: 'b-signature-mcp', name: 'B Signature MCP', scope: 'mine', owner: 'you', accent: 'rose',
+    description: 'Q-MCP assistant for the six B Signature properties.',
+    inputs: [
+      { key: 'question', label: 'What do you need?', type: 'textarea', required: true, placeholder: 'Ask about any of the six B Signature properties…' }
+    ]
+  },
+  {
+    slug: 'quinta-onboarding-agent', name: 'Quinta Onboarding Agent V2', scope: 'org', owner: 'Quinta', accent: 'emerald',
+    description: 'Walks a new property through onboarding.',
+    inputs: [
+      { key: 'hotelName', label: 'Hotel name', type: 'text', required: true },
+      { key: 'notes', label: 'Anything specific to this onboarding', type: 'textarea', required: false }
+    ]
+  },
+  {
+    slug: 'qa-audit-conversation', name: 'QA AUDIT - Check Conversation', scope: 'org', owner: 'Quinta', accent: 'slate',
+    description: 'Audits a bot conversation for quality issues.',
+    inputs: [
+      { key: 'conversation', label: 'Conversation', type: 'textarea', required: true, placeholder: 'Paste the conversation transcript…' },
+      { key: 'hotelName', label: 'Hotel', type: 'text', required: false }
+    ]
+  }
+];
+
+async function seedProjectsIfEmpty() {
+  await ensureProjectTable();
+  const rows = await prisma.$queryRaw`SELECT count(*)::int AS n FROM "ClaudeProject"`;
+  if ((Array.isArray(rows) ? rows[0]?.n : 0) > 0) return 0;
+  for (const p of PROJECT_SEED) {
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","pinned","createdBy","updatedAt")
+      VALUES (${p.slug}, ${p.name}, ${p.description || ''}, ${p.scope}, ${p.owner || ''}, ${''},
+              ${JSON.stringify(p.inputs || [])}::jsonb, ${p.accent || 'slate'}, ${!!p.pinned}, ${'seed'}, CURRENT_TIMESTAMP)
+      ON CONFLICT ("slug") DO NOTHING
+    `;
+  }
+  return PROJECT_SEED.length;
+}
+
+function normalizeProjectInputs(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  return list.slice(0, 20).map((field, index) => {
+    const key = String(field?.key || `field${index + 1}`).trim().replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) || `field${index + 1}`;
+    const type = PROJECT_FIELD_TYPES.has(String(field?.type)) ? String(field.type) : 'text';
+    return {
+      key,
+      label: String(field?.label || key).slice(0, 120),
+      type,
+      required: !!field?.required,
+      placeholder: String(field?.placeholder || '').slice(0, 200),
+      help: String(field?.help || '').slice(0, 300),
+      options: type === 'select' ? (Array.isArray(field?.options) ? field.options.map(o => String(o).slice(0, 80)).slice(0, 30) : []) : []
+    };
+  });
+}
+
+function projectSlugFromName(name) {
+  return (String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+}
+
+async function uniqueProjectSlug(baseSlug, claudeProjectId = '') {
+  const base = projectSlugFromName(baseSlug) || 'project';
+  let slug = base;
+  for (let i = 2; i <= 50; i += 1) {
+    const rows = await prisma.$queryRaw`SELECT "id","claudeProjectId" FROM "ClaudeProject" WHERE "slug" = ${slug} LIMIT 1`;
+    const hit = Array.isArray(rows) ? rows[0] : null;
+    if (!hit || (claudeProjectId && hit.claudeProjectId === claudeProjectId)) return slug;
+    const suffix = `-${i}`;
+    slug = `${base.slice(0, Math.max(1, 60 - suffix.length))}${suffix}`;
+  }
+  return `${base.slice(0, 46)}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function claudeConnectionProvider(userId) {
+  return `claude-compliance:${Number(userId)}`;
+}
+
+// The Compliance Access Key is the one Anthropic credential that cannot live in
+// the environment: every agent pastes their own, so it has to be persisted. It
+// is encrypted at rest rather than written into OAuthToken.accessToken in the
+// clear, so a database dump - a backup, a restored snapshot, a support export -
+// does not hand over a key that can read the organisation's Claude projects.
+//
+// The wrapping key is derived from CLAUDE_CREDENTIAL_SECRET, falling back to
+// SESSION_SECRET so an existing deployment needs no new configuration. Rotating
+// either one makes stored keys unreadable, and the connection reports itself as
+// disconnected until the agent pastes theirs again - which is the correct
+// outcome for a rotated secret, not a failure.
+const CLAUDE_CREDENTIAL_PREFIX = 'encv1:';
+function claudeCredentialKey() {
+  const secret = String(process.env.CLAUDE_CREDENTIAL_SECRET || process.env.SESSION_SECRET || '').trim();
+  if (!secret) return null;
+  return crypto.createHash('sha256').update(`claude-credential:${secret}`).digest();
+}
+function encryptClaudeCredential(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const key = claudeCredentialKey();
+  // No secret configured: storing it unwrapped is what this deployment already
+  // did, and refusing to connect would be a worse trade than a logged warning.
+  if (!key) {
+    console.warn('Claude credential stored unencrypted: set CLAUDE_CREDENTIAL_SECRET or SESSION_SECRET.');
+    return raw;
+  }
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const body = Buffer.concat([cipher.update(raw, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${CLAUDE_CREDENTIAL_PREFIX}${iv.toString('base64url')}.${tag.toString('base64url')}.${body.toString('base64url')}`;
+}
+function decryptClaudeCredential(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  // A key stored before this shipped is still plaintext. Read it, so upgrading
+  // does not silently disconnect everyone; the next write wraps it.
+  if (!raw.startsWith(CLAUDE_CREDENTIAL_PREFIX)) return raw;
+  const key = claudeCredentialKey();
+  if (!key) return '';
+  try {
+    const [ivPart, tagPart, bodyPart] = raw.slice(CLAUDE_CREDENTIAL_PREFIX.length).split('.');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivPart, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
+    return Buffer.concat([decipher.update(Buffer.from(bodyPart, 'base64url')), decipher.final()]).toString('utf8');
+  } catch (_) {
+    // Wrong key, or a tampered row. Either way there is no credential to use.
+    return '';
+  }
+}
+
+function maskSecret(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.length <= 12) return `${raw.slice(0, 2)}...${raw.slice(-2)}`;
+  return `${raw.slice(0, 10)}...${raw.slice(-4)}`;
+}
+
+function normalizeClaudeAuthMode(value, credential) {
+  const mode = String(value || 'auto').trim().toLowerCase();
+  if (['auto', 'api_key', 'bearer'].includes(mode)) return mode;
+  return String(credential || '').trim().startsWith('sk-') ? 'api_key' : 'bearer';
+}
+
+function claudeConnectionStatusFromTokens(tokens) {
+  const meta = (tokens?.metadata && typeof tokens.metadata === 'object' && !Array.isArray(tokens.metadata)) ? tokens.metadata : {};
+  const credential = String(tokens?.accessToken || '').trim();
+  return {
+    connected: !!credential,
+    credentialMasked: maskSecret(credential),
+    authMode: normalizeClaudeAuthMode(meta.authMode, credential),
+    userEmail: meta.userEmail || '',
+    lastSyncAt: meta.lastSyncAt || null,
+    lastProjectCount: Number(meta.lastProjectCount || 0),
+    lastError: meta.lastError || ''
+  };
+}
+
+async function getClaudeConnectionForRequest(req) {
+  if (!req.session?.userId) return null;
+  const tokens = await getStoredOAuthTokens(claudeConnectionProvider(req.session.userId));
+  if (!tokens) return null;
+  return { ...tokens, accessToken: decryptClaudeCredential(tokens.accessToken) };
+}
+
+// Every write of the Claude credential goes through here, so nothing can put a
+// plaintext key back into the table by taking the shorter path.
+async function setClaudeConnection(userId, { credential, metadata }) {
+  await setStoredOAuthTokens(claudeConnectionProvider(userId), {
+    accessToken: encryptClaudeCredential(credential),
+    expiresAt: null,
+    metadata: metadata || undefined
+  });
+}
+
+function claudeComplianceHeaders(credential, mode) {
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    'anthropic-version': '2023-06-01'
+  };
+  if (mode === 'bearer') headers.Authorization = `Bearer ${credential}`;
+  else headers['x-api-key'] = credential;
+  return headers;
+}
+
+async function claudeComplianceRequest(credential, pathname, { searchParams } = {}) {
+  const raw = String(credential || '').trim();
+  if (!raw) throw new Error('claude_not_connected');
+  const url = new URL(pathname, `${CLAUDE_COMPLIANCE_API_BASE}/`);
+  Object.entries(searchParams || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    if (Array.isArray(value)) value.forEach(v => url.searchParams.append(key, String(v)));
+    else url.searchParams.set(key, String(value));
+  });
+
+  const preferred = raw.startsWith('sk-') ? 'api_key' : 'bearer';
+  const modes = preferred === 'api_key' ? ['api_key', 'bearer'] : ['bearer', 'api_key'];
+  let lastStatus = 0;
+  let lastText = '';
+  for (const mode of modes) {
+    const response = await fetch(url, { headers: claudeComplianceHeaders(raw, mode) });
+    const text = await response.text();
+    if (response.ok) return text ? JSON.parse(text) : {};
+    lastStatus = response.status;
+    lastText = text;
+    if (![401, 403].includes(response.status)) break;
+  }
+  const message = (() => {
+    try { return JSON.parse(lastText)?.error?.message || JSON.parse(lastText)?.message; }
+    catch (_) { return ''; }
+  })();
+  const error = new Error(message || `claude_compliance_${lastStatus || 'failed'}`);
+  error.status = lastStatus;
+  error.body = lastText;
+  throw error;
+}
+
+async function fetchClaudeProjects(credential, { userEmail = '' } = {}) {
+  const email = normalizeEmailForDb(userEmail || '');
+  const projects = [];
+  let page = '';
+  while (projects.length < CLAUDE_PROJECT_SYNC_LIMIT) {
+    const list = await claudeComplianceRequest(credential, '/v1/compliance/apps/projects', {
+      searchParams: { limit: Math.min(100, CLAUDE_PROJECT_SYNC_LIMIT - projects.length), page }
+    });
+    const rows = Array.isArray(list?.data) ? list.data : [];
+    for (const row of rows) {
+      if (projects.length >= CLAUDE_PROJECT_SYNC_LIMIT) break;
+      if (row?.deleted_at) continue;
+      const id = String(row?.id || '').trim();
+      if (!id) continue;
+      const detail = await claudeComplianceRequest(credential, `/v1/compliance/apps/projects/${encodeURIComponent(id)}`);
+      if (detail?.deleted_at) continue;
+      const ownerEmail = normalizeEmailForDb(detail?.user?.email_address || row?.user?.email_address || '');
+      if (email && ownerEmail !== email) continue;
+      projects.push({ ...row, ...detail, user: detail?.user || row?.user || null });
+    }
+    page = String(list?.next_page || '');
+    if (!list?.has_more || !page) break;
+  }
+  return projects;
+}
+
+function defaultInputsForSyncedClaudeProject(project) {
+  return [{
+    key: 'prompt',
+    label: 'Prompt',
+    type: 'textarea',
+    required: true,
+    placeholder: `Run ${String(project?.name || 'this project')} for...`
+  }];
+}
+
+async function upsertSyncedClaudeProject(project, req) {
+  await ensureProjectTable();
+  const claudeProjectId = String(project?.id || '').trim();
+  if (!claudeProjectId) return null;
+  const name = String(project?.name || 'Claude project').trim().slice(0, 200) || 'Claude project';
+  const description = String(project?.description || '').slice(0, 600);
+  const ownerEmail = normalizeEmailForDb(project?.user?.email_address || '');
+  const owner = ownerEmail || String(project?.user?.id || '').slice(0, 80);
+  const scope = project?.is_private ? 'mine' : 'org';
+  const instructions = String(project?.instructions || '');
+  const inputs = normalizeProjectInputs(defaultInputsForSyncedClaudeProject(project));
+  const model = String(project?.model || '').trim() || null;
+  const accent = project?.is_private ? 'rose' : 'indigo';
+  const sourceDeletedAt = project?.deleted_at ? new Date(project.deleted_at) : null;
+
+  const existingRows = await prisma.$queryRaw`SELECT "id","slug" FROM "ClaudeProject" WHERE "claudeProjectId" = ${claudeProjectId} LIMIT 1`;
+  const existing = Array.isArray(existingRows) ? existingRows[0] : null;
+  const slug = existing?.slug || await uniqueProjectSlug(name, claudeProjectId);
+  if (existing?.id) {
+    await prisma.$executeRaw`
+      UPDATE "ClaudeProject"
+      SET "name" = ${name}, "description" = ${description}, "scope" = ${scope}, "owner" = ${owner},
+          "instructions" = ${instructions}, "inputs" = ${JSON.stringify(inputs)}::jsonb, "model" = ${model},
+          "accent" = ${accent}, "source" = 'claude', "sourceUserId" = ${Number(req.session.userId)},
+          "sourceUserEmail" = ${ownerEmail || null}, "sourceDeletedAt" = ${sourceDeletedAt},
+          "syncedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
+      WHERE "id" = ${Number(existing.id)}
+    `;
+    return existing.id;
+  }
+
+  const inserted = await prisma.$queryRaw`
+    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","model","accent","pinned","createdBy","updatedAt","claudeProjectId","source","sourceUserId","sourceUserEmail","sourceDeletedAt","syncedAt")
+    VALUES (${slug}, ${name}, ${description}, ${scope}, ${owner}, ${instructions}, ${JSON.stringify(inputs)}::jsonb,
+            ${model}, ${accent}, ${false}, ${'claude:' + (req.session.username || '')}, CURRENT_TIMESTAMP,
+            ${claudeProjectId}, 'claude', ${Number(req.session.userId)}, ${ownerEmail || null}, ${sourceDeletedAt}, CURRENT_TIMESTAMP)
+    RETURNING "id"
+  `;
+  return Array.isArray(inserted) ? inserted[0]?.id : null;
+}
+
+async function syncClaudeProjectsForRequest(req) {
+  const tokens = await getClaudeConnectionForRequest(req);
+  const credential = String(tokens?.accessToken || '').trim();
+  if (!credential) throw Object.assign(new Error('claude_not_connected'), { status: 409 });
+  const meta = (tokens?.metadata && typeof tokens.metadata === 'object' && !Array.isArray(tokens.metadata)) ? tokens.metadata : {};
+  const projects = await fetchClaudeProjects(credential, { userEmail: meta.userEmail || '' });
+  for (const project of projects) await upsertSyncedClaudeProject(project, req);
+  const nextMeta = { ...meta, lastSyncAt: new Date().toISOString(), lastProjectCount: projects.length, lastError: '' };
+  await setClaudeConnection(req.session.userId, { credential, metadata: nextMeta });
+  return { count: projects.length, lastSyncAt: nextMeta.lastSyncAt };
+}
+
+function projectRow(row, { includeInstructions = false } = {}) {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    description: row.description || '',
+    scope: row.scope || 'org',
+    owner: row.owner || '',
+    inputs: Array.isArray(row.inputs) ? row.inputs : [],
+    model: row.model || PROJECT_MODEL,
+    accent: row.accent || 'slate',
+    pinned: !!row.pinned,
+    source: row.source || 'manual',
+    sourceUserEmail: row.sourceUserEmail || '',
+    syncedAt: row.syncedAt || null,
+    // Whether the project can actually be run yet. An empty instruction set is
+    // the normal state for a freshly seeded project, not an error.
+    ready: !!String(row.instructions || '').trim(),
+    updatedAt: row.updatedAt,
+    ...(includeInstructions ? { instructions: row.instructions || '' } : {})
+  };
+}
+
+app.get('/api/projects', requireAuth, async (req, res) => {
+  try {
+    await seedProjectsIfEmpty();
+    const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" ORDER BY "pinned" DESC, "updatedAt" DESC`;
+    const isAdmin = isAdminRole(req.session.role);
+    const list = (Array.isArray(rows) ? rows : []).map(r => projectRow(r, { includeInstructions: isAdmin }));
+    const claudeTokens = await getClaudeConnectionForRequest(req);
+    return res.json({
+      ok: true,
+      canEdit: isAdmin,
+      model: PROJECT_MODEL,
+      configured: !!String(process.env.ANTHROPIC_API_KEY || '').trim(),
+      claude: claudeConnectionStatusFromTokens(claudeTokens),
+      rows: list
+    });
+  } catch (error) {
+    console.error('Project list failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_list_failed' });
+  }
+});
+
+app.get('/api/claude/connection', requireAuth, async (req, res) => {
+  try {
+    const tokens = await getClaudeConnectionForRequest(req);
+    const user = await prisma.user.findUnique({ where: { id: Number(req.session.userId) }, select: { email: true } }).catch(() => null);
+    return res.json({ ok: true, suggestedEmail: user?.email || '', claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    console.error('Claude connection status failed:', error?.message || error);
+    return res.status(500).json({ error: 'claude_connection_status_failed' });
+  }
+});
+
+app.post('/api/claude/connection', requireAuth, projectRunLimiter, async (req, res) => {
+  try {
+    const credential = String(req.body?.credential || '').trim();
+    if (!credential) return res.status(400).json({ error: 'credential_required', message: 'Paste a Claude Compliance Access Key first.' });
+    const userEmail = normalizeEmailForDb(req.body?.userEmail || '');
+    const authMode = normalizeClaudeAuthMode(req.body?.authMode, credential);
+
+    await setClaudeConnection(req.session.userId, {
+      credential,
+      metadata: { userEmail, authMode, connectedAt: new Date().toISOString(), lastSyncAt: null, lastProjectCount: 0, lastError: '' }
+    });
+
+    const sync = await syncClaudeProjectsForRequest(req);
+    const tokens = await getClaudeConnectionForRequest(req);
+    return res.json({ ok: true, sync, claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Claude connection failed:', detail);
+    const existing = await getClaudeConnectionForRequest(req).catch(() => null);
+    const meta = (existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)) ? existing.metadata : {};
+    if (existing?.accessToken) {
+      await setClaudeConnection(req.session.userId, {
+        credential: existing.accessToken,
+        metadata: { ...meta, lastError: detail.slice(0, 300) }
+      }).catch(() => null);
+    }
+    const status = Number(error?.status) || 502;
+    return res.status(status === 401 || status === 403 ? status : 502).json({
+      error: status === 403 ? 'claude_missing_scope' : (status === 401 ? 'claude_auth_failed' : 'claude_connection_failed'),
+      message: detail.slice(0, 300)
+    });
+  }
+});
+
+app.post('/api/claude/sync-projects', requireAuth, projectRunLimiter, async (req, res) => {
+  try {
+    const sync = await syncClaudeProjectsForRequest(req);
+    const tokens = await getClaudeConnectionForRequest(req);
+    return res.json({ ok: true, sync, claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Claude project sync failed:', detail);
+    const existing = await getClaudeConnectionForRequest(req).catch(() => null);
+    const meta = (existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)) ? existing.metadata : {};
+    if (existing?.accessToken) {
+      await setClaudeConnection(req.session.userId, {
+        credential: existing.accessToken,
+        metadata: { ...meta, lastError: detail.slice(0, 300) }
+      }).catch(() => null);
+    }
+    const status = Number(error?.status) || 502;
+    return res.status(status === 409 ? 409 : (status === 401 || status === 403 ? status : 502)).json({
+      error: status === 409 ? 'claude_not_connected' : (status === 403 ? 'claude_missing_scope' : (status === 401 ? 'claude_auth_failed' : 'claude_sync_failed')),
+      message: detail.slice(0, 300)
+    });
+  }
+});
+
+app.delete('/api/claude/connection', requireAuth, async (req, res) => {
+  try {
+    await prisma.oAuthToken.delete({ where: { provider: claudeConnectionProvider(req.session.userId) } }).catch(() => null);
+    return res.json({ ok: true, claude: claudeConnectionStatusFromTokens(null) });
+  } catch (error) {
+    console.error('Claude disconnect failed:', error?.message || error);
+    return res.status(500).json({ error: 'claude_disconnect_failed' });
+  }
+});
+
+app.post('/api/projects', requireAdmin, async (req, res) => {
+  try {
+    await ensureProjectTable();
+    const name = String(req.body?.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name_required' });
+    const slug = (String(req.body?.slug || name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+    const scope = PROJECT_SCOPES.has(String(req.body?.scope)) ? String(req.body.scope) : 'org';
+    const inputs = normalizeProjectInputs(req.body?.inputs);
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","model","accent","pinned","createdBy","updatedAt")
+      VALUES (${slug}, ${name}, ${String(req.body?.description || '').slice(0, 600)}, ${scope}, ${String(req.body?.owner || '').slice(0, 80)},
+              ${String(req.body?.instructions || '')}, ${JSON.stringify(inputs)}::jsonb, ${String(req.body?.model || '').trim() || null},
+              ${String(req.body?.accent || 'slate')}, ${!!req.body?.pinned}, ${String(req.session.username || '')}, CURRENT_TIMESTAMP)
+      ON CONFLICT ("slug") DO UPDATE SET
+        "name" = EXCLUDED."name", "description" = EXCLUDED."description", "scope" = EXCLUDED."scope",
+        "owner" = EXCLUDED."owner", "instructions" = EXCLUDED."instructions", "inputs" = EXCLUDED."inputs",
+        "model" = EXCLUDED."model", "accent" = EXCLUDED."accent", "pinned" = EXCLUDED."pinned",
+        "updatedAt" = CURRENT_TIMESTAMP
+    `;
+    return res.json({ ok: true, slug });
+  } catch (error) {
+    console.error('Project save failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_save_failed' });
+  }
+});
+
+app.delete('/api/projects/:id', requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+    await prisma.$executeRaw`DELETE FROM "ClaudeProject" WHERE "id" = ${id}`;
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Project delete failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_delete_failed' });
+  }
+});
+
+/* Running one.
+
+   The project's instructions become the system prompt and the form values
+   become the message, so the model gets the same brief it would have been given
+   in Claude - just assembled by the board instead of typed into a chat.
+
+   Streamed server-side and awaited whole: these produce long answers, and a
+   non-streaming request of this size is what trips an HTTP timeout. The
+   response is returned complete rather than forwarded to the browser as it
+   arrives - a progress stream would be nicer and is a clean follow-up, but it
+   is not what makes the feature work. */
+// A run and a follow-up are the same request with a different message list, so
+// they share everything from the model down: the project's instructions as a
+// cached system prompt, adaptive thinking, and the refusal check that has to
+// happen before the content is read.
+const PROJECT_CHAT_MAX_TURNS = 40;
+const PROJECT_CHAT_MAX_CHARS = 20_000;
+
+function projectBriefFromValues(project, values) {
+  const fields = Array.isArray(project.inputs) ? project.inputs : [];
+  const supplied = (values && typeof values === 'object') ? values : {};
+  const missing = fields.filter(f => f.required && !String(supplied[f.key] ?? '').trim()).map(f => f.label);
+  const brief = fields
+    .map(f => ({ label: f.label, value: String(supplied[f.key] ?? '').trim() }))
+    .filter(entry => entry.value)
+    .map(entry => `${entry.label}: ${entry.value}`)
+    .join('\n');
+  return { brief, missing };
+}
+
+// The transcript arrives from the browser rather than a table: a project thread
+// is a working session, not a record the board owes anyone, and keeping it out
+// of Postgres means no new migration and nothing to prune. It is still checked
+// like any other untrusted input - roles, shape, length, and a ceiling on how
+// much history one request may replay.
+function normalizeProjectTurns(raw) {
+  if (raw === undefined || raw === null) return { turns: [] };
+  if (!Array.isArray(raw)) return { error: 'Conversation history must be a list of turns.' };
+  if (raw.length > PROJECT_CHAT_MAX_TURNS) {
+    return { error: `This thread is too long to continue (${raw.length} turns, limit ${PROJECT_CHAT_MAX_TURNS}). Run the project again to start a fresh one.` };
+  }
+  const turns = [];
+  for (const entry of raw) {
+    const role = String(entry?.role || '').trim();
+    const content = String(entry?.content || '').trim();
+    if (role !== 'user' && role !== 'assistant') return { error: 'Every turn must be from the user or the assistant.' };
+    if (!content) return { error: 'A turn cannot be empty.' };
+    if (content.length > PROJECT_CHAT_MAX_CHARS) return { error: 'One of the turns is too long to send.' };
+    if (turns.length && turns[turns.length - 1].role === role) return { error: 'Turns have to alternate between the user and the assistant.' };
+    turns.push({ role, content });
+  }
+  if (turns.length) {
+    if (turns[0].role !== 'assistant') return { error: "A follow-up has to start from the project's first answer." };
+    if (turns[turns.length - 1].role !== 'user') return { error: 'The last turn has to be the question being asked.' };
+  }
+  return { turns };
+}
+
+async function loadRunnableProject(id) {
+  const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" WHERE "id" = ${id} LIMIT 1`;
+  const project = Array.isArray(rows) ? rows[0] : null;
+  if (!project) return { status: 404, error: 'project_not_found' };
+  if (!String(project.instructions || '').trim()) {
+    return {
+      status: 409,
+      error: 'project_not_ready',
+      message: `"${project.name}" has no instructions yet. Claude does not expose a project's instructions through any API, so an admin has to paste them in once before it can run here.`
+    };
+  }
+  return { project };
+}
+
+async function callProjectModel(project, messages) {
+  const client = new Anthropic({ apiKey: String(process.env.ANTHROPIC_API_KEY || '').trim(), maxRetries: 2 });
+  // Streamed and awaited whole: these answers are long, and a non-streaming
+  // request of that size is what trips an HTTP timeout.
+  const stream = client.messages.stream({
+    model: String(project.model || PROJECT_MODEL),
+    max_tokens: 32_000,
+    system: [{ type: 'text', text: String(project.instructions || '').trim(), cache_control: { type: 'ephemeral' } }],
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'high' },
+    messages: messages.map(m => ({ role: m.role, content: [{ type: 'text', text: m.content }] }))
+  });
+  return stream.finalMessage();
+}
+
+function projectRunResponse(message, project, started) {
+  // A policy decline arrives as a normal 200 with this stop reason, so it has
+  // to be checked before the content is read or the panel shows an empty box.
+  if (message.stop_reason === 'refusal') {
+    return {
+      status: 200,
+      body: {
+        ok: false, refused: true,
+        message: 'Claude declined to run this one. Rephrase the inputs, or check the project instructions.',
+        category: message.stop_details?.category || null
+      }
+    };
+  }
+  const text = (message.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      project: { id: project.id, name: project.name },
+      text,
+      usage: {
+        inputTokens: message.usage?.input_tokens ?? null,
+        outputTokens: message.usage?.output_tokens ?? null,
+        cacheRead: message.usage?.cache_read_input_tokens ?? null
+      },
+      ms: Date.now() - started
+    }
+  };
+}
+
+function projectRunError(error, res) {
+  const detail = String(error?.message || error);
+  console.error('Project run failed:', detail);
+  if (error instanceof Anthropic.AuthenticationError) return res.status(502).json({ error: 'auth_failed', message: "The server's Anthropic API key was rejected." });
+  if (error instanceof Anthropic.RateLimitError) return res.status(429).json({ error: 'rate_limited', message: 'Anthropic is rate limiting this key right now. Try again shortly.' });
+  if (error instanceof Anthropic.APIConnectionError) return res.status(504).json({ error: 'unreachable', message: 'Could not reach the Anthropic API.' });
+  return res.status(502).json({ error: 'project_run_failed', message: detail.slice(0, 300) });
+}
+
+// Shared by /run and /chat: the only difference between them is whether any
+// turns follow the form brief.
+async function handleProjectRun(req, res, { withHistory }) {
+  const started = Date.now();
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+    if (!String(process.env.ANTHROPIC_API_KEY || '').trim()) {
+      return res.status(503).json({ error: 'not_configured', message: 'ANTHROPIC_API_KEY is not set on this deployment, so the board cannot run a project.' });
+    }
+
+    const loaded = await loadRunnableProject(id);
+    if (!loaded.project) return res.status(loaded.status).json({ error: loaded.error, ...(loaded.message ? { message: loaded.message } : {}) });
+    const project = loaded.project;
+
+    const { brief, missing } = projectBriefFromValues(project, req.body?.values);
+    if (missing.length) return res.status(400).json({ error: 'missing_inputs', message: `Fill in: ${missing.join(', ')}.` });
+
+    const history = withHistory ? normalizeProjectTurns(req.body?.turns) : { turns: [] };
+    if (history.error) return res.status(400).json({ error: 'invalid_history', message: history.error });
+    if (withHistory && !history.turns.length) return res.status(400).json({ error: 'invalid_history', message: 'There is no question to answer yet.' });
+
+    const message = await callProjectModel(project, [
+      { role: 'user', content: brief || 'Run this project.' },
+      ...history.turns
+    ]);
+    const result = projectRunResponse(message, project, started);
+    return res.status(result.status).json(result.body);
+  } catch (error) {
+    return projectRunError(error, res);
+  }
+}
+
+app.post('/api/projects/:id/run', requireAuth, projectRunLimiter, async (req, res) => {
+  return handleProjectRun(req, res, { withHistory: false });
+});
+
+// Follow-ups on a project that has already been run. The project's instructions
+// stay the system prompt for every turn, so the thread keeps behaving like that
+// project rather than drifting into a general chat.
+app.post('/api/projects/:id/chat', requireAuth, projectRunLimiter, async (req, res) => {
+  return handleProjectRun(req, res, { withHistory: true });
+});
+
+app.get('/api/insights/languages', requireAuth, async (req, res) => {
+  try {
+    const rows = await prisma.ticketTranslation.findMany({
+      where: { sourceLang: { not: null } },
+      select: { ticketExternalId: true, sourceLang: true, sourceLangName: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+      take: 5000
+    });
+    const byTicket = {};
+    const counts = {};
+    for (const row of rows) {
+      if (byTicket[row.ticketExternalId]) continue; // newest wins
+      const code = String(row.sourceLang || '').toLowerCase();
+      if (!code) continue;
+      byTicket[row.ticketExternalId] = { lang: code, name: row.sourceLangName || code.toUpperCase() };
+      counts[code] = (counts[code] || 0) + 1;
+    }
+    return res.json({ ok: true, generatedAt: new Date().toISOString(), languages: byTicket, counts });
+  } catch (error) {
+    console.error('Language insight failed:', error);
+    return res.status(500).json({ error: 'language_insight_failed' });
+  }
+});
+
 app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
   const ticketId = Number(req.params.id);
 
@@ -4700,7 +6588,13 @@ async function mcpUpdateTicket(apiUser, id, fields) {
     const status = String(fields.status || '').trim();
     if (!MCP_WRITABLE_STATUSES.has(status)) throw Object.assign(new Error('invalid_status'), { status: 400 });
     data.status = status;
-    data.resolvedAt = status === 'Resolved' ? new Date() : null;
+    // Only the move INTO Resolved stamps the clock. Re-stamping it on every
+    // write that happens to say "Resolved" moved the resolution date forward,
+    // which pulled long-closed tickets back into the KPI range and reported
+    // their resolve time as minutes.
+    data.resolvedAt = status === 'Resolved'
+      ? (existingTicket.status === 'Resolved' ? (existingTicket.resolvedAt || new Date()) : new Date())
+      : null;
     if (status !== 'Resolved') data.resolvedTeamsNotifiedAt = null;
   }
   if (fields?.assignedAgent !== undefined) data.assignedAgent = fields.assignedAgent ? String(fields.assignedAgent).trim().toUpperCase() : null;
@@ -4732,6 +6626,333 @@ function mcpHttpErrorStatus(error) {
   return Number.isInteger(error?.status) ? error.status : 500;
 }
 
+
+
+// --- Assistant-facing tools ------------------------------------------------
+//
+// The four below are what turn the connector from a reader into something that
+// does triage work. Every one of them stops short of the irreversible step: a
+// proposed reply is a comment until a person sends it, a duplicate is a
+// suggestion until a person marks it. Nothing here emails a client.
+
+// The board renders a comment carrying this tag as a proposed reply with an
+// "Use this" button, rather than as an ordinary internal note.
+const PROPOSED_REPLY_TAG = 'PROPOSED-REPLY';
+
+async function mcpProposeReply(apiUser, id, rawText) {
+  const text = String(rawText || '').trim();
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  if (!text) throw Object.assign(new Error('text_required'), { status: 400 });
+  if (text.length > 8000) throw Object.assign(new Error('text_too_long'), { status: 400 });
+  const ticket = await prisma.ticket.findUnique({ where: { id }, select: { id: true, displayNumber: true, subject: true, senderEmail: true } });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+
+  const comment = await prisma.ticketComment.create({
+    data: { ticketId: id, userId: apiUser.id, comment: text, isInternal: true, tags: [PROPOSED_REPLY_TAG] }
+  });
+  await createTicketAuditEvent({
+    ticketId: id, userId: apiUser.id, eventType: 'reply_proposed',
+    newValue: text.slice(0, 200), metadata: { via: 'mcp' }
+  });
+  return {
+    ok: true,
+    ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+    commentId: comment.id,
+    // Said plainly because it is the whole point of the tool: this did not
+    // reach the client and will not until an agent sends it.
+    status: 'The draft is on the ticket as a proposed reply. Nothing was sent to the client - an agent has to open the ticket and send it.'
+  };
+}
+
+const TEMPLATE_PLACEHOLDER_RE = /\[([^\][\n]{1,60})\]/g;
+function templatePlaceholders(body) {
+  const found = [];
+  const seen = new Set();
+  for (const match of String(body || '').matchAll(TEMPLATE_PLACEHOLDER_RE)) {
+    const label = match[1].trim();
+    const key = label.toLowerCase();
+    if (!label || seen.has(key)) continue;
+    seen.add(key);
+    found.push(label);
+  }
+  return found;
+}
+// What the ticket can answer on the agent's behalf. Only fields the ticket
+// actually holds - a guessed value in a client-facing template is worse than
+// a blank one an agent has to fill.
+function prefillFromTicket(label, ticket) {
+  const key = String(label || '').toLowerCase();
+  if (/(client|contact|customer|sender)?\s*name/.test(key) && !/company/.test(key)) return ticket.senderName || null;
+  if (/company|organisation|organization|account/.test(key)) return ticket.companyName || null;
+  if (/e-?mail|address/.test(key)) return ticket.senderEmail || null;
+  if (/ticket|reference|ref\b|number/.test(key)) return ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null;
+  if (/agent|owner|assignee/.test(key)) return ticket.assignedAgent || null;
+  if (/subject|title/.test(key)) return ticket.subject || null;
+  if (/categor/.test(key)) return ticket.category || null;
+  return null;
+}
+
+async function mcpSuggestTemplate(id, limit) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  const ticket = await prisma.ticket.findUnique({ where: { id }, select: INSIGHT_TICKET_SELECT });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+
+  const templates = await prisma.template.findMany({ select: { id: true, name: true, body: true } });
+  if (!templates.length) return { ok: true, matches: [], note: 'No templates exist on this board yet.' };
+
+  const ticketTokens = similarityTokens(`${ticket.subject || ''} ${ticket.category || ''}`);
+  const take = Math.min(5, Math.max(1, Number(limit) || 3));
+  const scored = templates
+    .map(template => ({
+      template,
+      score: jaccard(ticketTokens, similarityTokens(`${template.name} ${template.body}`))
+    }))
+    // A template sharing no words at all with the ticket is not a match, and
+    // returning it as the top one - which is what happens when it is the only
+    // template on the board - invites the assistant to send an answer to a
+    // different question.
+    .filter(row => row.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (!scored.length) {
+    return {
+      ok: true,
+      ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+      matches: [],
+      note: `None of the ${templates.length} template${templates.length === 1 ? '' : 's'} on this board share any wording with this ticket. Write the reply from scratch rather than bending one of them to fit.`
+    };
+  }
+
+  const matches = scored
+    .slice(0, take)
+    .map(({ template, score }) => {
+      const placeholders = templatePlaceholders(template.body).map(label => ({
+        label,
+        suggested: prefillFromTicket(label, ticket)
+      }));
+      return {
+        templateId: template.id,
+        name: template.name,
+        score: Math.round(score * 1000) / 1000,
+        body: template.body,
+        placeholders,
+        // The ones a person still has to answer. Reported separately so the
+        // assistant asks about exactly these rather than re-reading the body.
+        unfilled: placeholders.filter(p => !p.suggested).map(p => p.label)
+      };
+    });
+
+  return {
+    ok: true,
+    ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+    matches
+  };
+}
+
+async function mcpFindDuplicates(id, limit) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  const source = await prisma.ticket.findUnique({ where: { id }, select: INSIGHT_TICKET_SELECT });
+  if (!source) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+  const take = Math.min(10, Math.max(1, Number(limit) || 5));
+
+  const or = [];
+  if (source.senderEmail) or.push({ senderEmail: source.senderEmail });
+  if (source.companyName) or.push({ companyName: source.companyName });
+  if (!or.length) return { ok: true, candidates: [] };
+
+  // A duplicate arrives near the original. Beyond a month apart the same
+  // client asking the same question again is a new ticket, not a duplicate.
+  const created = new Date(source.createdAt).getTime();
+  const candidates = await prisma.ticket.findMany({
+    where: {
+      AND: [
+        { OR: or },
+        { NOT: { id: source.id } },
+        { duplicateOfExternalId: null },
+        { createdAt: { gte: new Date(created - 30 * 86400000), lte: new Date(created + 30 * 86400000) } }
+      ]
+    },
+    select: INSIGHT_TICKET_SELECT,
+    take: 200
+  });
+
+  const sourceTokens = similarityTokens(source.subject);
+  const scored = candidates
+    .map(candidate => {
+      const overlap = jaccard(sourceTokens, similarityTokens(candidate.subject));
+      const sameSender = !!(source.senderEmail && candidate.senderEmail === source.senderEmail);
+      const hoursApart = Math.abs(new Date(candidate.createdAt).getTime() - created) / 3600000;
+      const confidence = overlap * 0.6 + (sameSender ? 0.3 : 0) + (hoursApart <= 48 ? 0.1 : 0);
+      return { candidate, overlap, sameSender, hoursApart, confidence };
+    })
+    .filter(row => row.overlap >= 0.35 && row.sameSender)
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, take);
+
+  return {
+    ok: true,
+    ticketNumber: source.displayNumber ? `#${String(source.displayNumber).padStart(4, '0')}` : null,
+    candidates: scored.map(({ candidate, overlap, sameSender, hoursApart, confidence }) => ({
+      ticketNumber: candidate.displayNumber ? `#${String(candidate.displayNumber).padStart(4, '0')}` : null,
+      internalId: candidate.id,
+      subject: candidate.subject || '(no subject)',
+      sender: candidate.senderEmail,
+      company: candidate.companyName,
+      createdAt: candidate.createdAt,
+      hoursApart: Math.round(hoursApart * 10) / 10,
+      subjectOverlap: Math.round(overlap * 100) / 100,
+      sameSender,
+      confidence: Math.round(confidence * 100) / 100
+    })),
+    note: 'These are suggestions only. Marking a ticket as a duplicate is done by an agent on the board - report the ticket numbers and let them confirm.'
+  };
+}
+
+/* Registering a project from inside Claude.
+
+   Compliance API sync can pull Enterprise/eligible-org projects when a user has
+   connected a key with the right scope. The connector still matters for
+   everyone else, and for quick updates from inside the project itself: Claude
+   calls into this board and pushes the instructions it already has in context.
+
+   The workflow that makes this useful: open a project in Claude and say
+   "register yourself with the support board". Claude reads its own instructions
+   and calls this, and the project appears in QT-Tools with a working form. It
+   is the one direction the connection actually supports, and it removes the
+   copy-and-paste that the registry would otherwise need. */
+async function mcpRegisterProject(apiUser, args) {
+  if (!isAdminRole(apiUser?.role)) {
+    throw Object.assign(new Error('admin_required: only an admin token may add or change a project on the board'), { status: 403 });
+  }
+  const name = String(args?.name || '').trim();
+  if (!name) throw Object.assign(new Error('name_required'), { status: 400 });
+
+  await ensureProjectTable();
+  const slug = (String(args?.slug || name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+  const scope = PROJECT_SCOPES.has(String(args?.scope)) ? String(args.scope) : 'org';
+  const inputs = normalizeProjectInputs(args?.inputs);
+  const instructions = String(args?.instructions || '');
+
+  await prisma.$executeRaw`
+    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","createdBy","updatedAt")
+    VALUES (${slug}, ${name}, ${String(args?.description || '').slice(0, 600)}, ${scope}, ${String(args?.owner || '').slice(0, 80)},
+            ${instructions}, ${JSON.stringify(inputs)}::jsonb, ${String(args?.accent || 'slate')}, ${'mcp:' + (apiUser?.username || '')}, CURRENT_TIMESTAMP)
+    ON CONFLICT ("slug") DO UPDATE SET
+      "name" = EXCLUDED."name", "description" = EXCLUDED."description", "scope" = EXCLUDED."scope",
+      "owner" = EXCLUDED."owner", "inputs" = EXCLUDED."inputs", "accent" = EXCLUDED."accent",
+      -- An empty instructions field means "leave what is there", so a partial
+      -- re-register cannot wipe a project that was already set up properly.
+      "instructions" = CASE WHEN ${instructions} = '' THEN "ClaudeProject"."instructions" ELSE ${instructions} END,
+      "updatedAt" = CURRENT_TIMESTAMP
+  `;
+
+  const rows = await prisma.$queryRaw`SELECT "id","slug","name","instructions","inputs" FROM "ClaudeProject" WHERE "slug" = ${slug} LIMIT 1`;
+  const saved = Array.isArray(rows) ? rows[0] : null;
+  return {
+    ok: true,
+    slug,
+    name,
+    inputs: (saved?.inputs || []).map(f => f.key),
+    ready: !!String(saved?.instructions || '').trim(),
+    status: String(saved?.instructions || '').trim()
+      ? `"${name}" is on the board with ${(saved?.inputs || []).length} input field(s) and can be run from QT-Tools -> Projects.`
+      : `"${name}" is on the board but has no instructions, so it cannot be run yet. Call this again with the project's instructions to finish it.`
+  };
+}
+
+async function mcpListBoardProjects() {
+  await ensureProjectTable();
+  const rows = await prisma.$queryRaw`SELECT "slug","name","description","scope","owner","inputs","instructions" FROM "ClaudeProject" ORDER BY "name"`;
+  return (Array.isArray(rows) ? rows : []).map(r => ({
+    slug: r.slug,
+    name: r.name,
+    description: r.description || '',
+    scope: r.scope,
+    owner: r.owner || '',
+    inputs: (r.inputs || []).map(f => ({ key: f.key, label: f.label, type: f.type, required: !!f.required })),
+    ready: !!String(r.instructions || '').trim()
+  }));
+}
+
+async function mcpShiftHandover(hours) {
+  const windowHours = Math.min(168, Math.max(1, Number(hours) || 12));
+  const since = new Date(Date.now() - windowHours * 3600000);
+  const now = Date.now();
+
+  const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+    where: { createdAt: { gte: since }, eventType: { in: ['ticket_status_changed', 'ticket_assignedAgent_changed', 'ticket_created', 'comment_added', 'reply_proposed'] } },
+    select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+    orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+  }));
+
+  const movedIds = new Set(events.map(e => e.ticketId));
+  const openTickets = await prisma.ticket.findMany({
+    where: { AND: [{ NOT: { status: 'Resolved' } }, { duplicateOfExternalId: null }, { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }] }] },
+    select: INSIGHT_TICKET_SELECT
+  });
+
+  const describe = ticket => ({
+    ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+    subject: ticket.subject || '(no subject)',
+    company: ticket.companyName || 'Unknown',
+    agent: ticket.assignedAgent || 'Unassigned',
+    priority: ticket.priority || 'Normal',
+    status: ticket.status,
+    ageHours: Math.round(((now - new Date(ticket.createdAt).getTime()) / 3600000) * 10) / 10
+  });
+
+  const statusMoves = events.filter(e => e.eventType === 'ticket_status_changed');
+  const openById = new Map(openTickets.map(t => [t.id, t]));
+
+  const moved = [...new Set(statusMoves.map(e => e.ticketId))]
+    .map(ticketId => {
+      const ticket = openById.get(ticketId);
+      const list = statusMoves.filter(e => e.ticketId === ticketId);
+      return {
+        ticketId,
+        ticketNumber: ticket ? describe(ticket).ticketNumber : null,
+        subject: ticket?.subject || null,
+        from: list[0].oldValue,
+        to: list[list.length - 1].newValue,
+        hops: list.length
+      };
+    })
+    .filter(row => row.ticketNumber);
+
+  // Nothing has happened to these in the window, and they are not resolved.
+  // The point of a handover is that the next shift knows these exist.
+  const stuck = openTickets
+    .filter(ticket => !movedIds.has(ticket.id))
+    .map(describe)
+    .sort((a, b) => b.ageHours - a.ageHours)
+    .slice(0, 15);
+
+  const urgent = openTickets
+    .filter(ticket => ['Urgent', 'High'].includes(String(ticket.priority || '')))
+    .map(describe)
+    .sort((a, b) => b.ageHours - a.ageHours)
+    .slice(0, 15);
+
+  const unassigned = openTickets.filter(t => !t.assignedAgent).map(describe).slice(0, 15);
+
+  return {
+    ok: true,
+    window: { hours: windowHours, since: since.toISOString() },
+    summary: {
+      openTickets: openTickets.length,
+      touchedInWindow: movedIds.size,
+      statusMoves: statusMoves.length,
+      createdInWindow: events.filter(e => e.eventType === 'ticket_created').length,
+      resolvedInWindow: statusMoves.filter(e => e.newValue === 'Resolved').length,
+      stuck: openTickets.filter(t => !movedIds.has(t.id)).length,
+      unassigned: openTickets.filter(t => !t.assignedAgent).length
+    },
+    moved: moved.slice(0, 25),
+    stuck,
+    urgent,
+    unassigned
+  };
+}
 app.get('/api/mcp/tickets', requireApiToken, mcpApiLimiter, async (req, res) => {
   const tickets = await mcpListTickets(req.query);
   res.json({ tickets });
@@ -5037,11 +7258,109 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
         status: z.enum(TICKET_STATUS_ENUM).optional(),
         assignedAgent: z.string().optional().describe('Agent trigram to assign, or empty string to unassign'),
         csAgent: z.string().optional().describe('CS owner trigram, or empty string to clear'),
-        priority: z.enum(['Low', 'Normal', 'High', 'Urgent']).optional()
+        priority: z.enum(['Low', 'Normal', 'Medium', 'High', 'Urgent']).optional().describe('The board writes Medium/High/Low in practice; Normal and Urgent are accepted for compatibility.')
       }
     },
     async ({ ticketId, ...fields }) => {
       try { return mcpTextResult(await mcpUpdateTicket(apiUser, ticketId, fields)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'propose_reply',
+    {
+      title: 'Propose a reply to the client',
+      description: 'Write a suggested reply and attach it to the ticket for an agent to review. This does NOT email anyone - the draft lands on the ticket as a proposed reply, and an agent chooses whether to send it. Use this instead of claiming a reply was sent.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.'),
+        text: z.string().min(1).max(8000).describe('The proposed reply, as plain text. Write it as the agent would send it to the client.')
+      }
+    },
+    async ({ ticketId, text }) => {
+      try { return mcpTextResult(await mcpProposeReply(apiUser, ticketId, text)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'suggest_template',
+    {
+      title: 'Find a message template for a ticket',
+      description: 'Match a ticket against the team\'s shared message templates and return the best fits, with each [bracketed] placeholder pre-filled from the ticket where the ticket can answer it. Placeholders listed under "unfilled" are the ones a person still has to supply.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket.'),
+        limit: z.number().int().min(1).max(5).optional()
+      }
+    },
+    async ({ ticketId, limit }) => {
+      try { return mcpTextResult(await mcpSuggestTemplate(ticketId, limit)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'find_duplicates',
+    {
+      title: 'Find likely duplicates of a ticket',
+      description: 'Look for other tickets from the same sender, near the same date, with a similar subject. Returns candidates with a confidence score. It does not mark anything - report the ticket numbers and let an agent confirm on the board.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket.'),
+        limit: z.number().int().min(1).max(10).optional()
+      }
+    },
+    async ({ ticketId, limit }) => {
+      try { return mcpTextResult(await mcpFindDuplicates(ticketId, limit)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'register_project',
+    {
+      title: 'Put this project on the support board',
+      description: "Register the Claude project you are running inside with the support board, so the team can run it from QT-Tools without opening Claude. Use this when someone asks to add, register or update a project on the board. If Compliance API sync is unavailable, this is the direct route: read your OWN project instructions out of your context and pass them as instructions, and describe the information the project asks the user for as inputs - the board turns that list into a form. Calling it again with the same name updates the entry; leaving instructions empty keeps whatever is already saved.",
+      inputSchema: {
+        name: z.string().min(1).describe('The project name, as it appears in Claude.'),
+        description: z.string().optional().describe('One line on what the project does.'),
+        instructions: z.string().optional().describe("The project's own instructions, verbatim. This is what the board sends as the system prompt when it runs the project."),
+        owner: z.string().optional().describe('Who owns it - a person or a team.'),
+        scope: z.enum(['mine', 'org', 'shared']).optional().describe('Which tab it belongs under. Defaults to org.'),
+        inputs: z.array(z.object({
+          key: z.string().describe('Short identifier, e.g. websiteUrl.'),
+          label: z.string().describe('What the field is called on screen.'),
+          type: z.enum(['text', 'textarea', 'number', 'url', 'select']).optional(),
+          required: z.boolean().optional(),
+          placeholder: z.string().optional(),
+          help: z.string().optional(),
+          options: z.array(z.string()).optional().describe('For type select only.')
+        })).optional().describe('The information this project asks for. Each entry becomes a field on the board form.')
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpRegisterProject(apiUser, args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'list_board_projects',
+    {
+      title: 'List the projects registered on the board',
+      description: 'What is already on the support board, and whether each one has instructions saved. Use it before registering, to update an entry rather than duplicate it.',
+      inputSchema: {}
+    },
+    async () => {
+      try { return mcpTextResult(await mcpListBoardProjects()); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'shift_handover',
+    {
+      title: 'Summarise the shift for handover',
+      description: 'What moved, what is stuck, and what the next shift must not drop. Reads the ticket event log over the last N hours. Use it to write a handover note at the end of a shift.',
+      inputSchema: {
+        hours: z.number().int().min(1).max(168).optional().describe('How far back to look. Defaults to 12.')
+      }
+    },
+    async ({ hours }) => {
+      try { return mcpTextResult(await mcpShiftHandover(hours)); } catch (error) { return mcpErrorResult(error); }
     }
   );
 
@@ -5103,7 +7422,12 @@ const LIVE_SYNC_FIELDS = [
   'ticketPriority', 'ticketCategory', 'ticketSubtype', 'ticketJira',
   'ticketHubspotId', 'ticketArchived', 'ticketResolutionMeta',
   'ticketHasNewReply', 'ticketNumbers', 'ticketComments', 'ticketCreatedBy',
-  'ticketDuplicateOf'
+  // A snooze hides the ticket for everyone, so every open board has to hear
+  // about it immediately - otherwise one agent parks a ticket and another is
+  // still looking at it.
+  // A reply restarts the SLA clock, and every open board has to agree about
+  // when - otherwise one tab shows a badge as breached and another does not.
+  'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt'
 ];
 
 function sseFrame(rev, type, data) {
@@ -6842,8 +9166,12 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
     if (!tool) return res.status(400).json({ isError: true, error: 'missing_tool' });
 
     if (tool.includes('outlook_email_search')) {
+      // Authorization before any work: checking after the token fetch meant an
+      // unauthorized mailbox still triggered a Graph round trip, and any error
+      // there answered the request before the check was ever reached.
+      const mailbox = resolveReadableMailbox(args?.mailboxOwnerEmail);
+      if (!mailbox) return res.status(403).json({ isError: true, error: 'mailbox_not_allowed' });
       const token = await graphDelegatedToken(req);
-      const mailbox = args?.mailboxOwnerEmail || SUPPORT_MAILBOX;
       const top = Math.min(Math.max(Number(args?.limit || 20), 1), 200);
       const select = '$select=id,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,webLink,conversationId,internetMessageId';
       const orderBy = '$orderby=receivedDateTime desc';
@@ -6857,7 +9185,10 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       const idMatch = rawUri.match(/mail:\/\/\/messages\/([^?]+)/);
       const msgId = idMatch?.[1];
       const ownerMatch = rawUri.match(/[?&]owner=([^&]+)/);
-      const mailbox = ownerMatch?.[1] ? decodeURIComponent(ownerMatch[1]) : SUPPORT_MAILBOX;
+      // Same hole as the search branch above, reached through the URI instead
+      // of the body.
+      const mailbox = resolveReadableMailbox(ownerMatch?.[1] ? decodeURIComponent(ownerMatch[1]) : SUPPORT_MAILBOX);
+      if (!mailbox) return res.status(403).json({ isError: true, error: 'mailbox_not_allowed' });
       if (!msgId) return res.status(400).json({ isError: true, error: 'missing_message_id' });
       const msg = await graphGetResilient(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=body,bodyPreview,hasAttachments`, req);
       // hasAttachments is false when a message carries ONLY inline images.
@@ -7036,6 +9367,48 @@ function qtDetectInHtml(html) {
   return { detected: false, confidence: 'high', marker: null, via: null, src: null };
 }
 
+const dnsPromises = require('dns').promises;
+
+// Every address a hostname resolves to has to be public - a name with one
+// public A record and one pointing at 127.0.0.1 is a rebinding attempt, and
+// taking the first answer would let it through half the time.
+async function qtResolvesToPublicHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return false;
+  if (qtIsBlockedHost(host)) return false;
+  // A literal IP is already what it resolves to.
+  if (/^[0-9.]+$/.test(host) || host.includes(':')) return !qtIsBlockedHost(host);
+  try {
+    const records = await dnsPromises.lookup(host, { all: true });
+    if (!records.length) return false;
+    return records.every(record => !qtIsBlockedHost(record.address));
+  } catch (_) {
+    // Unresolvable is not reachable either; let the fetch report it.
+    return true;
+  }
+}
+
+const QT_MAX_REDIRECTS = 5;
+
+// fetch() with the redirects taken one at a time, checking the destination
+// before each hop instead of trusting the first URL and looking away.
+async function qtFetchGuarded(startUrl, init) {
+  let current = startUrl;
+  for (let hop = 0; hop <= QT_MAX_REDIRECTS; hop++) {
+    const parsed = new URL(current);
+    if (!/^https?:$/.test(parsed.protocol)) throw Object.assign(new Error('blocked_scheme'), { qtBlocked: true });
+    if (!(await qtResolvesToPublicHost(parsed.hostname))) throw Object.assign(new Error('blocked_host'), { qtBlocked: true });
+
+    const res = await fetch(current, { ...init, redirect: 'manual' });
+    if (![301, 302, 303, 307, 308].includes(res.status)) return { res, finalUrl: current };
+
+    const location = res.headers.get('location');
+    if (!location) return { res, finalUrl: current };
+    current = new URL(location, current).toString();
+  }
+  throw Object.assign(new Error('too_many_redirects'), { qtBlocked: true });
+}
+
 async function qtCheckUrl(rawUrl) {
   const url = qtNormalizeUrl(rawUrl);
   const started = Date.now();
@@ -7044,8 +9417,7 @@ async function qtCheckUrl(rawUrl) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), QT_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
-      redirect: 'follow',
+    const { res, finalUrl: reachedUrl } = await qtFetchGuarded(url, {
       signal: controller.signal,
       headers: {
         // Some sites serve a stripped page to non-browser agents.
@@ -7058,7 +9430,7 @@ async function qtCheckUrl(rawUrl) {
     return {
       input: rawUrl,
       url,
-      finalUrl: res.url || url,
+      finalUrl: reachedUrl || res.url || url,
       httpStatus: res.status,
       status: res.ok ? 'ok' : 'http_error',
       detected: hit.detected,
@@ -7071,6 +9443,18 @@ async function qtCheckUrl(rawUrl) {
     };
   } catch (error) {
     const aborted = error?.name === 'AbortError';
+    // A blocked destination is reported as its own status rather than as a
+    // network failure, so "this URL redirects somewhere internal" does not read
+    // as "that site is down".
+    if (error?.qtBlocked) {
+      return {
+        input: rawUrl, url, status: 'blocked', detected: false, confidence: 'low',
+        error: error.message === 'blocked_host'
+          ? 'That address resolves to a private or internal host, so it was not fetched.'
+          : error.message === 'too_many_redirects' ? 'Too many redirects.' : 'Blocked URL scheme.',
+        ms: Date.now() - started
+      };
+    }
     return {
       input: rawUrl, url, status: aborted ? 'timeout' : 'fetch_error',
       detected: false, confidence: 'low',

@@ -448,6 +448,27 @@ If a leg fails: a 403 on the email means the consent above is missing or the
 chosen mailbox is refused; a webhook error means the URL is wrong, the flow is
 off, or the flow rejected the body.
 
+## Where feedback goes
+
+### The feedback bubble
+
+Feedback is a bubble in the bottom-right corner, not a header button and not a
+modal. That is deliberate: a modal takes the screen, so the thing being
+reported on disappears behind it at exactly the moment it is needed. The bubble
+sits over the board and the ticket stays visible.
+
+It is a chat only in shape - there is no thread and nothing replies for real.
+What comes back is the board saying which delivery leg actually worked:
+*posted to Teams*, *emailed*, both, or that neither did. A failure is never
+dressed up as a thank-you.
+
+**Teams needs `FEEDBACK_WEBHOOK_URL` set** - it is currently empty, so nothing
+reaches Teams. The payload the board posts carries three shapes in one body: a
+MessageCard (old Office 365 connector), an Adaptive Card in `attachments`
+(Teams Workflows, the supported route now), and the raw fields (anyone reading
+it with their own Power Automate flow). So the same URL works whichever kind of
+webhook it points at, with no change here.
+
 ## Where feedback from the Feedback button goes
 
 Three things happen to one report, independently, so that no single failure
@@ -539,6 +560,165 @@ npm run check:m365
   backoff, and the pictures are fetched separately so a throttled attachment
   call no longer discards the whole message.
 
+## Projects
+
+QT-Tools → **Projects** is the team's Claude projects, runnable from the board:
+tabs for Your projects / Organization / Shared with you, a search box, and a
+card per project that expands into **a form built from that project's own
+inputs** — Q-SEO Implementation asks for a URL, account ID, license key and a
+server-language dropdown; Q-Share Mapping asks for a URL and a teamId.
+
+Pressing Run sends the project's instructions as the system prompt and the form
+values as the message, and shows the answer in place with timing and token
+usage. The answer opens a thread: **Ask a follow-up** keeps going against the
+same project without going back to the form.
+
+### Why the catalogue lives here and not in Claude
+
+**There is no API for claude.ai Projects.** The Admin API covers members,
+invites, workspaces, API keys, rate limits, service accounts, WIF and CMEK; for
+a claude.ai organisation it is narrower still — members, invites, groups, custom
+roles, spend limits. A project's name, description and instructions are not
+retrievable through any of them, so the board cannot sync that grid and keeps
+its own registry in `ClaudeProject`, created on first use with
+`CREATE TABLE IF NOT EXISTS` (no migration step).
+
+The table is seeded once, on an empty table, with the projects already in use
+and the inputs each one names. **Instructions are deliberately left empty**:
+only the people who wrote each project can supply those, and a guessed system
+prompt would be worse than an honest gap. Until one is filled in the card reads
+*Needs setup* and Run is disabled.
+
+### What has to be configured
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | unset | Required. Without it the panel lists projects but nothing can be run, and says so. |
+| `PROJECT_MODEL` | `claude-opus-5` | Model used for a run, unless a project overrides it. |
+| `CLAUDE_CREDENTIAL_SECRET` | falls back to `SESSION_SECRET` | Wraps each agent's Compliance Access Key before it is stored. See below. |
+
+`ANTHROPIC_API_KEY` is read from the environment on every run and is never sent
+to the browser — the panel is told only whether one is set.
+
+### The Compliance Access Key is encrypted at rest
+
+The key an agent pastes into **Connect Claude** is the one Anthropic credential
+that cannot live in the environment: each agent supplies their own, so it has to
+be persisted. It is wrapped with AES-256-GCM before it goes into
+`OAuthToken.accessToken`, so a database dump — a backup, a restored snapshot, a
+support export — does not hand over a key that can read the organisation's
+Claude projects.
+
+The wrapping key is derived from `CLAUDE_CREDENTIAL_SECRET`, or from
+`SESSION_SECRET` when that is unset, so an existing deployment needs no new
+configuration. Two consequences worth knowing:
+
+- **Rotating either secret makes stored keys unreadable.** The connection then
+  reports itself as disconnected and the agent pastes theirs again. That is the
+  correct outcome for a rotated secret, not a failure.
+- **A key stored before this shipped is still plaintext and is still read.**
+  Upgrading disconnects nobody; the next connect or sync rewrites it wrapped.
+
+Only the Claude provider goes through this. HubSpot and M365 tokens are stored
+exactly as they were.
+
+Then, per project: **Edit → paste the instructions → Save**. Admins only.
+
+Inputs are defined as JSON on the same editor, and that is what generates the
+form:
+
+    [{"key":"websiteUrl","label":"Website URL","type":"url","required":true},
+     {"key":"serverLanguage","label":"Server language","type":"select",
+      "required":true,"options":["Node.js","Python","PHP"]}]
+
+Types: `text`, `textarea`, `number`, `url`, `select`.
+
+### Runs
+
+Streamed server-side and awaited whole — these produce long answers, and a
+non-streaming request of that size is what trips an HTTP timeout. The response
+comes back complete rather than token by token; forwarding the stream to the
+browser would be nicer and is a clean follow-up.
+
+Runs cost money and are started by a button, so they have their own rate limit
+(10 per minute per board) rather than sharing the general API limiter. A policy
+refusal arrives as a normal 200 with `stop_reason: "refusal"` and is reported as
+a refusal, not as empty output.
+
+### Follow-ups
+
+`POST /api/projects/:id/chat` continues a thread that Run started. It is the
+same request as a run with a different message list — the project's instructions
+stay the cached system prompt on every turn, so turn nine still answers as that
+project rather than drifting into a general chat.
+
+The transcript is held in the browser and replayed on each request rather than
+stored: a project thread is a working session, not a record the board owes
+anyone, which means no new table and nothing to prune. It is still checked like
+any other untrusted input — roles must be `user` or `assistant`, they must
+alternate, the first must be the project's own answer and the last the question
+being asked, at most 40 turns of 20,000 characters each. Past that the panel
+says to run the project again rather than silently truncating the history.
+
+Follow-ups share the run limiter, because they cost the same money.
+
+## The SLA clock
+
+An SLA counts **08:00-12:00 and 14:00-17:00 on weekdays** - seven hours a day,
+not twenty-four and not the nine between the first and last. The lunch gap
+matters: counting through it made a ticket that arrived at 11:50 look an hour
+older by 14:00 than the work anyone could have done on it.
+
+On top of the business hours, the clock only runs while the ticket's **assigned
+agent is logged in and not on a break**. An unassigned ticket says so rather
+than showing a countdown nobody is working against.
+
+The same rule is implemented twice on purpose - `businessMsInRange` in
+`server.js` for the KPI dashboard, and its twin in `index.html` for the badges -
+so both sides of the app agree. Change one and change the other.
+
+### Breaks
+
+| | | |
+| --- | --- | --- |
+| `SHIFT_BREAK_MS` | 15 minutes | How long a break lasts. |
+| `SHIFT_BREAK_COOLDOWN_MS` | 2 hours | How long until the next one. |
+
+A break **ends by itself** after fifteen minutes. That is enforced on read
+rather than by a timer: a break that was started and never ended is treated as
+having ended fifteen minutes after it began, so an agent who closes the laptop
+mid-break does not get an open-ended pause on their SLA clock. Coming back early
+is always allowed and simply shortens it.
+
+The cooldown is measured from the **start** of the last break, not its end -
+from the end, someone could take fifteen minutes, come back, and be eligible
+again two hours later having actually paused twice in that window. While it is
+running the button is greyed and counts down; the server refuses a second break
+with `429 break_cooldown` regardless of what the button says.
+
+### A reply restarts the clock
+
+Every new message in a ticket's thread resets its SLA. The commitment is a
+response time, not a lifetime: a conversation that has been going back and forth
+for a week should be measured from its last reply, not from the day it arrived.
+
+The board records that moment per ticket, and it is mirrored into
+`Ticket.slaResetAt` so the KPI dashboard measures the same thing the badges do -
+otherwise the same ticket reads breached in one place and on track in the other.
+Null means never replied to, and the clock runs from `createdAt`.
+
+**This needs `prisma migrate deploy`** - unlike the other recent tables, a
+Prisma-selected column cannot be added with runtime DDL. Prisma validates a
+`select` against its own generated schema, so the column has to be in
+`schema.prisma` and the client regenerated (`prisma generate`), both of which
+are in the repo. Deploying the code without running the migration leaves the KPI
+dashboard returning 500.
+
+A ticket sitting in **Waiting on Contact** that gets a genuine client reply
+moves itself to **Waiting on Us** and starts counting again - that stage move
+already existed; what is new is that the clock restarts with it.
+
 ## Important security note
+
 
 The uploaded ZIP contained a `.env` file. Rotate the Neon password and any Microsoft/HubSpot secrets before production deployment.

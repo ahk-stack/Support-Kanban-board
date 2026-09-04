@@ -127,6 +127,12 @@ model Ticket {
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
   resolvedAt              DateTime?
+  // When this ticket's SLA clock was last restarted. Every new message in the
+  // thread resets it: the commitment is a response time, not a lifetime, so a
+  // conversation that has been going for a week is measured from its last
+  // reply rather than from the day it arrived. Null means never replied to,
+  // and the clock runs from createdAt.
+  slaResetAt              DateTime?
   resolvedTeamsNotifiedAt DateTime?
   // The short "#0042"-style number agents actually use to refer to a
   // ticket - durable (Postgres-assigned via its own sequence, backfilled
