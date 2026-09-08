@@ -2786,6 +2786,95 @@ header {
   white-space: nowrap;
 }
 
+/* ===== Attachments on a manual ticket ====================================
+   A drop zone that is also a paste target. The paste half is the one that
+   matters: the thing an agent has when they open this modal is usually a
+   screenshot already on the clipboard, and making them save it to Downloads
+   first and then go and find it is the whole friction this removes.
+   ========================================================================= */
+.at-zone {
+  position:relative; border:1.5px dashed var(--border-strong,#cbd5e1); border-radius:12px;
+  background:var(--surface-soft,#f8fafc); padding:16px 14px; text-align:center;
+  cursor:pointer; transition:border-color .15s ease, background .15s ease;
+}
+.at-zone:hover { border-color:var(--primary,#4f46e5); background:var(--primary-soft,#eef2ff); }
+.at-zone:focus-visible { outline:2px solid var(--primary,#4f46e5); outline-offset:2px; }
+.at-zone.dragging { border-color:var(--primary,#4f46e5); background:var(--primary-soft,#eef2ff); border-style:solid; }
+.at-zone-icon { font-size:19px; line-height:1; }
+.at-zone-main { display:block; margin-top:6px; font-size:12px; font-weight:600; color:var(--text,#0f172a); }
+.at-zone-sub { display:block; margin-top:3px; font-size:10.5px; color:var(--muted,#64748b); line-height:1.5; }
+.at-kbd {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:9.5px;
+  background:var(--surface,#fff); border:1px solid var(--border-strong,#cbd5e1);
+  border-bottom-width:2px; border-radius:4px; padding:1px 4px; color:var(--text-soft,#334155);
+}
+
+.at-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(112px,1fr)); gap:9px; margin-top:11px; }
+.at-item {
+  position:relative; border:1px solid var(--border,#e2e8f0); border-radius:10px;
+  background:var(--surface,#fff); overflow:hidden;
+}
+.at-thumb {
+  display:block; width:100%; height:76px; object-fit:cover; background:var(--surface-muted,#f1f5f9);
+  border:0; padding:0; cursor:zoom-in;
+}
+.at-thumb-file {
+  display:flex; align-items:center; justify-content:center; width:100%; height:76px;
+  background:var(--surface-muted,#f1f5f9); font-size:9.5px; font-weight:800;
+  letter-spacing:.06em; color:var(--muted,#64748b); border:0; cursor:default;
+}
+.at-meta { padding:5px 7px 6px; }
+.at-name { font-size:10.5px; font-weight:600; color:var(--text,#0f172a); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.at-size { font-size:9.5px; color:var(--muted,#64748b); font-variant-numeric:tabular-nums; }
+.at-shrunk { color:var(--success,#16a34a); }
+.at-x {
+  position:absolute; top:5px; right:5px; width:20px; height:20px; border-radius:50%;
+  border:0; cursor:pointer; font-size:12px; line-height:1;
+  background:rgba(15,23,42,.62); color:#fff; display:flex; align-items:center; justify-content:center;
+}
+.at-x:hover { background:rgba(190,18,60,.92); }
+.at-note { margin-top:8px; font-size:10.5px; line-height:1.5; }
+.at-note-bad { color:var(--red-700,#b91c1c); }
+.at-note-busy { color:var(--muted,#64748b); }
+
+/* On the ticket itself, once it exists. */
+.at-strip { margin:14px 0 4px; }
+.at-strip-head {
+  display:flex; align-items:center; gap:8px; margin-bottom:8px;
+  font-size:10.5px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; color:var(--muted,#64748b);
+}
+.at-strip-head span { flex:1; }
+.at-dl { font-size:10px; color:var(--primary,#4f46e5); text-decoration:none; font-weight:600; }
+.at-dl:hover { text-decoration:underline; }
+
+/* Full-size viewer. Its own layer, above the modals, because an attachment is
+   opened from inside one. */
+.at-lightbox {
+  position:fixed; inset:0; z-index:12000; display:none;
+  background:rgba(8,12,22,.9); align-items:center; justify-content:center; padding:34px 20px;
+}
+.at-lightbox.open { display:flex; }
+.at-lb-img { max-width:100%; max-height:100%; object-fit:contain; border-radius:8px; box-shadow:0 18px 50px rgba(0,0,0,.5); }
+.at-lb-bar {
+  position:absolute; top:0; left:0; right:0; display:flex; align-items:center; gap:12px;
+  padding:9px 14px; background:rgba(8,12,22,.72); color:#e8eefc; font-size:11.5px;
+}
+.at-lb-bar strong { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.at-lb-bar .at-lb-spacer { flex:1; }
+.at-lb-btn {
+  background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.22); color:#e8eefc;
+  border-radius:7px; padding:3px 10px; font-size:11px; cursor:pointer; text-decoration:none;
+}
+.at-lb-btn:hover { background:rgba(255,255,255,.22); }
+.at-lb-nav {
+  position:absolute; top:50%; transform:translateY(-50%); width:38px; height:56px;
+  background:rgba(8,12,22,.55); border:1px solid rgba(255,255,255,.16); color:#e8eefc;
+  font-size:17px; cursor:pointer; border-radius:9px;
+}
+.at-lb-nav:hover { background:rgba(8,12,22,.8); }
+.at-lb-prev { left:14px; }
+.at-lb-next { right:14px; }
+
 .modal-actions {
   padding: 12px 18px;
   border-top: 1px solid var(--border);
@@ -4894,36 +4983,116 @@ th {
 
 
 /* ===== Projects ============================================================ */
-.pj-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
-.pj-title { font-family:Caladea,serif; font-size:26px; color:var(--text,#0f172a); }
-.pj-subtitle { font-size:11px; color:var(--muted,#64748b); margin-top:3px; }
+/* The panel is the catalogue and nothing else: no connect box, no scope tabs,
+   no create button. Projects arrive from Claude over the connector, so what
+   used to sit above the grid was describing a route the team does not use.
+   What is left is a title, a search box, and the projects. */
+.pj-head {
+  display:flex; align-items:flex-end; justify-content:space-between; gap:18px; flex-wrap:wrap;
+  margin:0 0 18px; padding-bottom:14px; border-bottom:1px solid var(--border,#e2e8f0);
+}
+.pj-title { font-family:Caladea,serif; font-size:27px; line-height:1.15; color:var(--text,#0f172a); letter-spacing:-.01em; }
+.pj-subtitle { display:flex; align-items:center; gap:7px; flex-wrap:wrap; font-size:11.5px; color:var(--muted,#64748b); margin-top:5px; }
+.pj-count {
+  font-size:10px; font-weight:800; letter-spacing:.04em; text-transform:uppercase;
+  background:var(--primary-soft,#eef2ff); color:var(--primary-dark,#4338ca);
+  border:1px solid var(--indigo-200,#c7d2fe); border-radius:999px; padding:2px 8px;
+}
 .pj-controls { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
-.pj-search { min-width:230px; }
+.pj-search { min-width:240px; }
 .pj-loading, .pj-empty { padding:40px 10px; text-align:center; color:var(--muted,#64748b); font-size:13px; }
 .pj-error-box { padding:14px; border-radius:10px; font-size:13px; background:var(--red-50,#fef2f2); border:1px solid var(--red-200,#fecaca); color:var(--red-700,#b91c1c); }
-.pj-connect-box { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin:0 0 14px; padding:12px 14px; border:1px solid var(--border,#e2e8f0); border-radius:10px; background:var(--surface-soft,#f8fafc); font-size:12px; color:var(--text-soft,#334155); }
-.pj-connect-box strong { color:var(--text,#0f172a); }
 .pj-connect-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .pj-secret { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; }
 
-.pj-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:12px; align-items:start; padding-bottom:30px; }
-.pj-card {
-  border:1px solid var(--border,#e2e8f0); border-radius:14px; background:var(--surface,#fff);
-  overflow:hidden; transition:box-shadow .15s ease, border-color .15s ease;
+/* Nothing on the board yet. This is the first screen the team sees, and the
+   one that has to teach the push route, so it gives the three steps rather
+   than one grey line of regret. */
+.pj-zero {
+  max-width:620px; margin:26px auto 40px; padding:30px 28px; text-align:center;
+  border:1px solid var(--border,#e2e8f0); border-radius:18px; background:var(--surface,#fff);
+  box-shadow:0 1px 3px rgba(15,23,42,.04);
 }
-.pj-card:hover { border-color:var(--border-strong,#cbd5e1); box-shadow:0 4px 14px rgba(15,23,42,.06); }
-.pj-card.open { grid-column:1 / -1; border-color:var(--indigo-400,#818cf8); box-shadow:0 8px 26px rgba(15,23,42,.10); }
-.pj-card-head { display:block; width:100%; text-align:left; border:0; background:transparent; cursor:pointer; padding:14px 16px; border-left:3px solid var(--pj-accent,#94a3b8); }
+.pj-zero-mark {
+  width:46px; height:46px; margin:0 auto 15px; border-radius:14px;
+  display:flex; align-items:center; justify-content:center; font-size:21px;
+  background:var(--primary-soft,#eef2ff); border:1px solid var(--indigo-200,#c7d2fe);
+}
+.pj-zero h3 { margin:0 0 7px; font-family:Caladea,serif; font-size:19px; font-weight:400; color:var(--text,#0f172a); }
+.pj-zero > p { margin:0 auto 20px; max-width:440px; font-size:12.5px; line-height:1.6; color:var(--muted,#64748b); }
+.pj-zero-steps { margin:0 0 20px; padding:0; list-style:none; text-align:left; counter-reset:pjstep; }
+.pj-zero-steps li {
+  position:relative; counter-increment:pjstep; padding:9px 0 9px 34px;
+  font-size:12.5px; line-height:1.55; color:var(--text-soft,#334155);
+  border-top:1px solid var(--border,#e2e8f0);
+}
+.pj-zero-steps li:first-child { border-top:0; }
+.pj-zero-steps li::before {
+  content:counter(pjstep); position:absolute; left:0; top:9px;
+  width:21px; height:21px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+  font-size:10px; font-weight:800; background:var(--surface-muted,#f1f5f9);
+  color:var(--muted,#64748b); border:1px solid var(--border,#e2e8f0);
+}
+.pj-zero-steps b { color:var(--text,#0f172a); font-weight:650; }
+.pj-zero-prompt {
+  display:flex; align-items:center; gap:9px; text-align:left;
+  background:var(--surface-soft,#f8fafc); border:1px solid var(--border,#e2e8f0);
+  border-radius:11px; padding:9px 9px 9px 12px;
+}
+.pj-zero-prompt code {
+  flex:1; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px;
+  line-height:1.5; color:var(--text-soft,#334155); background:none; padding:0; word-break:break-word;
+}
+
+.pj-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:14px; align-items:start; padding-bottom:34px; }
+.pj-card {
+  position:relative; border:1px solid var(--border,#e2e8f0); border-radius:15px; background:var(--surface,#fff);
+  overflow:hidden; transition:box-shadow .16s ease, border-color .16s ease, transform .16s ease;
+}
+/* The accent is the project's own colour, drawn as a hairline along the top
+   rather than a slab down the side - it reads as a tint, not a warning. */
+.pj-card::before {
+  content:""; position:absolute; inset:0 0 auto 0; height:3px;
+  background:linear-gradient(90deg, var(--pj-accent,#94a3b8), transparent 72%);
+  opacity:.9;
+}
+.pj-card:hover { border-color:var(--border-strong,#cbd5e1); box-shadow:0 6px 20px rgba(15,23,42,.07); transform:translateY(-1px); }
+.pj-card.open { grid-column:1 / -1; border-color:var(--pj-accent,#818cf8); box-shadow:0 10px 30px rgba(15,23,42,.11); transform:none; }
+.pj-card-head {
+  display:block; width:100%; text-align:left; border:0; background:transparent;
+  cursor:pointer; padding:16px 17px 14px; font:inherit; color:inherit;
+}
+.pj-card-head:hover { background:var(--surface-soft,#f8fafc); }
+.pj-card-head:focus-visible { outline:2px solid var(--primary,#4f46e5); outline-offset:-2px; }
 .pj-card-title { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.pj-name { font-size:14px; font-weight:700; color:var(--text,#0f172a); }
+.pj-name { font-size:14.5px; font-weight:700; color:var(--text,#0f172a); letter-spacing:-.01em; }
+.pj-chev { margin-left:auto; font-size:10px; color:var(--muted-light,#94a3b8); transition:transform .16s ease; }
+.pj-card.open .pj-chev { transform:rotate(90deg); }
 .pj-pin, .pj-nodraft {
   font-size:9px; font-weight:800; text-transform:uppercase; letter-spacing:.05em;
   padding:2px 7px; border-radius:999px;
-  background:var(--surface-muted,#f1f5f9); color:var(--muted,#64748b);
+  background:var(--surface-muted,#f1f5f9); color:var(--muted,#64748b); border:1px solid var(--border,#e2e8f0);
 }
-.pj-nodraft { background:var(--amber-50,#fffbeb); color:var(--amber-800,#92400e); border:1px solid var(--amber-300,#fcd34d); }
-.pj-desc { font-size:12px; color:var(--text-soft,#334155); margin-top:5px; line-height:1.5; }
-.pj-meta { font-size:10.5px; color:var(--muted,#64748b); margin-top:7px; }
+.pj-nodraft { background:var(--amber-50,#fffbeb); color:var(--amber-800,#92400e); border-color:var(--amber-300,#fcd34d); }
+.pj-desc { display:block; font-size:12px; color:var(--text-soft,#334155); margin-top:6px; line-height:1.55; }
+/* One line of provenance per card, reading left to right: who owns it, what it
+   asks for, and whether it has produced anything yet. */
+.pj-foot { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:11px; font-size:10.5px; color:var(--muted,#64748b); }
+.pj-foot-dot { width:3px; height:3px; border-radius:50%; background:var(--muted-light,#94a3b8); flex:none; }
+.pj-foot-runs {
+  margin-left:auto; font-weight:700; color:var(--text-soft,#334155);
+  background:var(--surface-muted,#f1f5f9); border:1px solid var(--border,#e2e8f0);
+  border-radius:999px; padding:2px 8px; white-space:nowrap;
+}
+.pj-foot-none { margin-left:auto; color:var(--muted-light,#94a3b8); white-space:nowrap; }
+
+.pj-accent-indigo { --pj-accent:var(--indigo-600,#4f46e5); }
+.pj-accent-teal { --pj-accent:#0d9488; }
+.pj-accent-amber { --pj-accent:var(--amber-500,#f59e0b); }
+.pj-accent-violet { --pj-accent:#7c3aed; }
+.pj-accent-rose { --pj-accent:#e11d48; }
+.pj-accent-emerald { --pj-accent:#059669; }
+.pj-accent-slate { --pj-accent:#64748b; }
 
 .pj-accent-indigo { --pj-accent:var(--indigo-600,#4f46e5); }
 .pj-accent-teal { --pj-accent:#0d9488; }
@@ -4949,7 +5118,6 @@ th {
   border:1px solid var(--amber-300,#fcd34d); background:var(--amber-50,#fffbeb);
   color:var(--amber-800,#92400e); border-radius:9px; padding:9px 11px; font-size:11.5px; line-height:1.5; margin:12px 0;
 }
-.pj-warn-top { margin:0 0 14px; max-width:760px; }
 
 .pj-result { margin-top:14px; border-radius:10px; font-size:12.5px; line-height:1.6; }
 .pj-running { padding:12px; color:var(--muted,#64748b); background:var(--surface-soft,#f8fafc); border:1px solid var(--border,#e2e8f0); }
@@ -4987,6 +5155,109 @@ th {
 }
 .pj-followup-input:focus { outline:none; border-color:var(--indigo-600,#4f46e5); }
 .pj-followup-actions { display:flex; gap:8px; flex-wrap:wrap; }
+
+/* ---------------------------------------------------------------------------
+   A rendered answer.
+   Project output is markdown, and it used to be dropped into a pre-wrap box,
+   so a table arrived as pipes and a heading as a hash. Everything below styles
+   the parsed form of it. Colours come from the same variables as the rest of
+   the board, so the dark theme needs no second set of rules.
+   --------------------------------------------------------------------------- */
+.pj-md { padding:13px 15px; max-height:560px; overflow:auto; color:var(--text,#0f172a); font-size:12.5px; line-height:1.68; }
+.pj-md > *:first-child { margin-top:0; }
+.pj-md > *:last-child { margin-bottom:0; }
+.pj-p { margin:0 0 10px; word-break:break-word; }
+.pj-h { margin:17px 0 8px; line-height:1.35; font-weight:700; color:var(--text,#0f172a); letter-spacing:-.01em; }
+.pj-h1 { font-size:16px; }
+.pj-h2 { font-size:14.5px; }
+.pj-h3 { font-size:13px; }
+.pj-h4, .pj-h5, .pj-h6 { font-size:12.5px; color:var(--text-soft,#334155); }
+/* The first heading of an answer should not push itself off the top edge. */
+.pj-md > .pj-h:first-child { margin-top:2px; }
+.pj-h1, .pj-h2 { padding-bottom:5px; border-bottom:1px solid var(--border,#e2e8f0); }
+.pj-list { margin:0 0 11px; padding-left:20px; }
+.pj-list li { margin:3px 0; word-break:break-word; }
+.pj-list li::marker { color:var(--pj-accent,#64748b); font-weight:600; }
+.pj-quote {
+  margin:0 0 11px; padding:7px 12px; border-left:3px solid var(--pj-accent,#64748b);
+  background:var(--surface-muted,#f1f5f9); border-radius:0 8px 8px 0; color:var(--text-soft,#334155);
+}
+.pj-hr { border:0; border-top:1px solid var(--border,#e2e8f0); margin:15px 0; }
+.pj-md a { color:var(--primary,#4f46e5); text-decoration:underline; text-underline-offset:2px; word-break:break-all; }
+.pj-code-in {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px;
+  background:var(--surface-muted,#f1f5f9); border:1px solid var(--border,#e2e8f0);
+  border-radius:5px; padding:1px 5px; word-break:break-word;
+}
+.pj-codeblock { margin:0 0 12px; border:1px solid var(--border,#e2e8f0); border-radius:9px; overflow:hidden; background:var(--surface,#fff); }
+.pj-codeblock-head {
+  display:flex; align-items:center; gap:8px; padding:5px 10px;
+  background:var(--surface-muted,#f1f5f9); border-bottom:1px solid var(--border,#e2e8f0);
+  font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--muted,#64748b);
+}
+.pj-codeblock-head span { flex:1; }
+.pj-codeblock pre { margin:0; padding:11px 12px; overflow-x:auto; background:transparent; }
+.pj-codeblock code {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; line-height:1.6;
+  color:var(--text,#0f172a); white-space:pre; background:none; border:0; padding:0;
+}
+.pj-tablewrap { margin:0 0 12px; overflow-x:auto; border:1px solid var(--border,#e2e8f0); border-radius:9px; }
+.pj-table { border-collapse:collapse; width:100%; font-size:11.5px; }
+.pj-table th, .pj-table td { padding:7px 10px; text-align:left; border-bottom:1px solid var(--border,#e2e8f0); vertical-align:top; }
+.pj-table th { background:var(--surface-muted,#f1f5f9); font-weight:700; color:var(--text,#0f172a); white-space:nowrap; }
+.pj-table tr:last-child td { border-bottom:0; }
+.pj-table tbody tr:hover { background:var(--surface-soft,#f8fafc); }
+
+/* Working. A bar that moves, because these runs take a while and a static
+   line reads as a hung request. */
+.pj-progress { display:flex; align-items:center; gap:10px; padding:11px 13px; }
+.pj-progress-text { font-size:11.5px; color:var(--muted,#64748b); }
+.pj-progress-text strong { color:var(--text,#0f172a); font-weight:600; }
+.pj-progress-bar { flex:1; height:3px; border-radius:3px; background:var(--surface-muted,#f1f5f9); overflow:hidden; position:relative; }
+.pj-progress-bar::after {
+  content:''; position:absolute; inset:0 auto 0 0; width:35%; border-radius:3px;
+  background:var(--pj-accent,#4f46e5); animation:pj-slide 1.25s ease-in-out infinite;
+}
+@keyframes pj-slide { 0% { left:-35%; } 100% { left:100%; } }
+@media (prefers-reduced-motion: reduce) { .pj-progress-bar::after { animation:none; left:0; width:100%; opacity:.45; } }
+
+/* Stored results: what the board ran, and what Claude ran and handed over. */
+.pj-runs { margin-top:16px; border-top:1px solid var(--border,#e2e8f0); padding-top:13px; }
+.pj-runs-head { display:flex; align-items:center; gap:9px; margin-bottom:9px; }
+.pj-runs-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--muted,#64748b); }
+.pj-runs-count { font-size:10.5px; color:var(--muted-light,#94a3b8); flex:1; }
+.pj-run { border:1px solid var(--border,#e2e8f0); border-radius:10px; margin-bottom:8px; overflow:hidden; background:var(--surface,#fff); }
+.pj-run.open { border-color:var(--pj-accent,#cbd5e1); box-shadow:0 1px 3px rgba(15,23,42,.06); }
+.pj-run-head {
+  display:flex; align-items:center; gap:9px; width:100%; padding:9px 12px;
+  background:none; border:0; cursor:pointer; text-align:left; font:inherit; color:inherit;
+}
+.pj-run-head:hover { background:var(--surface-soft,#f8fafc); }
+.pj-run-label { font-size:12px; font-weight:600; color:var(--text,#0f172a); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pj-run-when { font-size:10.5px; color:var(--muted,#64748b); margin-left:auto; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.pj-run-chev { font-size:9px; color:var(--muted-light,#94a3b8); transition:transform .15s ease; }
+.pj-run.open .pj-run-chev { transform:rotate(90deg); }
+.pj-badge {
+  font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+  border-radius:999px; padding:2px 7px; white-space:nowrap; border:1px solid transparent;
+}
+.pj-badge-claude { background:var(--primary-soft,#eef2ff); color:var(--primary-dark,#4338ca); border-color:var(--indigo-200,#c7d2fe); }
+.pj-badge-board { background:var(--surface-muted,#f1f5f9); color:var(--muted,#64748b); border-color:var(--border,#e2e8f0); }
+.pj-run-panel { border-top:1px solid var(--border,#e2e8f0); }
+.pj-run-meta {
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 12px;
+  background:var(--surface-soft,#f8fafc); border-bottom:1px solid var(--border,#e2e8f0);
+  font-size:10.5px; color:var(--muted,#64748b);
+}
+.pj-run-meta span { flex:1; }
+.pj-chip {
+  display:inline-flex; gap:4px; max-width:100%; align-items:baseline;
+  background:var(--surface-muted,#f1f5f9); border:1px solid var(--border,#e2e8f0);
+  border-radius:6px; padding:2px 7px; font-size:10.5px; color:var(--text-soft,#334155);
+}
+.pj-chip b { font-weight:600; color:var(--muted,#64748b); }
+.pj-chip i { font-style:normal; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:230px; }
+.pj-runs-empty { font-size:11px; color:var(--muted,#64748b); line-height:1.5; }
 
 
 /* A break that is on cooldown stays visible and greyed - hiding it would just
@@ -5041,6 +5312,84 @@ th {
 .emt-body img { max-width: 100%; height: auto; }
 
 
+/* ===== Received mail =====================================================
+   A reconciliation view, so it is laid out as a ledger rather than an inbox:
+   one row per message, and the rightmost column is always what the board did
+   with it.
+   ========================================================================= */
+.mv-head {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; flex-wrap: wrap;
+  margin: 0 0 16px; padding-bottom: 13px; border-bottom: 1px solid var(--border, #e2e8f0);
+}
+.mv-title { font-family: Caladea, serif; font-size: 27px; line-height: 1.15; color: var(--text, #0f172a); letter-spacing: -.01em; }
+.mv-sub { font-size: 11.5px; color: var(--muted, #64748b); margin-top: 5px; }
+.mv-controls { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.mv-search { min-width: 220px; }
+
+/* The counts, and the reason they exist: fetched should equal the sum of the
+   rest, and when it does not that is the thing worth looking at. */
+.mv-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.mv-tile {
+  border: 1px solid var(--border, #e2e8f0); border-radius: 12px; padding: 11px 13px;
+  background: var(--surface, #fff); cursor: pointer; text-align: left;
+  transition: border-color .13s ease, box-shadow .13s ease;
+}
+.mv-tile:hover { border-color: var(--border-strong, #cbd5e1); box-shadow: 0 3px 10px rgba(15, 23, 42, .06); }
+.mv-tile.on { border-color: var(--primary, #4f46e5); box-shadow: 0 0 0 2px var(--indigo-100, #e0e7ff); }
+.mv-tile-n { font-size: 21px; font-weight: 800; color: var(--text, #0f172a); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.mv-tile-l { font-size: 10.5px; color: var(--muted, #64748b); margin-top: 3px; }
+.mv-tile-alert .mv-tile-n { color: var(--red-600, #dc2626); }
+
+.mv-list { border: 1px solid var(--border, #e2e8f0); border-radius: 12px; overflow: hidden; background: var(--surface, #fff); }
+.mv-row {
+  display: flex; align-items: flex-start; gap: 12px; padding: 10px 13px;
+  border-bottom: 1px solid var(--border, #e2e8f0); cursor: pointer;
+  transition: background .12s ease;
+}
+.mv-row:last-child { border-bottom: 0; }
+.mv-row:hover { background: var(--surface-soft, #f8fafc); }
+.mv-when {
+  flex: 0 0 118px; font-size: 10.5px; color: var(--muted, #64748b);
+  font-variant-numeric: tabular-nums; padding-top: 2px;
+}
+.mv-main { flex: 1; min-width: 0; }
+.mv-subject {
+  font-size: 12.5px; font-weight: 600; color: var(--text, #0f172a);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mv-from { font-size: 11px; color: var(--text-soft, #334155); margin-top: 2px; }
+.mv-preview {
+  font-size: 11px; color: var(--muted, #64748b); margin-top: 3px; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.mv-side { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.mv-pill {
+  font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em;
+  border-radius: 999px; padding: 3px 9px; white-space: nowrap; border: 1px solid transparent;
+}
+.mv-pill-ticket { background: var(--emerald-50, #ecfdf5); color: var(--emerald-700, #047857); border-color: var(--emerald-200, #a7f3d0); }
+.mv-pill-merged { background: var(--primary-soft, #eef2ff); color: var(--primary-dark, #4338ca); border-color: var(--indigo-200, #c7d2fe); }
+.mv-pill-filtered { background: var(--surface-muted, #f1f5f9); color: var(--muted, #64748b); border-color: var(--border, #e2e8f0); }
+.mv-pill-spam { background: var(--amber-50, #fffbeb); color: var(--amber-800, #92400e); border-color: var(--amber-300, #fcd34d); }
+.mv-pill-missing { background: var(--red-50, #fef2f2); color: var(--red-700, #b91c1c); border-color: var(--red-200, #fecaca); }
+.mv-why { font-size: 10px; color: var(--muted-light, #94a3b8); max-width: 210px; text-align: right; line-height: 1.4; }
+.mv-tag {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--muted, #64748b); background: var(--surface-muted, #f1f5f9);
+  border: 1px solid var(--border, #e2e8f0); border-radius: 4px; padding: 0 5px; margin-left: 5px;
+}
+.mv-empty, .mv-loading { padding: 40px 10px; text-align: center; color: var(--muted, #64748b); font-size: 13px; }
+.mv-error {
+  padding: 14px; border-radius: 10px; font-size: 13px;
+  background: var(--red-50, #fef2f2); border: 1px solid var(--red-200, #fecaca); color: var(--red-700, #b91c1c);
+}
+@media (max-width: 720px) {
+  .mv-row { flex-wrap: wrap; }
+  .mv-when { flex-basis: 100%; }
+  .mv-side { flex-direction: row; align-items: center; }
+  .mv-why { text-align: left; max-width: none; }
+}
+
 /* ===== Feedback, as a bubble in the corner ================================ */
 .fb-launcher {
   position: fixed; right: 22px; bottom: 22px; z-index: 3200;
@@ -5073,13 +5422,26 @@ th {
 .fb-chat.open { opacity: 1; visibility: visible; transform: translateY(0) scale(1); }
 
 .fb-chat-head {
-  display: flex; align-items: center; gap: 9px;
-  padding: 11px 12px 11px 15px;
-  background: var(--indigo-600, #4f46e5); color: #fff;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 12px 12px 14px;
+  background: linear-gradient(135deg, var(--indigo-600, #4f46e5) 0%, #6d28d9 58%, #7c3aed 100%);
+  color: #fff;
 }
-.fb-chat-title { font-size: 13.5px; font-weight: 800; }
+/* An avatar with a live dot. The panel is a conversation with a team, and a
+   team has a face on it - a bare title bar reads as a form again. */
+.fb-avatar {
+  position: relative; flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%;
+  background: rgba(255, 255, 255, .18); border: 1px solid rgba(255, 255, 255, .3);
+  display: flex; align-items: center; justify-content: center; font-size: 14px;
+}
+.fb-avatar::after {
+  content: ''; position: absolute; right: -1px; bottom: -1px;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #34d399; border: 2px solid #5b21b6;
+}
+.fb-chat-title { font-size: 13.5px; font-weight: 800; letter-spacing: -.01em; }
 .fb-chat-sub { font-size: 10.5px; opacity: .85; margin-top: 1px; }
-.fb-chat-head > div:first-child { flex: 1; min-width: 0; }
+.fb-chat-head > div:first-of-type { flex: 1; min-width: 0; }
 .fb-test-btn {
   font-size: 10px; padding: 3px 9px;
   background: rgba(255, 255, 255, .14); border-color: rgba(255, 255, 255, .4); color: #fff;
@@ -5092,28 +5454,75 @@ th {
 .fb-chat-close:hover { color: #fff; }
 
 .fb-log {
-  padding: 13px; display: flex; flex-direction: column; gap: 8px;
-  max-height: 44vh; min-height: 96px; overflow-y: auto;
+  padding: 14px 13px; display: flex; flex-direction: column; gap: 10px;
+  max-height: 46vh; min-height: 110px; overflow-y: auto;
   background: var(--surface-soft, #f8fafc);
+  scroll-behavior: smooth;
 }
+.fb-log::-webkit-scrollbar { width: 8px; }
+.fb-log::-webkit-scrollbar-thumb { background: var(--border-strong, #cbd5e1); border-radius: 8px; }
+.fb-log::-webkit-scrollbar-track { background: transparent; }
+
+/* A row carries the avatar, the bubble and the stamp, so a timestamp can sit
+   under a message without shoving the bubble around. */
+.fb-row { display: flex; gap: 7px; align-items: flex-end; animation: fb-rise .22s ease both; }
+.fb-row-me { flex-direction: row-reverse; }
+@keyframes fb-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .fb-row { animation: none; } }
+.fb-row-icon {
+  flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%; margin-bottom: 13px;
+  display: flex; align-items: center; justify-content: center; font-size: 11px;
+  background: var(--primary-soft, #eef2ff); color: var(--primary-dark, #4338ca);
+  border: 1px solid var(--indigo-200, #c7d2fe);
+}
+.fb-row-me .fb-row-icon { display: none; }
+.fb-stack { min-width: 0; max-width: 84%; display: flex; flex-direction: column; gap: 3px; }
+.fb-row-me .fb-stack { align-items: flex-end; }
+
 .fb-msg {
-  max-width: 86%; padding: 8px 11px; border-radius: 13px;
-  font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+  padding: 9px 12px; border-radius: 14px;
+  font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .05);
 }
 .fb-bot {
-  align-self: flex-start; border-bottom-left-radius: 4px;
+  border-bottom-left-radius: 5px;
   background: var(--surface, #fff); border: 1px solid var(--border, #e2e8f0); color: var(--text, #0f172a);
 }
 .fb-me {
-  align-self: flex-end; border-bottom-right-radius: 4px;
-  background: var(--indigo-600, #4f46e5); color: #fff;
+  border-bottom-right-radius: 5px; border: 1px solid transparent;
+  background: linear-gradient(135deg, var(--indigo-600, #4f46e5), #6d28d9); color: #fff;
 }
 /* The outcome is coloured, because "sent" and "not sent" must not look alike. */
 .fb-bot.fb-ok { background: var(--emerald-50, #ecfdf5); border-color: var(--emerald-200, #a7f3d0); color: var(--emerald-700, #047857); }
 .fb-bot.fb-warn { background: var(--amber-50, #fffbeb); border-color: var(--amber-300, #fcd34d); color: var(--amber-800, #92400e); }
 .fb-bot.fb-bad { background: var(--red-50, #fef2f2); border-color: var(--red-200, #fecaca); color: var(--red-700, #b91c1c); }
+.fb-stamp { font-size: 9px; color: var(--muted-light, #94a3b8); padding: 0 4px; font-variant-numeric: tabular-nums; }
+.fb-tick { color: var(--success, #16a34a); font-weight: 700; }
 
-.fb-typing { display: flex; gap: 4px; align-items: center; padding: 11px; }
+/* The ticket, drawn as a card rather than described in a sentence. This is the
+   one piece of context that travels, so it is worth looking like something. */
+.fb-tcard {
+  display: flex; gap: 9px; align-items: flex-start; width: 100%;
+  padding: 9px 11px; border-radius: 12px; text-align: left;
+  background: var(--surface, #fff); border: 1px solid var(--indigo-200, #c7d2fe);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .05);
+}
+.fb-tcard-mark { flex: 0 0 auto; font-size: 13px; line-height: 1.3; }
+.fb-tcard-body { min-width: 0; flex: 1; }
+.fb-tcard-num { display: block; font-size: 11.5px; font-weight: 800; color: var(--primary-dark, #4338ca); font-variant-numeric: tabular-nums; }
+.fb-tcard-subj {
+  font-size: 11.5px; color: var(--text, #0f172a); margin-top: 1px; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.fb-tcard-meta { display: block; font-size: 10px; color: var(--muted, #64748b); margin-top: 3px; }
+.fb-tcard-off {
+  flex: 0 0 auto; border: 0; background: none; cursor: pointer; padding: 0 2px;
+  color: var(--muted-light, #94a3b8); font-size: 14px; line-height: 1;
+}
+.fb-tcard-off:hover { color: var(--red-600, #dc2626); }
+.fb-tcard.off { border-color: var(--border, #e2e8f0); opacity: .62; }
+
+.fb-typing { display: flex; gap: 4px; align-items: center; padding: 11px 13px; }
 .fb-typing span {
   width: 6px; height: 6px; border-radius: 50%; background: var(--muted-light, #94a3b8);
   animation: fb-blink 1.1s infinite ease-in-out;
@@ -5122,38 +5531,101 @@ th {
 .fb-typing span:nth-child(3) { animation-delay: .36s; }
 @keyframes fb-blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
 
-.fb-cats { display: flex; gap: 6px; padding: 9px 13px 0; flex-wrap: wrap; }
+/* Openers and the include/exclude toggle. One tap each. */
+.fb-chips { display: flex; gap: 6px; padding: 8px 13px 0; flex-wrap: wrap; }
+.fb-chip {
+  border: 1px solid var(--border, #e2e8f0); background: var(--surface, #fff);
+  color: var(--muted, #64748b); border-radius: 999px; padding: 4px 10px;
+  font-size: 10.5px; cursor: pointer; font-family: inherit; line-height: 1.5;
+  transition: border-color .13s ease, color .13s ease, background .13s ease;
+}
+.fb-chip:hover { border-color: var(--indigo-300, #a5b4fc); color: var(--text, #0f172a); background: var(--primary-soft, #eef2ff); }
+.fb-chip-on {
+  background: var(--indigo-50, #eef2ff); border-color: var(--indigo-300, #a5b4fc);
+  color: var(--indigo-800, #3730a3); font-weight: 600;
+}
+.fb-chip-x { opacity: .55; margin-left: 1px; }
+.fb-chip-on:hover .fb-chip-x { opacity: 1; }
+.fb-chip-open { font-style: italic; }
+
+.fb-cats { display: flex; gap: 6px; padding: 10px 13px 0; flex-wrap: wrap; }
 .fb-cat {
-  font-size: 11px; font-weight: 600; padding: 3px 11px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; padding: 4px 12px; border-radius: 999px;
   border: 1px solid var(--border, #e2e8f0); background: var(--surface, #fff);
   color: var(--muted, #64748b); cursor: pointer;
+  transition: border-color .13s ease, color .13s ease, background .13s ease;
 }
 .fb-cat:hover { border-color: var(--border-strong, #cbd5e1); color: var(--text, #0f172a); }
-.fb-cat.active { background: var(--indigo-50, #eef2ff); border-color: var(--indigo-300, #a5b4fc); color: var(--indigo-800, #3730a3); }
+.fb-cat.active {
+  background: linear-gradient(135deg, var(--indigo-600, #4f46e5), #6d28d9);
+  border-color: transparent; color: #fff;
+}
+/* Set for the reporter by what they typed, not by them. Marked, so it does not
+   look like the board quietly deciding things on their behalf. */
+.fb-cat.auto { box-shadow: 0 0 0 2px var(--indigo-100, #e0e7ff); }
 
-.fb-compose { display: flex; align-items: flex-end; gap: 8px; padding: 9px 13px; }
+/* Staged files, above the composer. Small tiles: this is a screenshot of an
+   error dialog, not a gallery. */
+.fb-files { display: flex; gap: 7px; flex-wrap: wrap; padding: 9px 13px 0; }
+.fb-file {
+  position: relative; display: flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border, #e2e8f0); border-radius: 9px;
+  background: var(--surface, #fff); padding: 4px 7px 4px 5px; max-width: 100%;
+}
+.fb-file-thumb { width: 26px; height: 26px; border-radius: 6px; object-fit: cover; background: var(--surface-muted, #f1f5f9); flex: none; }
+.fb-file-ext {
+  width: 26px; height: 26px; border-radius: 6px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface-muted, #f1f5f9); color: var(--muted, #64748b);
+  font-size: 8px; font-weight: 800; letter-spacing: .03em;
+}
+.fb-file-meta { min-width: 0; }
+.fb-file-name { font-size: 10.5px; font-weight: 600; color: var(--text, #0f172a); max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-file-size { font-size: 9.5px; color: var(--muted, #64748b); font-variant-numeric: tabular-nums; }
+.fb-file-x {
+  border: 0; background: none; cursor: pointer; padding: 0 2px; flex: none;
+  color: var(--muted-light, #94a3b8); font-size: 13px; line-height: 1;
+}
+.fb-file-x:hover { color: var(--red-600, #dc2626); }
+.fb-clip {
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%; margin-bottom: 2px;
+  border: 1px solid var(--border, #e2e8f0); background: var(--surface, #fff);
+  color: var(--muted, #64748b); font-size: 14px; cursor: pointer; line-height: 1;
+  transition: border-color .13s ease, background .13s ease;
+}
+.fb-clip:hover { border-color: var(--indigo-300, #a5b4fc); background: var(--primary-soft, #eef2ff); }
+.fb-clip.has { border-color: var(--indigo-400, #818cf8); background: var(--primary-soft, #eef2ff); color: var(--primary-dark, #4338ca); }
+
+.fb-compose { display: flex; align-items: flex-end; gap: 8px; padding: 10px 13px; }
 .fb-textarea {
-  flex: 1; resize: none; min-height: 40px; max-height: 120px;
-  padding: 9px 11px; font: inherit; font-size: 12.5px; line-height: 1.45;
-  border: 1px solid var(--border, #e2e8f0); border-radius: 11px;
+  flex: 1; resize: none; min-height: 40px; max-height: 132px;
+  padding: 10px 12px; font: inherit; font-size: 12.5px; line-height: 1.45;
+  border: 1px solid var(--border, #e2e8f0); border-radius: 13px;
   background: var(--surface, #fff); color: var(--text, #0f172a);
+  transition: border-color .13s ease, box-shadow .13s ease;
 }
-.fb-textarea:focus { outline: none; border-color: var(--indigo-400, #818cf8); }
+.fb-textarea:focus {
+  outline: none; border-color: var(--indigo-400, #818cf8);
+  box-shadow: 0 0 0 3px var(--indigo-100, #e0e7ff);
+}
 .fb-send {
-  flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%;
-  border: 0; background: var(--indigo-600, #4f46e5); color: #fff;
-  font-size: 14px; cursor: pointer; line-height: 1;
+  flex: 0 0 auto; width: 38px; height: 38px; border-radius: 50%;
+  border: 0; color: #fff; font-size: 14px; cursor: pointer; line-height: 1;
+  background: linear-gradient(135deg, var(--indigo-600, #4f46e5), #6d28d9);
+  box-shadow: 0 3px 10px rgba(79, 70, 229, .32);
+  transition: transform .13s ease, box-shadow .13s ease, opacity .13s ease;
 }
-.fb-send:hover { background: var(--indigo-700, #4338ca); }
-.fb-send:disabled { opacity: .5; cursor: not-allowed; }
+.fb-send:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(79, 70, 229, .4); }
+.fb-send:disabled { opacity: .42; cursor: not-allowed; box-shadow: none; }
 
 .fb-foot {
   display: flex; align-items: center; gap: 8px;
-  padding: 0 13px 11px; font-size: 10px; color: var(--muted, #64748b);
+  padding: 0 13px 12px; font-size: 10px; color: var(--muted, #64748b);
 }
-.fb-count { flex: 0 0 auto; }
+.fb-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .fb-count.over { color: var(--red-600, #dc2626); font-weight: 700; }
 .fb-context { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 
 @media (max-width: 520px) {
   .fb-chat { right: 12px; left: 12px; bottom: 74px; width: auto; }
@@ -5252,6 +5724,7 @@ th {
         </div>
         <button class="crm-nav-btn" id="spam-view-btn"> Spam Inbox <span class="spam-count-badge" id="spam-count" style="display:none">0</span></button>
         <button class="crm-nav-btn" id="archive-view-btn"> Archive Inbox <span class="spam-count-badge" id="archive-count" style="display:none">0</span></button>
+        <button class="crm-nav-btn" id="mail-view-btn"> Received Mail</button>
         <button class="crm-nav-btn" id="companies-view-btn"> Companies</button>
         <button class="crm-nav-btn" id="dashboard-view-btn"> Data Hygiene</button>
         <button class="crm-nav-btn" id="assignlog-view-btn"> Assignment Log</button>
@@ -5392,6 +5865,38 @@ th {
   </div>
   <div id="companies-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr));gap:12px;"></div>
 </div>
+<!-- What the helpdesk mailbox actually holds, next to what the board made of
+     it. The board ingests mail through filters - automatic senders dropped,
+     replies merged into the thread they belong to - and every one of those is
+     invisible from the board itself: a mail that never became a card leaves no
+     trace of having been considered. This view is that trace. -->
+<div id="mail-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
+  <div class="mv-head">
+    <div>
+      <div class="mv-title">Received mail</div>
+      <div class="mv-sub" id="mv-sub">helpdesk@quinta.im</div>
+    </div>
+    <div class="mv-controls">
+      <input class="filter-sel mv-search" id="mv-search" type="text" placeholder="Search sender or subject…" autocomplete="off">
+      <select class="filter-sel" id="mv-window">
+        <option value="24">Last 24 hours</option>
+        <option value="96" selected>Last 4 days</option>
+        <option value="336">Last 14 days</option>
+        <option value="720">Last 30 days</option>
+      </select>
+      <select class="filter-sel" id="mv-filter">
+        <option value="all">Everything</option>
+        <option value="ticket">On the board</option>
+        <option value="merged">Merged into a thread</option>
+        <option value="filtered">Filtered out</option>
+        <option value="missing">Unaccounted for</option>
+      </select>
+      <button class="btn-out" id="mv-refresh">Fetch</button>
+    </div>
+  </div>
+  <div class="mv-tiles" id="mv-tiles"></div>
+  <div class="mv-body" id="mv-body"></div>
+</div>
 <div id="assignlog-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
     <div>
@@ -5445,6 +5950,7 @@ th {
   <div class="modal-head"><h2>Connect Claude</h2><button class="modal-close-x" data-close="claude-connect-modal"></button></div>
   <div class="modal-body-scroll" style="padding:14px 18px;">
     <p class="pj-help" style="margin-top:0;">Use a Claude Compliance Access Key with <code>read:compliance_user_data</code>. The board imports matching claude.ai Projects into QT Tools for this signed-in user.</p>
+    <p class="pj-help">No Compliance key? You do not need one. Open the project on claude.ai with the support connector enabled and ask it to register itself on the board &mdash; it passes its own instructions and inputs over, one project per conversation.</p>
     <label class="pj-field"><span>Claude account email <em>(optional filter)</em></span><input class="form-input" id="claude-connect-email" type="email" autocomplete="email"></label>
     <label class="pj-field"><span>Compliance Access Key</span><input class="form-input pj-secret" id="claude-connect-credential" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-api01-..."></label>
     <label class="pj-field"><span>Authentication</span><select class="form-input" id="claude-connect-auth"><option value="auto">Auto</option><option value="api_key">API key header</option><option value="bearer">Bearer token</option></select></label>
@@ -5696,9 +6202,10 @@ th {
 </button>
 <section class="fb-chat" id="fb-chat" role="dialog" aria-label="Send feedback to the platform team">
   <header class="fb-chat-head">
+    <div class="fb-avatar" aria-hidden="true">&#9881;</div>
     <div>
       <div class="fb-chat-title">Platform team</div>
-      <div class="fb-chat-sub" id="fb-chat-sub">Goes to Teams</div>
+      <div class="fb-chat-sub" id="fb-chat-sub">Online &middot; reports read same day</div>
     </div>
     <button class="btn-out admin-only fb-test-btn" id="fb-test" type="button"
             title="Send a test report to check that Teams and email delivery work">Test</button>
@@ -5706,7 +6213,12 @@ th {
   </header>
   <div class="fb-log" id="fb-log" aria-live="polite"></div>
   <div class="fb-cats" id="fb-cats" role="group" aria-label="What kind of feedback"></div>
+  <div class="fb-chips" id="fb-chips" role="group" aria-label="What travels with this report, and openers"></div>
+  <div class="fb-files" id="fb-files"></div>
   <div class="fb-compose">
+    <button class="fb-clip" id="fb-clip" type="button" title="Attach a screenshot or file" aria-label="Attach a file">&#128206;</button>
+    <input id="fb-file-input" type="file" multiple
+      accept="image/*,application/pdf,text/plain,text/csv,application/json,application/zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.eml,.msg" style="display:none;">
     <textarea class="fb-textarea" id="fb-message" rows="2" spellcheck="true"
       placeholder="What happened, and what did you expect instead?"></textarea>
     <button class="fb-send" id="fb-send" type="button" aria-label="Send">&#10148;</button>
@@ -5817,6 +6329,7 @@ th {
 </div>
 
 <!--  Create Ticket modal  -->
+<div class="at-lightbox" id="at-lightbox" role="dialog" aria-label="Attachment viewer"></div>
 <div class="modal-bg" id="create-modal">
   <div class="modal" style="max-width:500px;">
     <div class="modal-head"><h2> New Manual Ticket</h2><button class="modal-close-x" data-close="create-modal"></button></div>
@@ -5860,6 +6373,17 @@ th {
       <div class="form-field">
         <label>Assign to</label>
         <select id="ct-agent" class="form-input"></select>
+      </div>
+      <div class="form-field">
+        <label style="display:flex;align-items:center;justify-content:space-between;">Attachments <span style="color:var(--slate-400);font-weight:400;font-size:11px;">screenshots, logs, PDFs</span></label>
+        <div class="at-zone" id="ct-at-zone" tabindex="0" role="button" aria-label="Add attachments: click to browse, drag files here, or paste a screenshot">
+          <div class="at-zone-icon">&#128206;</div>
+          <span class="at-zone-main">Drop files here, or click to browse</span>
+          <span class="at-zone-sub">Paste a screenshot with <span class="at-kbd">Ctrl</span>+<span class="at-kbd">V</span> &middot; images are shrunk before upload &middot; up to 10 files, 10MB each</span>
+        </div>
+        <input id="ct-at-input" type="file" multiple accept="image/*,application/pdf,text/plain,text/csv,application/json,application/zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.eml,.msg" style="display:none;">
+        <div class="at-grid" id="ct-at-grid"></div>
+        <div class="at-note" id="ct-at-note"></div>
       </div>
     </div>
     <div class="modal-actions">
@@ -7545,6 +8069,7 @@ function setSideNavActive(mode){
   document.getElementById('projects-view-btn')?.classList.toggle('active',mode==='projects');
   document.getElementById('assignlog-view-btn')?.classList.toggle('active',mode==='assignlog');
   document.getElementById('qt-detect-view-btn')?.classList.toggle('active',mode==='qtDetect');
+  document.getElementById('mail-view-btn')?.classList.toggle('active',mode==='mail');
 }
 function setBoardChromeVisible(visible){
   const display=visible?'':'none';
@@ -8201,6 +8726,376 @@ document.getElementById('jira-settings-save').addEventListener('click',async()=>
   showToast('Jira connected','ok');
 });
 
+/* ====================== Attachments on a manual ticket ====================
+
+   Three ways in, because an agent arrives holding the file in three different
+   ways: a click for something saved, a drag for something on the desktop, and
+   a paste for the screenshot they just took - which is the common one, and the
+   one the old form could not take at all.
+
+   Images are downscaled here, in the browser, before anything is sent. A
+   phone or 4K screenshot is six to twelve megabytes of pixels nobody needs to
+   read an error dialog; at 1600px on the long edge it is a few hundred KB.
+   That is what makes it defensible to keep the bytes in Postgres rather than
+   standing up a bucket for this.
+
+   Staged files live here until the ticket exists. The ticket id is minted
+   before the upload (manual_<timestamp>), so the sequence is: create the
+   ticket, then post the files against its id.
+   ========================================================================= */
+const AT_MAX_FILES = 10;
+const AT_MAX_BYTES = 10 * 1024 * 1024;
+const AT_IMAGE_MAX_EDGE = 1600;
+// Mirrors TICKET_ATTACH_TYPES on the server. Checked here too so a wrong file
+// is refused before it is read and encoded rather than after a round trip.
+const AT_OK_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif',
+  'application/pdf', 'text/plain', 'text/csv', 'application/json',
+  'application/zip', 'message/rfc822', 'application/vnd.ms-outlook',
+  'application/msword', 'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+]);
+
+let ctAttachments = [];          // staged: {key,name,type,size,originalSize,blob,previewUrl,width,height}
+let ticketAttachmentCount = {};  // ticketId -> how many are stored, for the board badge
+let atLightbox = { items: [], index: 0 };
+
+function atFmtSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(0) + ' KB';
+  return (n / 1048576).toFixed(1) + ' MB';
+}
+
+function atExtLabel(name, type) {
+  const ext = String(name || '').split('.').pop();
+  if (ext && ext.length <= 5 && ext !== name) return ext.toUpperCase();
+  return String(type || 'file').split('/').pop().slice(0, 5).toUpperCase();
+}
+
+function atNote(text, kind) {
+  const el = document.getElementById('ct-at-note');
+  if (!el) return;
+  el.className = 'at-note' + (kind === 'bad' ? ' at-note-bad' : (kind === 'busy' ? ' at-note-busy' : ''));
+  el.innerHTML = text || '';
+}
+
+/* Downscale an image to AT_IMAGE_MAX_EDGE on its longest side. Returns the
+   original blob unchanged when it is already small enough, or when anything
+   goes wrong - a failed re-encode must not lose the agent's file. PNG is kept
+   as PNG (screenshots of text stay crisp and stay small); anything else is
+   re-encoded as JPEG, where the quality setting actually buys something. */
+function atShrinkImage(file) {
+  return new Promise(resolve => {
+    if (!String(file.type || '').startsWith('image/') || file.type === 'image/gif') return resolve(null);
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const longest = Math.max(img.naturalWidth, img.naturalHeight);
+      if (!longest) { URL.revokeObjectURL(url); return resolve(null); }
+      const scale = Math.min(1, AT_IMAGE_MAX_EDGE / longest);
+      const w = Math.max(1, Math.round(img.naturalWidth * scale));
+      const h = Math.max(1, Math.round(img.naturalHeight * scale));
+      // Already small and already a sane size on disk: leave it alone.
+      if (scale === 1 && file.size <= 900 * 1024) {
+        URL.revokeObjectURL(url);
+        return resolve({ blob: file, width: w, height: h });
+      }
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        const asPng = file.type === 'image/png';
+        canvas.toBlob(blob => {
+          URL.revokeObjectURL(url);
+          // Keep whichever is actually smaller. Re-encoding a small PNG can
+          // make it bigger, and shipping the bigger one would be silly.
+          if (!blob || blob.size >= file.size) return resolve({ blob: file, width: img.naturalWidth, height: img.naturalHeight });
+          resolve({ blob, width: w, height: h });
+        }, asPng ? 'image/png' : 'image/jpeg', asPng ? undefined : 0.85);
+      } catch (_) {
+        URL.revokeObjectURL(url);
+        resolve(null);
+      }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+}
+
+function atRenderGrid() {
+  const grid = document.getElementById('ct-at-grid');
+  if (!grid) return;
+  grid.innerHTML = ctAttachments.map(f => {
+    const shrunk = f.originalSize && f.originalSize > f.size
+      ? ` <span class="at-shrunk">&darr;${Math.round((1 - f.size / f.originalSize) * 100)}%</span>`
+      : '';
+    const thumb = f.previewUrl
+      ? `<img class="at-thumb" src="${esc(f.previewUrl)}" alt="${esc(f.name)}" data-at-zoom="${esc(f.key)}">`
+      : `<div class="at-thumb-file">${esc(atExtLabel(f.name, f.type))}</div>`;
+    return `<div class="at-item">
+      ${thumb}
+      <button class="at-x" type="button" data-at-drop="${esc(f.key)}" title="Remove" aria-label="Remove ${esc(f.name)}">&times;</button>
+      <div class="at-meta">
+        <div class="at-name" title="${esc(f.name)}">${esc(f.name)}</div>
+        <div class="at-size">${atFmtSize(f.size)}${shrunk}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  grid.querySelectorAll('[data-at-drop]').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation();
+    const key = b.dataset.atDrop;
+    const gone = ctAttachments.find(f => f.key === key);
+    if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+    ctAttachments = ctAttachments.filter(f => f.key !== key);
+    atRenderGrid();
+    atNote(ctAttachments.length ? '' : '');
+  }));
+  grid.querySelectorAll('[data-at-zoom]').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation();
+    const images = ctAttachments.filter(f => f.previewUrl)
+      .map(f => ({ url: f.previewUrl, filename: f.name, contentType: f.type, isImage: true, inline: true }));
+    atOpenLightbox(images, images.findIndex(i => i.filename === ctAttachments.find(f => f.key === b.dataset.atZoom)?.name));
+  }));
+}
+
+async function atStage(fileList) {
+  const incoming = Array.from(fileList || []);
+  if (!incoming.length) return;
+  const problems = [];
+  atNote('<span class="spinner"></span> Preparing ' + incoming.length + ' file' + (incoming.length === 1 ? '' : 's') + '…', 'busy');
+
+  for (const file of incoming) {
+    if (ctAttachments.length >= AT_MAX_FILES) { problems.push(`Only ${AT_MAX_FILES} files can be attached; the rest were skipped.`); break; }
+    const type = String(file.type || '').toLowerCase().split(';')[0];
+    if (!AT_OK_TYPES.has(type)) { problems.push(`${file.name || 'That file'} is a ${type || 'unknown'} file and cannot be attached.`); continue; }
+
+    const shrunk = await atShrinkImage(file);
+    const blob = shrunk?.blob || file;
+    if (blob.size > AT_MAX_BYTES) { problems.push(`${file.name} is ${atFmtSize(blob.size)}; the limit is ${atFmtSize(AT_MAX_BYTES)}.`); continue; }
+
+    // A pasted screenshot arrives as "image.png" with no useful name, so give
+    // it one that will still mean something in a week.
+    const stamped = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+    const name = file.name && file.name !== 'image.png' ? file.name : `screenshot-${stamped}.png`;
+    ctAttachments.push({
+      key: 'at' + Date.now() + Math.random().toString(36).slice(2, 7),
+      name, type, size: blob.size, originalSize: file.size, blob,
+      previewUrl: type.startsWith('image/') ? URL.createObjectURL(blob) : '',
+      width: shrunk?.width || null, height: shrunk?.height || null
+    });
+  }
+
+  atRenderGrid();
+  atNote(problems.length ? problems.join('<br>') : '', problems.length ? 'bad' : '');
+}
+
+function atBlobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const out = String(reader.result || '');
+      const comma = out.indexOf(',');
+      resolve(comma >= 0 ? out.slice(comma + 1) : '');
+    };
+    reader.onerror = () => reject(new Error('Could not read ' + (blob.name || 'the file')));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/* Posts the staged files against a ticket that now exists. Returns how many
+   landed. A failure here is reported and does not unwind the ticket: the
+   ticket is the record, the screenshot is supporting material, and losing the
+   ticket because an upload failed would be the wrong trade. */
+async function atUploadStaged(ticketId) {
+  if (!ctAttachments.length) return 0;
+  const files = [];
+  for (const f of ctAttachments) {
+    files.push({ name: f.name, type: f.type, width: f.width, height: f.height, data: await atBlobToBase64(f.blob) });
+  }
+  const res = await fetch(`/api/tickets/${encodeURIComponent(ticketId)}/attachments`, {
+    method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data?.message || data?.error || ('HTTP ' + res.status));
+  return (data.rows || []).length;
+}
+
+function atResetStaged() {
+  ctAttachments.forEach(f => { if (f.previewUrl) URL.revokeObjectURL(f.previewUrl); });
+  ctAttachments = [];
+  const grid = document.getElementById('ct-at-grid');
+  if (grid) grid.innerHTML = '';
+  atNote('');
+  const input = document.getElementById('ct-at-input');
+  if (input) input.value = '';
+}
+
+function atWireCreateZone() {
+  const zone = document.getElementById('ct-at-zone');
+  const input = document.getElementById('ct-at-input');
+  if (!zone || !input || zone.dataset.wired) return;
+  zone.dataset.wired = '1';
+
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+  });
+  input.addEventListener('change', () => { atStage(input.files); input.value = ''; });
+
+  // dragover has to be prevented on every event or the browser navigates to
+  // the file instead of handing it over.
+  ['dragenter', 'dragover'].forEach(ev => zone.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation(); zone.classList.add('dragging');
+  }));
+  ['dragleave', 'drop'].forEach(ev => zone.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation();
+    if (ev === 'dragleave' && zone.contains(e.relatedTarget)) return;
+    zone.classList.remove('dragging');
+  }));
+  zone.addEventListener('drop', e => atStage(e.dataTransfer?.files));
+
+  // Paste is bound to the modal, not the zone: nobody clicks a drop zone
+  // before pressing Ctrl+V, and a paste into the subject or description box
+  // should still pick up an image while leaving typed text alone.
+  const modal = document.getElementById('create-modal');
+  modal?.addEventListener('paste', e => {
+    const items = Array.from(e.clipboardData?.items || []);
+    const files = items.filter(i => i.kind === 'file').map(i => i.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    e.preventDefault();
+    atStage(files);
+  });
+}
+
+/* ---------------------------------------------------------------------------
+   Stored attachments, on the ticket
+   --------------------------------------------------------------------------- */
+
+/* Appends the attachment strip to an open ticket. Guarded on the ticket id so
+   a slow response for the previous ticket cannot paint itself into the one the
+   agent has since opened. */
+let atShowingFor = null;
+async function atShowForTicket(ticketId){
+  atShowingFor = ticketId;
+  const rows = await atFetchForTicket(ticketId);
+  if (atShowingFor !== ticketId) return;
+  const host = document.getElementById('em-body');
+  if (!host || !rows.length) return;
+  const holder = document.createElement('div');
+  holder.innerHTML = atStripHtml(rows);
+  host.appendChild(holder);
+  atBindStrip(holder, rows);
+}
+async function atFetchForTicket(ticketId) {
+  try {
+    const res = await fetch(`/api/tickets/${encodeURIComponent(ticketId)}/attachments`, { credentials: 'include' });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) return [];
+    const rows = data.rows || [];
+    ticketAttachmentCount[ticketId] = rows.length;
+    return rows;
+  } catch (_) { return []; }
+}
+
+function atStripHtml(rows) {
+  if (!rows.length) return '';
+  const items = rows.map((r, i) => {
+    // Images open in the viewer; everything else opens in a tab, which is
+    // also what makes a PDF work - the byte route sends a sandboxed CSP, and
+    // a browser PDF viewer inside an iframe under that sandbox is not
+    // something to rely on.
+    const thumb = r.isImage
+      ? `<img class="at-thumb" src="${esc(r.url)}" alt="${esc(r.filename)}" data-at-open="${i}" loading="lazy">`
+      : `<a class="at-thumb-file" href="${esc(r.url)}" target="_blank" rel="noopener" title="Open ${esc(r.filename)}" style="cursor:pointer;text-decoration:none;">${esc(atExtLabel(r.filename, r.contentType))}</a>`;
+    return `<div class="at-item">
+      ${thumb}
+      <div class="at-meta">
+        <div class="at-name" title="${esc(r.filename)}">${esc(r.filename)}</div>
+        <div class="at-size">${atFmtSize(r.size)}${r.uploadedBy ? ' &middot; ' + esc(r.uploadedBy) : ''}</div>
+      </div>
+    </div>`;
+  }).join('');
+  const total = rows.reduce((sum, r) => sum + (r.size || 0), 0);
+  return `<div class="at-strip">
+    <div class="at-strip-head">&#128206; ${rows.length} attachment${rows.length === 1 ? '' : 's'}<span></span>${atFmtSize(total)}</div>
+    <div class="at-grid">${items}</div>
+  </div>`;
+}
+
+/* Renders the strip into a host element and wires the viewer. Kept separate
+   from atStripHtml so a caller can drop the markup wherever it wants and then
+   hand the same rows back for the click handlers. */
+function atBindStrip(host, rows) {
+  if (!host) return;
+  host.querySelectorAll('[data-at-open]').forEach(el => el.addEventListener('click', () => {
+    const imgs = rows.filter(r => r.isImage);
+    const clicked = rows[Number(el.dataset.atOpen)];
+    atOpenLightbox(imgs, Math.max(0, imgs.indexOf(clicked)));
+  }));
+}
+
+function atOpenLightbox(items, index) {
+  const list = (items || []).filter(Boolean);
+  if (!list.length) return;
+  atLightbox = { items: list, index: Math.max(0, Math.min(list.length - 1, index || 0)) };
+  atRenderLightbox();
+  document.getElementById('at-lightbox')?.classList.add('open');
+}
+
+function atCloseLightbox() {
+  document.getElementById('at-lightbox')?.classList.remove('open');
+  atLightbox = { items: [], index: 0 };
+}
+
+function atStepLightbox(delta) {
+  if (!atLightbox.items.length) return;
+  const n = atLightbox.items.length;
+  atLightbox.index = (atLightbox.index + delta + n) % n;
+  atRenderLightbox();
+}
+
+function atRenderLightbox() {
+  const host = document.getElementById('at-lightbox');
+  if (!host) return;
+  const item = atLightbox.items[atLightbox.index];
+  if (!item) return;
+  const many = atLightbox.items.length > 1;
+  const view = `<img class="at-lb-img" src="${esc(item.url)}" alt="${esc(item.filename)}">`;
+  host.innerHTML = `
+    <div class="at-lb-bar">
+      <strong>${esc(item.filename)}</strong>
+      ${many ? `<span>${atLightbox.index + 1} / ${atLightbox.items.length}</span>` : ''}
+      <span class="at-lb-spacer"></span>
+      <a class="at-lb-btn" href="${esc(item.url)}" target="_blank" rel="noopener">Open</a>
+      <button class="at-lb-btn" type="button" id="at-lb-close">Close</button>
+    </div>
+    ${view}
+    ${many ? '<button class="at-lb-nav at-lb-prev" type="button" id="at-lb-prev" aria-label="Previous">&#10094;</button>' : ''}
+    ${many ? '<button class="at-lb-nav at-lb-next" type="button" id="at-lb-next" aria-label="Next">&#10095;</button>' : ''}`;
+  host.querySelector('#at-lb-close')?.addEventListener('click', atCloseLightbox);
+  host.querySelector('#at-lb-prev')?.addEventListener('click', e => { e.stopPropagation(); atStepLightbox(-1); });
+  host.querySelector('#at-lb-next')?.addEventListener('click', e => { e.stopPropagation(); atStepLightbox(1); });
+}
+
+document.getElementById('at-lightbox')?.addEventListener('click', e => {
+  // Clicking the backdrop closes; clicking the picture does not.
+  if (e.target?.id === 'at-lightbox') atCloseLightbox();
+});
+document.addEventListener('keydown', e => {
+  if (!document.getElementById('at-lightbox')?.classList.contains('open')) return;
+  if (e.key === 'Escape') atCloseLightbox();
+  else if (e.key === 'ArrowLeft') atStepLightbox(-1);
+  else if (e.key === 'ArrowRight') atStepLightbox(1);
+});
+
 //  Create ticket modal 
 function openCreateModal(){
   document.getElementById('ct-subject').value='';
@@ -8210,6 +9105,8 @@ function openCreateModal(){
   populateCreateSubtypeOptions('Other','');
   document.getElementById('ct-jira').value='';
   document.getElementById('ct-email').value='';
+  atResetStaged();
+  atWireCreateZone();
   document.getElementById('create-modal').classList.add('open');
   setTimeout(()=>document.getElementById('ct-subject').focus(),100);
 }
@@ -8249,8 +9146,28 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   if(jiraKey)ticketJira[id]=jiraKey;
   allTickets.unshift(ticket);
   saveState();renderBoard();updateJiraBadge();
+
+  // The ticket is the record; the screenshots are supporting material. So the
+  // ticket is saved first and an upload failure is reported against a ticket
+  // that already exists, rather than unwinding one the agent just filled in.
+  const staged=ctAttachments.length;
+  if(staged){
+    const submitBtn=document.getElementById('ct-submit');
+    if(submitBtn){submitBtn.disabled=true;submitBtn.textContent='Uploading…';}
+    atNote('<span class="spinner"></span> Uploading '+staged+' file'+(staged===1?'':'s')+'…','busy');
+    try{
+      const landed=await atUploadStaged(id);
+      ticketAttachmentCount[id]=landed;
+      showToast('Ticket created with '+landed+' attachment'+(landed===1?'':'s'),'ok');
+    }catch(error){
+      showToast('Ticket created, but the attachments did not upload: '+String(error?.message||error),'warn');
+    }
+    if(submitBtn){submitBtn.disabled=false;submitBtn.textContent='Create Ticket';}
+  }else{
+    showToast('Manual ticket created','ok');
+  }
+  atResetStaged();
   document.getElementById('create-modal').classList.remove('open');
-  showToast('Manual ticket created','ok');
   if(clientEmail)enrichWithHubSpot();
   if(jiraKey)await refreshLinkedJiraIssues(true);
   await syncTicketToHubspot(ticket);
@@ -8294,7 +9211,7 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
+function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';document.getElementById('mail-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();/* renderBoard() shows the flat board or the swimlanes, per boardGrouping */}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
@@ -8876,7 +9793,6 @@ document.getElementById('insights-view-btn')?.addEventListener('click',()=>{if(v
    =========================================================================== */
 
 let projectsState = { state: 'idle', rows: [], canEdit: false, configured: false, model: '', claude: { connected: false } };
-let projectsTab = 'all';
 let projectsQuery = '';
 let projectOpen = null;      // slug of the project whose form is showing
 let projectValues = {};      // slug -> { fieldKey: value }
@@ -8886,7 +9802,126 @@ let projectValues = {};      // slug -> { fieldKey: value }
 // prompt on every turn. The transcript lives here rather than in Postgres -
 // it is a working session, not a record the board owes anyone.
 let projectThread = {};
+// slug -> { state, rows } for the stored results of a project: what the board
+// ran itself, and what Claude ran on its side and posted over the connector.
+// Loaded when a card is opened rather than with the list, so the panel does
+// not carry every project's history it may never show.
+let projectRuns = {};
+let projectRunOpen = {};     // "slug:runId" -> true for an expanded result
 let projectEditorOpen = false;
+
+/* ---------------------------------------------------------------------------
+   Markdown, rendered.
+   Project answers are markdown and were being shown as plain text, so a table
+   arrived as pipes and a heading as a hash. This is a deliberately small
+   subset - headings, lists, tables, quotes, rules, fenced and inline code,
+   bold, italic, strike, links - and it is built to be safe rather than
+   complete: the text is escaped ONCE, up front, and every rule after that
+   works on escaped text and emits only its own tags. Nothing here puts
+   caller-supplied characters back into markup unescaped, which is why no
+   sanitiser is needed and no library is loaded.
+   --------------------------------------------------------------------------- */
+function mdInline(s){
+  return String(s)
+    // Inline code first: whatever is inside it must not then be read as bold.
+    .replace(/`([^`\n]+)`/g,(m,c)=>'<code class="pj-code-in">'+c+'</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g,'<strong>$1</strong>')
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g,'$1<em>$2</em>')
+    .replace(/~~([^~\n]+)~~/g,'<del>$1</del>')
+    // Only http(s). A javascript: or data: href is not a link we will render.
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      (m,label,href)=>'<a href="'+href+'" target="_blank" rel="noopener noreferrer">'+label+'</a>');
+}
+
+function mdToHtml(raw){
+  const lines=esc(String(raw||'')).split(/\r?\n/);
+  const FENCE=/^\s*```+\s*([A-Za-z0-9_+#.-]*)\s*$/;
+  const FENCE_END=/^\s*```+\s*$/;
+  const BULLET=/^\s*([-*+]|\d+[.)])\s+/;
+  const ROW=/^\s*\|.*\|\s*$/;
+  const RULE=/^\s*([-*_])(\s*\1){2,}\s*$/;
+  const QUOTE=/^\s*&gt;\s?/;
+  // A line that opens a block of its own, so a paragraph knows where to stop.
+  const opensBlock=l=>/^\s*(#{1,6}\s|```|&gt;|[-*+]\s|\d+[.)]\s|\|)/.test(l)||RULE.test(l);
+  const out=[];
+  let i=0;
+  while(i<lines.length){
+    const line=lines[i];
+
+    const fence=line.match(FENCE);
+    if(fence){
+      const lang=fence[1]||'';
+      const buf=[];
+      i++;
+      while(i<lines.length&&!FENCE_END.test(lines[i])){buf.push(lines[i]);i++;}
+      i++;
+      out.push('<div class="pj-codeblock"><div class="pj-codeblock-head"><span>'+(esc(lang)||'code')+'</span>'
+        +'<button class="btn-out pj-copy pj-copy-code" type="button">Copy</button></div>'
+        +'<pre><code>'+buf.join('\n')+'</code></pre></div>');
+      continue;
+    }
+
+    // A table needs its separator row to be a table at all, which is what
+    // keeps an ordinary sentence containing a pipe out of one.
+    if(ROW.test(line)&&i+1<lines.length&&/^\s*\|[\s:|-]+\|\s*$/.test(lines[i+1])){
+      const cells=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>c.trim());
+      const head=cells(line);
+      i+=2;
+      const body=[];
+      while(i<lines.length&&ROW.test(lines[i])){body.push(cells(lines[i]));i++;}
+      out.push('<div class="pj-tablewrap"><table class="pj-table"><thead><tr>'
+        +head.map(h=>'<th>'+mdInline(h)+'</th>').join('')
+        +'</tr></thead><tbody>'
+        +body.map(r=>'<tr>'+r.map(c=>'<td>'+mdInline(c)+'</td>').join('')+'</tr>').join('')
+        +'</tbody></table></div>');
+      continue;
+    }
+
+    const head=line.match(/^\s*(#{1,6})\s+(.*)$/);
+    if(head){
+      const lvl=head[1].length;
+      out.push('<h'+lvl+' class="pj-h pj-h'+lvl+'">'+mdInline(head[2])+'</h'+lvl+'>');
+      i++;continue;
+    }
+
+    if(RULE.test(line)){out.push('<hr class="pj-hr">');i++;continue;}
+
+    if(QUOTE.test(line)){
+      const buf=[];
+      while(i<lines.length&&QUOTE.test(lines[i])){buf.push(lines[i].replace(QUOTE,''));i++;}
+      out.push('<blockquote class="pj-quote">'+buf.map(b=>mdInline(b)).join('<br>')+'</blockquote>');
+      continue;
+    }
+
+    if(BULLET.test(line)){
+      const ordered=/^\s*\d+[.)]\s+/.test(line);
+      const items=[];
+      // Same kind of bullet only: a numbered list directly under a dashed one
+      // is a second list, and merging them would renumber it.
+      while(i<lines.length&&BULLET.test(lines[i])&&/^\s*\d+[.)]\s+/.test(lines[i])===ordered){
+        let item=lines[i].replace(BULLET,'');
+        i++;
+        // An indented continuation belongs to the bullet above it, not to a
+        // paragraph of its own.
+        while(i<lines.length&&/^\s{2,}\S/.test(lines[i])&&!BULLET.test(lines[i])){
+          item+=' '+lines[i].trim();i++;
+        }
+        items.push(item);
+      }
+      const tag=ordered?'ol':'ul';
+      out.push('<'+tag+' class="pj-list">'+items.map(it=>'<li>'+mdInline(it)+'</li>').join('')+'</'+tag+'>');
+      continue;
+    }
+
+    if(!line.trim()){i++;continue;}
+
+    const buf=[];
+    while(i<lines.length&&lines[i].trim()&&!opensBlock(lines[i])){buf.push(lines[i]);i++;}
+    if(buf.length)out.push('<p class="pj-p">'+buf.map(b=>mdInline(b)).join('<br>')+'</p>');
+    else i++;
+  }
+  return out.join('')||'<p class="pj-p">(no output)</p>';
+}
 
 function showProjectsView(){
   viewMode='projects';
@@ -8913,9 +9948,16 @@ async function loadProjects(){
   renderProjectsView();
 }
 
+// Only what Claude put here. A project registered over the connector or synced
+// from a Claude account is the catalogue; anything else is a leftover, and the
+// panel no longer offers a way to make one.
+function projectFromClaude(p){
+  return !!p.fromClaude||p.source==='claude';
+}
+
 function projectMatches(p){
+  if(!projectFromClaude(p))return false;
   const q=projectsQuery.trim().toLowerCase();
-  if(projectsTab!=='all'&&p.scope!==projectsTab)return false;
   if(!q)return true;
   return [p.name,p.description,p.owner,...(p.inputs||[]).map(f=>f.label)]
     .some(v=>String(v||'').toLowerCase().includes(q));
@@ -8951,10 +9993,14 @@ function projectThreadHtml(slug){
     return `<div class="pj-turn pj-turn-claude">
       <div class="pj-turn-who"><strong>${i===0?'Result':'Claude'}</strong><span>${esc(meta)}</span>
         <button class="btn-out pj-copy" data-pj-copy="${esc(slug)}" data-pj-turn="${i}">Copy</button></div>
-      <div class="pj-turn-body">${esc(turn.content)}</div>
+      <div class="pj-md">${mdToHtml(turn.content)}</div>
     </div>`;
   });
-  if(t.running)parts.push('<div class="pj-result pj-running"><span class="spinner"></span> Working… this can take a minute on a long job.</div>');
+  if(t.running)parts.push(`<div class="pj-result pj-running pj-progress">
+    <span class="spinner"></span>
+    <span class="pj-progress-text"><strong>Working…</strong> a long job can take a minute.</span>
+    <span class="pj-progress-bar"></span>
+  </div>`);
   if(t.error)parts.push(`<div class="pj-result pj-error">${esc(t.error)}</div>`);
   // Nothing to follow up on until the project has answered once.
   if(turns.length&&!t.running){
@@ -8969,22 +10015,131 @@ function projectThreadHtml(slug){
   return parts.length?`<div class="pj-thread">${parts.join('')}</div>`:'';
 }
 
+/* The stored results of one project: what the board ran, and what Claude ran
+   on its side and posted over the connector. Newest first, newest expanded.
+   This is the half of the panel that works with no ANTHROPIC_API_KEY - the
+   board renders an answer it did not have to pay for. */
+function projectRunsHtml(slug){
+  const p=projectsState.rows.find(x=>x.slug===slug);
+  const state=projectRuns[slug];
+  if(!p||!state)return '';
+  if(state.state==='loading')return `<div class="pj-runs"><div class="pj-runs-head"><span class="pj-runs-title">Results</span></div>
+    <div class="pj-runs-empty"><span class="spinner"></span> Loading results…</div></div>`;
+  if(state.state==='error')return `<div class="pj-runs"><div class="pj-runs-head"><span class="pj-runs-title">Results</span></div>
+    <div class="pj-runs-empty">Could not load results: ${esc(state.message||'')}</div></div>`;
+  const rows=state.rows||[];
+  const body=rows.length?rows.map((run,idx)=>{
+    const key=slug+':'+run.id;
+    // The newest result is the one someone opened the card to read, so it is
+    // expanded unless they have since collapsed it themselves.
+    const open=projectRunOpen[key]!==undefined?projectRunOpen[key]:idx===0;
+    const badge=run.source==='claude'
+      ?'<span class="pj-badge pj-badge-claude">From Claude</span>'
+      :'<span class="pj-badge pj-badge-board">Ran here</span>';
+    const meta=[
+      run.model?esc(run.model):'',
+      run.ms?`${(run.ms/1000).toFixed(1)}s`:'',
+      run.usage?.outputTokens?`${run.usage.outputTokens} output tokens`:'',
+      run.createdBy?`by ${esc(run.createdBy)}`:''
+    ].filter(Boolean).join(' · ');
+    const chips=(run.inputs||[]).map(f=>`<span class="pj-chip"><b>${esc(f.label)}</b><i>${esc(f.value)}</i></span>`).join('');
+    return `<div class="pj-run${open?' open':''}">
+      <button class="pj-run-head" type="button" data-pj-run-toggle="${esc(key)}">
+        <span class="pj-run-chev">&#9654;</span>
+        ${badge}
+        <span class="pj-run-label">${esc(run.title||'Result')}</span>
+        <span class="pj-run-when">${esc(fmtDate(run.createdAt))}</span>
+      </button>
+      ${open?`<div class="pj-run-panel">
+        <div class="pj-run-meta">${chips}<span>${meta}</span>
+          <button class="btn-out pj-copy" type="button" data-pj-run-copy="${esc(key)}">Copy</button></div>
+        <div class="pj-md">${mdToHtml(run.output)}</div>
+      </div>`:''}
+    </div>`;
+  }).join(''):`<div class="pj-runs-empty">No results kept yet. Run it here, or run the project in Claude and ask it to post the result to the board &mdash; that route needs no API key on this deployment.</div>`;
+  return `<div class="pj-runs">
+    <div class="pj-runs-head"><span class="pj-runs-title">Results</span>
+      <span class="pj-runs-count">${rows.length?`${rows.length} kept`:''}</span>
+      <button class="btn-out pj-copy" type="button" data-pj-runs-refresh="${esc(slug)}">Refresh</button></div>
+    ${body}</div>`;
+}
+
+async function loadProjectRuns(slug){
+  const p=projectsState.rows.find(x=>x.slug===slug);
+  if(!p)return;
+  projectRuns[slug]={state:'loading',rows:[]};
+  renderProjectsView();
+  try{
+    const res=await fetch(`/api/projects/${p.id}/runs`,{credentials:'include'});
+    const data=await res.json();
+    projectRuns[slug]=(!res.ok||data.ok===false)
+      ?{state:'error',rows:[],message:data?.message||data?.error||`HTTP ${res.status}`}
+      :{state:'done',rows:data.rows||[]};
+  }catch(error){
+    projectRuns[slug]={state:'error',rows:[],message:String(error?.message||error)};
+  }
+  renderProjectsView();
+}
+
+/* The catalogue is empty. Since the only way to fill it is from Claude's side,
+   this screen is the instructions for doing that - including the sentence to
+   paste, because that is the part people get wrong. */
+function projectsZeroHtml(){
+  const prompt='Register this project on the support board, then run it and post the result there.';
+  return `<div class="pj-zero">
+    <div class="pj-zero-mark">&#9671;</div>
+    <h3>No projects yet</h3>
+    <p>The board does not fetch projects &mdash; Claude pushes them. Open a project in Claude with the support connector enabled and ask it to register itself.</p>
+    <ol class="pj-zero-steps">
+      <li><b>Open the project</b> on claude.ai, with the support connector switched on for that conversation.</li>
+      <li><b>Ask it to register itself.</b> It sends its own instructions and the inputs it asks for, and the board turns those into a form.</li>
+      <li><b>Ask it to post results here.</b> They arrive rendered, and that route needs no API key on this deployment.</li>
+    </ol>
+    <div class="pj-zero-prompt">
+      <code id="pj-zero-prompt">${esc(prompt)}</code>
+      <button class="btn-out pj-copy" type="button" id="pj-zero-copy">Copy</button>
+    </div>
+  </div>`;
+}
+
 function projectCardHtml(p){
   const open=projectOpen===p.slug;
   const fields=p.inputs||[];
+  // Run is disabled without instructions or without a key, and a disabled
+  // button swallows the click - no handler, no request, nothing on screen. The
+  // reason used to live in a hover title, which answers a mouse resting on it
+  // and never answers a press, so it is written into the card body instead.
+  // Both cases say what to do next, because neither is fixable from here.
+  const runBlocked=!p.ready
+    ? {
+        text:'<strong>Needs setup.</strong> This project arrived without its instructions, so there is nothing to send as a prompt. In Claude, open the project and ask it to re-register with its own instructions passed as <code>instructions</code>.'
+          +(projectsState.canEdit?' Or paste them here with <strong>Edit</strong>.':'')
+      }
+    : (!projectsState.configured
+      ? { text:'<strong>The board cannot run this itself.</strong> No <code>ANTHROPIC_API_KEY</code> is set on this deployment. Run the project in Claude and ask it to post the result here &mdash; it will appear under Results below.' }
+      : null);
+  // Everything on the card is now a span: this is the inside of a button, and
+  // a div in there was never valid markup.
+  const foot=[
+    p.owner?`<span>${esc(p.owner)}</span>`:'',
+    fields.length?`<span>${fields.length} input${fields.length===1?'':'s'}</span>`:'<span>no inputs</span>'
+  ].filter(Boolean).join('<span class="pj-foot-dot"></span>');
+  const runs=p.runCount
+    ? `<span class="pj-foot-runs" title="${p.lastRunAt?'Last result '+esc(fmtDate(p.lastRunAt)):''}">${p.runCount} result${p.runCount===1?'':'s'}</span>`
+    : '<span class="pj-foot-none">No results yet</span>';
   return `<div class="pj-card pj-accent-${esc(p.accent||'slate')}${open?' open':''}">
     <button class="pj-card-head" data-pj-open="${esc(p.slug)}">
-      <div class="pj-card-title">
+      <span class="pj-card-title">
         <span class="pj-name">${esc(p.name)}</span>
         ${p.pinned?'<span class="pj-pin" title="Pinned">Pinned</span>':''}
-        ${p.source==='claude'?'<span class="pj-pin" title="Synced from Claude">Claude</span>':''}
         ${p.ready?'':'<span class="pj-nodraft" title="No instructions saved yet">Needs setup</span>'}
-      </div>
-      <div class="pj-desc">${esc(p.description||'')}</div>
-      <div class="pj-meta">${esc(p.owner?('by '+p.owner):'')}${fields.length?` · ${fields.length} input${fields.length===1?'':'s'}`:''}${p.syncedAt?' · synced '+fmtDate(p.syncedAt):''}</div>
+        <span class="pj-chev">&#9654;</span>
+      </span>
+      ${p.description?`<span class="pj-desc">${esc(p.description)}</span>`:''}
+      <span class="pj-foot">${foot}${runs}</span>
     </button>
     ${open?`<div class="pj-body">
-      ${p.ready?'':`<div class="pj-warn">This project cannot run until its instructions are saved.${projectsState.canEdit?' Use <strong>Edit</strong> below.':''}</div>`}
+      ${runBlocked?`<div class="pj-warn">${runBlocked.text}</div>`:''}
       ${fields.length?fields.map(f=>projectFieldHtml(p.slug,f)).join(''):'<p class="pj-help">This project takes no inputs.</p>'}
       <div class="pj-actions">
         <button class="btn-primary" data-pj-run="${esc(p.slug)}"${(!p.ready||!projectsState.configured||projectThread[p.slug]?.running)?' disabled':''}>${projectThread[p.slug]?.turns?.length?'Run again':'Run'}</button>
@@ -8992,6 +10147,7 @@ function projectCardHtml(p){
         <span class="pj-model">${esc(p.model||projectsState.model||'')}</span>
       </div>
       ${projectThreadHtml(p.slug)}
+      ${projectRunsHtml(p.slug)}
     </div>`:''}
   </div>`;
 }
@@ -9021,6 +10177,9 @@ async function runProject(slug){
   }
   t.running=false;
   renderProjectsView();
+  // The server keeps what it just ran, so the Results list below is now a
+  // result behind until it is re-read.
+  if(!t.error)loadProjectRuns(slug);
 }
 
 // A follow-up replays the whole thread. The server puts the project's
@@ -9064,6 +10223,7 @@ async function askProjectFollowUp(slug){
   }
   t.running=false;
   renderProjectsView();
+  if(!t.error)loadProjectRuns(slug);
 }
 
 function resetProjectThread(slug){
@@ -9205,6 +10365,9 @@ function bindProjectCardHandlers(host){
     const slug=b.dataset.pjOpen;
     projectOpen=projectOpen===slug?null:slug;
     renderProjectsView();
+    // The stored results are fetched on open rather than with the list, so
+    // opening a card is what pays for its history.
+    if(projectOpen===slug)loadProjectRuns(slug);
   }));
   host.querySelectorAll('[data-pj-field]').forEach(el=>el.addEventListener('input',e=>{
     const slug=e.target.dataset.pjSlug,key=e.target.dataset.pjField;
@@ -9233,6 +10396,33 @@ function bindProjectCardHandlers(host){
     const text=turns[Number(b.dataset.pjTurn)]?.content||'';
     navigator.clipboard?.writeText(text).then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
   }));
+  // A stored result is keyed slug:runId. Slugs cannot contain a colon, so the
+  // last one is always the separator.
+  const runKeySlug=key=>String(key||'').slice(0,String(key||'').lastIndexOf(':'));
+  const runByKey=key=>{
+    const slug=runKeySlug(key);
+    return (projectRuns[slug]?.rows||[]).find(r=>slug+':'+r.id===key)||null;
+  };
+  host.querySelectorAll('[data-pj-run-toggle]').forEach(b=>b.addEventListener('click',()=>{
+    const key=b.dataset.pjRunToggle;
+    const slug=runKeySlug(key);
+    const rows=projectRuns[slug]?.rows||[];
+    const idx=rows.findIndex(r=>slug+':'+r.id===key);
+    // Matches the default in projectRunsHtml: newest open, the rest closed.
+    const open=projectRunOpen[key]!==undefined?projectRunOpen[key]:idx===0;
+    projectRunOpen[key]=!open;
+    renderProjectsView();
+  }));
+  host.querySelectorAll('[data-pj-run-copy]').forEach(b=>b.addEventListener('click',()=>{
+    const run=runByKey(b.dataset.pjRunCopy);
+    navigator.clipboard?.writeText(run?.output||'').then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
+  }));
+  host.querySelectorAll('[data-pj-runs-refresh]').forEach(b=>b.addEventListener('click',()=>loadProjectRuns(b.dataset.pjRunsRefresh)));
+  // Copy on a fenced code block reads the block it sits in, so it carries no id.
+  host.querySelectorAll('.pj-copy-code').forEach(b=>b.addEventListener('click',()=>{
+    const text=b.closest('.pj-codeblock')?.querySelector('code')?.textContent||'';
+    navigator.clipboard?.writeText(text).then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
+  }));
 }
 
 function renderProjectsView(){
@@ -9240,45 +10430,50 @@ function renderProjectsView(){
   if(!host)return;
   const s=projectsState;
   const claude=s.claude||{connected:false};
-  const claudeStatus=claude.connected
-    ? `<div><strong>Claude connected</strong>${claude.userEmail?` for ${esc(claude.userEmail)}`:''}${claude.lastSyncAt?` · last sync ${esc(fmtDate(claude.lastSyncAt))}`:''}${claude.lastProjectCount?` · ${claude.lastProjectCount} imported`:''}</div>`
-    : '<div><strong>Claude not connected</strong> · connect to import projects from your Claude account.</div>';
-  const claudeControls=claude.connected
-    ? `<div class="pj-connect-actions"><button class="btn-primary" id="pj-claude-sync">Sync Claude</button><button class="btn-out" id="pj-claude-connect">Change key</button><button class="btn-out" id="pj-claude-disconnect">Disconnect</button></div>`
-    : `<div class="pj-connect-actions"><button class="btn-primary" id="pj-claude-connect">Connect Claude</button></div>`;
-
-  const tabs=[['all','All'],['mine','Your projects'],['org','Organization'],['shared','Shared with you']];
+  const all=s.rows||[];
+  const mine=all.filter(projectFromClaude);
+  const rows=all.filter(projectMatches);
+  // The Compliance route only works for an eligible org, so its controls
+  // appear only once a key is actually stored - the panel stays clean for
+  // everyone who pushes projects over the connector instead. Disconnect has to
+  // come with it: a key that is rejected on every sync would otherwise be
+  // stored with nothing on screen able to clear it.
+  const syncBtn=claude.connected
+    ? '<button class="btn-out" id="pj-claude-sync">Sync from Claude</button>'
+      +'<button class="btn-out" id="pj-claude-disconnect">Disconnect</button>'
+    : '';
+  const bits=[];
+  if(mine.length)bits.push(`<span class="pj-count">${mine.length} project${mine.length===1?'':'s'}</span>`);
+  bits.push('<span>Pushed here from Claude</span>');
+  if(s.model)bits.push(`<span>&middot; ${esc(s.model)}</span>`);
   const header=`<div class="pj-head">
       <div><div class="pj-title">Projects</div>
-        <div class="pj-subtitle">Your Claude projects, run from the board${s.model?` · ${esc(s.model)}`:''}</div></div>
+        <div class="pj-subtitle">${bits.join('')}</div></div>
       <div class="pj-controls">
         <input class="filter-sel pj-search" id="pj-search" type="text" placeholder="Search projects…" value="${esc(projectsQuery)}" autocomplete="off">
-        ${s.canEdit?'<button class="btn-primary" id="pj-new">New project</button>':''}
+        ${syncBtn}
         <button class="btn-out" id="pj-refresh">Refresh</button>
       </div>
-    </div>
-    <div class="pj-connect-box">${claudeStatus}${claudeControls}</div>
-    <div class="ins-tabs">${tabs.map(([k,l])=>`<button class="ins-tab${projectsTab===k?' active':''}" data-pj-tab="${k}">${esc(l)}</button>`).join('')}</div>`;
+    </div>`;
 
   if(s.state==='loading'||s.state==='idle'){host.innerHTML=header+'<div class="pj-loading"><span class="spinner"></span> Loading projects…</div>';return;}
   if(s.state==='error'){host.innerHTML=header+`<div class="pj-error-box">Could not load projects: ${esc(s.message||'')}</div>`;return;}
 
-  const rows=s.rows.filter(projectMatches);
-  const notConfigured=!s.configured
-    ? '<div class="pj-warn pj-warn-top">No <code>ANTHROPIC_API_KEY</code> is set on this deployment, so nothing can be run from here yet.</div>'
-    : '';
-  const grid=rows.length
+  const body=rows.length
     ? `<div class="pj-grid">${rows.map(projectCardHtml).join('')}</div>`
-    : `<div class="pj-empty">${projectsQuery?'Nothing matches that search.':'No projects in this tab.'}</div>`;
+    : (projectsQuery
+      ? '<div class="pj-empty">Nothing matches that search.</div>'
+      : projectsZeroHtml());
 
-  host.innerHTML=header+notConfigured+grid;
+  host.innerHTML=header+body;
 
-  host.querySelectorAll('[data-pj-tab]').forEach(b=>b.addEventListener('click',()=>{projectsTab=b.dataset.pjTab;renderProjectsView();}));
   host.querySelector('#pj-refresh')?.addEventListener('click',loadProjects);
-  host.querySelector('#pj-claude-connect')?.addEventListener('click',openClaudeConnectModal);
   host.querySelector('#pj-claude-sync')?.addEventListener('click',syncClaudeProjects);
   host.querySelector('#pj-claude-disconnect')?.addEventListener('click',disconnectClaude);
-  host.querySelector('#pj-new')?.addEventListener('click',()=>openProjectEditor(null));
+  host.querySelector('#pj-zero-copy')?.addEventListener('click',()=>{
+    const text=host.querySelector('#pj-zero-prompt')?.textContent||'';
+    navigator.clipboard?.writeText(text).then(()=>showToast('Copied','ok'),()=>showToast('Could not copy'));
+  });
   bindProjectCardHandlers(host);
   // Re-rendering the panel on every keystroke would drop focus, so the search
   // box only redraws the grid beneath it.
@@ -9312,7 +10507,7 @@ function renderActiveView(){
     showToast('Could not redraw the board - see the browser console','warn');
   }
 }
-function renderActiveViewInner(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+function renderActiveViewInner(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='mail')renderMailView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 
 // ---------------------------------------------------------------------------
 // Assignment Log
@@ -14211,34 +15406,255 @@ async function emSendReply(){
   }
 }
 
+/* ====================== Received mail ====================================
+
+   What the helpdesk mailbox holds, beside what the board made of each message.
+
+   The board does not turn every mail into a card, and that is correct: an
+   automatic sender is dropped, a reply is merged into the thread it belongs
+   to. What was missing is any way to see it happen. From the board, a mail
+   that never became a card and a mail that was never fetched look identical -
+   both are simply absent - so "did we get that email?" could only be answered
+   by opening Outlook.
+
+   This asks the same mailbox the poller asks, through the same call, and then
+   says for each message which of those things happened to it. The counts at
+   the top are the point: fetched should equal on-board plus merged plus
+   filtered, and anything left over is unaccounted for and worth a look.
+   ========================================================================= */
+let mailViewState = { state: 'idle', rows: [], at: 0, message: '' };
+let mailViewQuery = '';
+let mailViewFilter = 'all';
+let mailViewHours = 96;
+
+/* Why a message is not a card, in the same order the ingest decides it. This
+   mirrors the filter in ingestEmails - if that changes, this has to change
+   with it, and saying nothing would be better than saying something stale. */
+function mailViewClassify(msg) {
+  const onBoard = allTickets.find(t => t && t.id === msg.id);
+  if (onBoard) {
+    const stage = String(ticketState[msg.id] || 'new');
+    const cat = String(ticketCategory[msg.id] || '');
+    const archived = ticketArchived && ticketArchived[msg.id];
+    if (cat === 'Spam') return { kind: 'spam', pill: 'Spam', why: 'On the board, filed as spam.', ticket: onBoard };
+    return {
+      kind: 'ticket',
+      pill: ticketDisplayNumber(msg.id),
+      why: `${archived ? 'Archived' : 'On the board'}${stage ? ' &middot; ' + esc(String(stage).toUpperCase()) : ''}`,
+      ticket: onBoard
+    };
+  }
+
+  // Automatic mail is dropped before a ticket is ever considered.
+  if (isAutomatic(msg)) {
+    return { kind: 'filtered', pill: 'Filtered', why: mailViewAutoReason(msg) };
+  }
+
+  // A reply lands on the ticket that owns its thread rather than making a new
+  // one, so the message id is nowhere on the board even though the mail was
+  // read and used.
+  const owner = findExistingTicketForEmail(msg);
+  if (owner) {
+    return {
+      kind: 'merged',
+      pill: 'Merged',
+      why: `Folded into ${ticketDisplayNumber(owner.id)} as a reply on that thread.`,
+      ticket: owner
+    };
+  }
+
+  return {
+    kind: 'missing',
+    pill: 'Not on board',
+    why: 'Fetched, not filtered, and no thread claims it. Worth a look.'
+  };
+}
+
+// Which of the automatic rules caught it. A bare "filtered" invites the next
+// question immediately, and the answer is cheap to give.
+function mailViewAutoReason(msg) {
+  const sl = String(msg.sender || '').toLowerCase();
+  if (!sl) return 'No sender.';
+  if (sl === SUPPORT_BOX) return 'Sent by the helpdesk mailbox itself.';
+  if (typeof BLOCKED_EMAILS !== 'undefined' && BLOCKED_EMAILS.has(sl)) return 'Sender is on the blocked list.';
+  const domain = sl.split('@')[1] || '';
+  if (typeof BLOCKED_DOMAINS !== 'undefined' && BLOCKED_DOMAINS.has(domain)) return `Domain ${esc(domain)} is blocked.`;
+  if (typeof NO_REPLY_PATTERNS !== 'undefined' && NO_REPLY_PATTERNS.some(p => sl.includes(p))) return 'Looks like a no-reply address.';
+  if (!msg.subject && !msg.summary) return 'No subject and no body.';
+  return 'Matched an automatic-mail rule (newsletter, meeting invite, or similar).';
+}
+
+async function loadMailView() {
+  mailViewState = { ...mailViewState, state: 'loading' };
+  renderMailView();
+  try {
+    // The same call the poller makes, against the same mailbox, so this view
+    // cannot disagree with the ingest about what is there.
+    const res = await window.cowork.callMcpTool(SEARCH_TOOL, {
+      limit: MAIL_FETCH_LIMIT,
+      mailboxOwnerEmail: SUPPORT_BOX,
+      afterDateTime: isoHoursAgo(mailViewHours)
+    });
+    if (res?.isError) throw new Error(res.error || 'mailbox_unavailable');
+    const rows = Array.isArray(res?.structuredContent) ? res.structuredContent : [];
+    rows.sort((a, b) => new Date(b?.receivedDateTime || 0) - new Date(a?.receivedDateTime || 0));
+    mailViewState = { state: 'done', rows, at: Date.now(), message: '' };
+  } catch (error) {
+    mailViewState = { state: 'error', rows: [], at: Date.now(), message: String(error?.message || error) };
+  }
+  renderMailView();
+}
+
+function mailViewMatches(row, verdict) {
+  if (mailViewFilter !== 'all' && verdict.kind !== mailViewFilter) {
+    // Spam sits under "on the board", since that is where the mail went.
+    if (!(mailViewFilter === 'ticket' && verdict.kind === 'spam')) return false;
+  }
+  const q = mailViewQuery.trim().toLowerCase();
+  if (!q) return true;
+  return [row.subject, row.sender, row.summary].some(v => String(v || '').toLowerCase().includes(q));
+}
+
+function renderMailView() {
+  const host = document.getElementById('mv-body');
+  const tiles = document.getElementById('mv-tiles');
+  const sub = document.getElementById('mv-sub');
+  if (!host) return;
+  const s = mailViewState;
+
+  if (sub) {
+    sub.textContent = s.at
+      ? `${SUPPORT_BOX} · ${s.rows.length} message${s.rows.length === 1 ? '' : 's'} fetched · read ${fmtDate(new Date(s.at).toISOString())}`
+      : `${SUPPORT_BOX} · press Fetch to read the mailbox`;
+  }
+
+  if (s.state === 'loading') {
+    if (tiles) tiles.innerHTML = '';
+    host.innerHTML = '<div class="mv-loading"><span class="spinner"></span> Reading the mailbox…</div>';
+    return;
+  }
+  if (s.state === 'error') {
+    if (tiles) tiles.innerHTML = '';
+    host.innerHTML = `<div class="mv-error">Could not read the mailbox: ${esc(s.message)}</div>`;
+    return;
+  }
+  if (s.state === 'idle') {
+    if (tiles) tiles.innerHTML = '';
+    host.innerHTML = '<div class="mv-empty">Press <strong>Fetch</strong> to read what the helpdesk mailbox is holding.</div>';
+    return;
+  }
+
+  const judged = s.rows.map(row => ({ row, verdict: mailViewClassify(row) }));
+  const count = kind => judged.filter(j => j.verdict.kind === kind).length;
+  const counts = {
+    all: judged.length,
+    ticket: count('ticket') + count('spam'),
+    merged: count('merged'),
+    filtered: count('filtered'),
+    missing: count('missing')
+  };
+
+  if (tiles) {
+    const tile = (key, label, alert) => `<button class="mv-tile${mailViewFilter === key ? ' on' : ''}${alert && counts[key] ? ' mv-tile-alert' : ''}" type="button" data-mv-tile="${key}">
+        <div class="mv-tile-n">${counts[key]}</div><div class="mv-tile-l">${label}</div></button>`;
+    tiles.innerHTML = tile('all', 'Fetched')
+      + tile('ticket', 'On the board')
+      + tile('merged', 'Merged into a thread')
+      + tile('filtered', 'Filtered out')
+      + tile('missing', 'Unaccounted for', true);
+    tiles.querySelectorAll('[data-mv-tile]').forEach(b => b.addEventListener('click', () => {
+      mailViewFilter = b.dataset.mvTile;
+      const sel = document.getElementById('mv-filter');
+      if (sel) sel.value = mailViewFilter;
+      renderMailView();
+    }));
+  }
+
+  const shown = judged.filter(j => mailViewMatches(j.row, j.verdict));
+  if (!shown.length) {
+    host.innerHTML = `<div class="mv-empty">${s.rows.length ? 'No message here matches that.' : 'The mailbox returned nothing for this window.'}</div>`;
+    return;
+  }
+
+  host.innerHTML = `<div class="mv-list">${shown.map(({ row, verdict }) => {
+    const internal = isInternalEmailAddress(row.sender) ? '<span class="mv-tag">internal</span>' : '';
+    return `<div class="mv-row" data-mv-open="${esc(row.id)}">
+      <div class="mv-when">${esc(fmtDate(row.receivedDateTime))}</div>
+      <div class="mv-main">
+        <div class="mv-subject">${esc(row.subject || '(no subject)')}</div>
+        <div class="mv-from">${esc(row.sender || 'unknown sender')}${internal}</div>
+        ${row.summary ? `<div class="mv-preview">${esc(row.summary)}</div>` : ''}
+      </div>
+      <div class="mv-side">
+        <span class="mv-pill mv-pill-${verdict.kind}">${esc(verdict.pill)}</span>
+        <span class="mv-why">${verdict.why}</span>
+      </div>
+    </div>`;
+  }).join('')}</div>`;
+
+  // Clicking a row goes to the ticket when there is one, and to Outlook when
+  // there is not - which is the only place left to look at that point.
+  host.querySelectorAll('[data-mv-open]').forEach(el => el.addEventListener('click', () => {
+    const hit = judged.find(j => String(j.row.id) === el.dataset.mvOpen);
+    if (!hit) return;
+    if (hit.verdict.ticket) {
+      showBoardView();
+      openEmailModal(hit.verdict.ticket);
+      return;
+    }
+    if (hit.row.webLink) window.open(hit.row.webLink, '_blank', 'noopener');
+    else showToast('No ticket and no Outlook link for that message');
+  }));
+}
+
+function showMailView() {
+  viewMode = 'mail';
+  setBoardChromeVisible(false);
+  hidePrimaryViews();
+  document.getElementById('mail-view').style.display = 'block';
+  setSideNavActive('mail');
+  saveLastWorkspaceSession('mail');
+  renderMailView();
+  // Fetched on first open rather than on every visit: it is a live Graph call
+  // and re-reading the mailbox on a tab switch would be rude to the throttle.
+  if (mailViewState.state === 'idle') loadMailView();
+}
+
+document.getElementById('mail-view-btn')?.addEventListener('click', () => {
+  if (viewMode === 'mail') showBoardView(); else showMailView();
+});
+document.getElementById('mv-refresh')?.addEventListener('click', loadMailView);
+document.getElementById('mv-window')?.addEventListener('change', e => {
+  mailViewHours = Number(e.target.value) || 96;
+  loadMailView();
+});
+document.getElementById('mv-filter')?.addEventListener('change', e => {
+  mailViewFilter = e.target.value || 'all';
+  renderMailView();
+});
+document.getElementById('mv-search')?.addEventListener('input', e => {
+  mailViewQuery = e.target.value;
+  renderMailView();
+});
+
 /* ====================== Feedback, from wherever you are ==================
 
    The button is in the header and the report goes to /api/feedback, which
    records it, emails it, and posts it to Teams if a webhook is configured.
 
-   The context block is the part that makes a report useful: which view, which
-   build, which browser, and the ticket that was open. Collected here because
-   this is the only place that knows it, shown in the modal rather than
-   described, so nobody has to take on trust what is being attached. */
+   A report carries five things and no more: who wrote it, their email, the
+   ticket they had open IF they had one, the time, and what they said. It used
+   to carry the build, the page, the theme, the viewport and the user agent as
+   well - useful on a bug report, noise on the other three kinds, and none of
+   it read by anyone in a Teams channel. The chip strip shows what is going
+   rather than describing it, and the ticket chip can be taken off. */
 const FB_MAX = 4000;
 let fbCategory = 'bug';
 let fbSending = false;
 
-function fbContext(){
-  return {
-    view: viewMode || 'board',
-    // The ticket whose modal is open, if any - by far the most likely subject
-    // of a bug report, and the thing a reporter is least likely to think to
-    // mention.
-    ticketId: (document.getElementById('email-modal')?.classList.contains('open') && emCurrentTicket?.id)
-      || (comTicketId || ''),
-    build: appBuildVersion || 'unknown',
-    url: location.pathname + location.search,
-    theme: document.documentElement.getAttribute('data-theme') || 'system',
-    viewport: `${window.innerWidth}x${window.innerHeight}`,
-    userAgent: navigator.userAgent
-  };
-}
+// fbContext now lives with the rest of the chat module below: it returns the
+// ticket and nothing else, because the ticket is the only one of the five
+// fields the browser is the authority on.
 
 
 /* ===========================================================================
@@ -14257,130 +15673,499 @@ function fbContext(){
    =========================================================================== */
 
 let fbOpen = false;
-let fbLog = [];          // the visible conversation
+let fbLog = [];            // the visible conversation
 let fbGreeted = false;
+let fbTyping = false;      // the bot's own indicator, separate from send state
+// The ticket rides along only if there is one AND the reporter leaves it on.
+// Their report, their call - which is why it is a card they can switch off
+// rather than a line of small print telling them what was attached.
+let fbIncludeTicket = true;
+let fbAwaitingDetail = false;
+let fbPinnedTicket = null;   // a ticket named in the text, which wins over context
+let fbAutoCategory = false;  // whether the current category was guessed, not chosen
+let fbCategoryChosen = false; // whether a person picked it. Tapping Bug has to
+                              // stick even though Bug is also the default, so
+                              // "is it still bug?" cannot stand in for this.
+const FB_DRAFT_KEY = 'kanban.feedback.draft';
 
 const FB_CATEGORY_LABEL = { bug: 'Bug', idea: 'Idea', question: 'Question', other: 'Other' };
 
-function fbPush(role, text, tone){
+/* Openers per category. Not templates to be sent as-is - they land in the box
+   as a first line so the reporter is editing a sentence instead of facing an
+   empty field, which is the difference between a report and a shrug. */
+const FB_OPENERS = {
+  bug: ['It breaks when I…', 'It shows the wrong…', 'It is too slow when…'],
+  idea: ['It would help if…', 'Can we add…', 'It would be quicker if…'],
+  question: ['How do I…', 'Why does it…', 'Is it meant to…'],
+  other: ['Something to flag…', 'A small annoyance…']
+};
+
+const FB_ASKS = {
+  bug: 'What did you do, and what happened instead of what you expected?',
+  idea: 'What would you like to be able to do, and what is it costing you now?',
+  question: 'What are you trying to work out?',
+  other: 'Go ahead - what is on your mind?'
+};
+
+/* Reading the report to pick its kind. Crude on purpose: a word list, first
+   match wins, and the reporter can always overrule it with one tap. Guessing
+   is worth it because the category is the field people leave on whatever it
+   was last, and a channel full of things filed as "Other" is a channel nobody
+   triages. */
+const FB_HINTS = [
+  ['bug', /\b(break(s|ing)?|broke|broken|error(s)?|fail(s|ed|ing)?|crash(es|ed|ing)?|glitch(es)?|bug|stuck|wrong|missing|blank|empty|does ?n[o']?t work|not working|won[o']?t (load|open|save)|502|500|403|404|timeout|slow|freez(e|es|ing)|frozen|hang(s|ing)?|duplicate|lost)\b/i],
+  ['question', /\b(how do i|how can i|how does|what does|why does|why is|where is|is it (meant|supposed)|can i|should i|does it)\b|\?\s*$/i],
+  ['idea', /\b(could we|can we|it would (be )?(help|nice|great|better|quicker)|feature|suggest|suggestion|wish|please add|would like|idea)\b/i]
+];
+
+function fbGuessCategory(text) {
+  const s = String(text || '');
+  if (s.trim().length < 12) return '';
+  for (const [key, re] of FB_HINTS) if (re.test(s)) return key;
+  return '';
+}
+
+function fbClock(ts) {
+  try { return new Date(ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }); }
+  catch (_) { return ''; }
+}
+
+function fbPush(role, text, tone) {
   fbLog.push({ role, text, tone: tone || '', at: Date.now() });
   fbRenderLog();
 }
 
-function fbToggleChat(force){
+/* The bot pauses before it answers. A reply that appears in the same frame as
+   the question reads as a form validating itself; a beat and a typing dot read
+   as somebody on the other end. It is 400ms of theatre and it is most of how
+   the thing feels. */
+function fbSay(text, tone, delay) {
+  return new Promise(resolve => {
+    fbTyping = true;
+    fbRenderLog();
+    setTimeout(() => {
+      fbTyping = false;
+      fbPush('bot', text, tone);
+      resolve();
+    }, delay === undefined ? 420 : delay);
+  });
+}
+
+/* Which ticket the reporter means, in the order that a person would mean it:
+     1. one they named in the report itself (#0042) - explicit beats inferred
+     2. the ticket whose modal is open - they are looking straight at it
+     3. the card they last clicked on the board, if it is still selected
+     4. the only selected card, if there is exactly one
+     5. a comment thread they have open
+   The board selection is the case this missed before: selecting a card and
+   opening the bubble is the ordinary way to report something about a ticket,
+   and it attached nothing at all. */
+function fbTicketNow() {
+  const wrap = id => {
+    const key = String(id || '');
+    if (!key) return null;
+    const t = (typeof allTickets !== 'undefined' ? allTickets : []).find(x => x.id === key);
+    return {
+      id: key,
+      label: String(ticketDisplayNumber(key) || key),
+      subject: String(t?.email?.subject || '').slice(0, 140),
+      stage: String((typeof ticketState !== 'undefined' && ticketState[key]) || '')
+    };
+  };
+
+  if (fbPinnedTicket) return fbPinnedTicket;
+  if (document.getElementById('email-modal')?.classList.contains('open') && emCurrentTicket?.id) return wrap(emCurrentTicket.id);
+  try {
+    if (typeof selectedTickets !== 'undefined' && selectedTickets.size) {
+      if (typeof lastSelectedId !== 'undefined' && lastSelectedId && selectedTickets.has(lastSelectedId)) return wrap(lastSelectedId);
+      if (selectedTickets.size === 1) return wrap([...selectedTickets][0]);
+      // Several selected and no last-clicked: guessing which one the report is
+      // about would be worse than attaching none.
+      return null;
+    }
+  } catch (_) {}
+  if (comTicketId) return wrap(comTicketId);
+  return null;
+}
+
+/* A ticket number typed into the report. Someone who writes "#0042 is stuck"
+   means that ticket even if they are looking at a different one, so it takes
+   priority - but only if the board actually has it. */
+function fbTicketFromText(text) {
+  const m = String(text || '').match(/#\s?(\d{1,6})\b/);
+  if (!m) return null;
+  const wanted = `#${String(m[1]).padStart(4, '0')}`;
+  const hit = (typeof allTickets !== 'undefined' ? allTickets : [])
+    .find(t => String(ticketDisplayNumber(t.id) || '') === wanted);
+  if (!hit) return null;
+  return {
+    id: String(hit.id),
+    label: wanted,
+    subject: String(hit.email?.subject || '').slice(0, 140),
+    stage: String((typeof ticketState !== 'undefined' && ticketState[hit.id]) || '')
+  };
+}
+
+function fbContext() {
+  const ticket = fbIncludeTicket ? fbTicketNow() : null;
+  // Five fields go out and four of them are known server-side, so this is the
+  // whole of what the browser has to contribute.
+  return ticket ? { ticketId: ticket.id, ticketLabel: ticket.label } : {};
+}
+
+function fbToggleChat(force) {
   fbOpen = force === undefined ? !fbOpen : !!force;
   const panel = document.getElementById('fb-chat');
   const launcher = document.getElementById('fb-launcher');
-  if(!panel) return;
+  if (!panel) return;
   panel.classList.toggle('open', fbOpen);
   launcher?.classList.toggle('active', fbOpen);
   launcher?.setAttribute('aria-expanded', String(fbOpen));
-  if(fbOpen){
-    if(!fbGreeted){
-      fbGreeted = true;
-      fbPush('bot','Something broken, missing, or worth changing? Tell me and it goes straight to the platform team.');
-    }
-    fbRenderContext();
-    setTimeout(()=>document.getElementById('fb-message')?.focus(), 60);
+  if (!fbOpen) return;
+
+  if (!fbGreeted) {
+    fbGreeted = true;
+    fbIncludeTicket = true;
+    const who = (currentUser() || '').trim();
+    fbPush('bot', `${who ? who + ' - ' : ''}something broken, missing, or worth changing? It goes straight to the platform team.`);
   }
+  fbRenderCats();
+  fbRenderChips();
+  fbRenderContext();
+  // A draft survives the bubble being closed by accident, which is otherwise
+  // the one way to lose a half-written report.
+  const box = document.getElementById('fb-message');
+  if (box && !box.value) {
+    try { box.value = localStorage.getItem(FB_DRAFT_KEY) || ''; } catch (_) {}
+    fbUpdateCount();
+    fbGrow();
+  }
+  setTimeout(() => document.getElementById('fb-message')?.focus(), 60);
 }
 
-function fbRenderLog(){
+/* The ticket card, drawn wherever it is needed - in the log as the bot showing
+   what it found, and above the composer as the thing that can be switched off. */
+function fbTicketCardHtml(ticket, { toggle } = {}) {
+  if (!ticket) return '';
+  const stage = ticket.stage ? esc(String(ticket.stage).toUpperCase()) : '';
+  return `<div class="fb-tcard${fbIncludeTicket ? '' : ' off'}">
+    <span class="fb-tcard-mark">&#127915;</span>
+    <span class="fb-tcard-body">
+      <span class="fb-tcard-num">${esc(ticket.label)}</span>
+      ${ticket.subject ? `<span class="fb-tcard-subj">${esc(ticket.subject)}</span>` : ''}
+      <span class="fb-tcard-meta">${fbIncludeTicket ? 'travels with this report' : 'left out'}${stage ? ' &middot; ' + stage : ''}</span>
+    </span>
+    ${toggle ? `<button class="fb-tcard-off" type="button" id="fb-tcard-toggle" title="${fbIncludeTicket ? 'Leave this ticket out' : 'Include this ticket'}">${fbIncludeTicket ? '&times;' : '&#43;'}</button>` : ''}
+  </div>`;
+}
+
+function fbRenderLog() {
   const box = document.getElementById('fb-log');
-  if(!box) return;
-  box.innerHTML = fbLog.map(m =>
-    `<div class="fb-msg fb-${m.role}${m.tone?' fb-'+m.tone:''}">${esc(m.text)}</div>`
-  ).join('') + (fbSending?'<div class="fb-msg fb-bot fb-typing"><span></span><span></span><span></span></div>':'');
+  if (!box) return;
+  box.innerHTML = fbLog.map(m => {
+    const inner = m.card
+      ? fbTicketCardHtml(m.card)
+      : `<div class="fb-msg fb-${m.role}${m.tone ? ' fb-' + m.tone : ''}">${esc(m.text)}</div>`;
+    return `<div class="fb-row fb-row-${m.role}">`
+      + (m.role === 'bot' ? '<span class="fb-row-icon">&#9881;</span>' : '')
+      + `<div class="fb-stack">${inner}`
+      + `<div class="fb-stamp">${esc(fbClock(m.at))}${m.role === 'me' && m.delivered ? ' <span class="fb-tick">&#10003;&#10003;</span>' : ''}</div>`
+      + '</div></div>';
+  }).join('')
+    + (fbTyping ? '<div class="fb-row fb-row-bot"><span class="fb-row-icon">&#9881;</span><div class="fb-stack"><div class="fb-msg fb-bot fb-typing"><span></span><span></span><span></span></div></div></div>' : '');
   box.scrollTop = box.scrollHeight;
 }
 
-function fbRenderCats(){
+function fbRenderCats() {
   const box = document.getElementById('fb-cats');
-  if(!box) return;
-  box.innerHTML = Object.entries(FB_CATEGORY_LABEL).map(([key,label]) =>
-    `<button class="fb-cat${fbCategory===key?' active':''}" type="button" data-fb-cat="${key}" aria-pressed="${fbCategory===key}">${esc(label)}</button>`
+  if (!box) return;
+  box.innerHTML = Object.entries(FB_CATEGORY_LABEL).map(([key, label]) =>
+    `<button class="fb-cat${fbCategory === key ? ' active' : ''}${fbCategory === key && fbAutoCategory ? ' auto' : ''}" type="button" data-fb-cat="${key}" aria-pressed="${fbCategory === key}">${esc(label)}</button>`
   ).join('');
-  box.querySelectorAll('[data-fb-cat]').forEach(b=>b.addEventListener('click',()=>{
-    fbCategory=b.dataset.fbCat;
+  box.querySelectorAll('[data-fb-cat]').forEach(b => b.addEventListener('click', async () => {
+    const next = b.dataset.fbCat;
+    const changed = next !== fbCategory;
+    fbCategory = next;
+    // Chosen by hand from here on, so the guesser stops overriding it.
+    fbAutoCategory = false;
+    fbCategoryChosen = true;
     fbRenderCats();
+    fbRenderChips();
+    if (changed && fbGreeted) await fbSay(FB_ASKS[fbCategory] || FB_ASKS.other, '', 260);
     document.getElementById('fb-message')?.focus();
   }));
 }
 
-function fbRenderContext(){
-  const box = document.getElementById('fb-context');
-  if(!box) return;
-  const c = fbContext();
-  const ticket = c.ticketId ? ` · ${esc(ticketDisplayNumber(c.ticketId)||c.ticketId)}` : '';
-  // One quiet line rather than a panel. It is reassurance, not content: the
-  // reporter should know their screen and build travel with the report without
-  // having to read a table about it.
-  box.textContent = `Sent with: ${currentUser()} · ${c.view}${ticket} · build ${c.build} · ${c.viewport}`;
+/* The strip above the composer: the ticket card when there is one, then a few
+   openers. Both are things the reporter can act on with one tap before they
+   start typing. */
+function fbRenderChips() {
+  const box = document.getElementById('fb-chips');
+  if (!box) return;
+  const ticket = fbTicketNow();
+  const openers = (FB_OPENERS[fbCategory] || [])
+    .map((text, i) => `<button class="fb-chip fb-chip-open" type="button" data-fb-open="${i}">${esc(text)}</button>`)
+    .join('');
+  box.innerHTML = (ticket ? fbTicketCardHtml(ticket, { toggle: true }) : '')
+    + (openers ? `<div class="fb-chips" style="padding:8px 0 0;">${openers}</div>` : '');
+
+  box.querySelector('#fb-tcard-toggle')?.addEventListener('click', () => {
+    fbIncludeTicket = !fbIncludeTicket;
+    fbRenderChips();
+    fbRenderContext();
+  });
+  box.querySelectorAll('[data-fb-open]').forEach(b => b.addEventListener('click', () => {
+    const msg = document.getElementById('fb-message');
+    if (!msg) return;
+    const opener = (FB_OPENERS[fbCategory] || [])[Number(b.dataset.fbOpen)] || '';
+    // Prefills only an empty box: clobbering something already typed to save
+    // somebody four words would be a bad trade.
+    msg.value = msg.value.trim() ? msg.value : opener.replace(/…$/, ' ');
+    msg.focus();
+    msg.setSelectionRange(msg.value.length, msg.value.length);
+    fbUpdateCount();
+    fbGrow();
+    fbSaveDraft();
+  }));
 }
 
-async function fbSubmit(){
-  if(fbSending) return;
+/* What actually goes, in the order it goes. This used to advertise the build
+   and the viewport, which are no longer collected - so it would have been a
+   line of reassurance about something untrue. */
+function fbRenderContext() {
+  const box = document.getElementById('fb-context');
+  if (!box) return;
+  const ticket = fbIncludeTicket ? fbTicketNow() : null;
+  box.textContent = `Sends: you, your email${ticket ? ', ' + ticket.label : ''}, the time`;
+}
+
+// The composer grows with the report rather than making somebody scroll a
+// two-line box to re-read their own sentence.
+function fbGrow() {
   const box = document.getElementById('fb-message');
-  const message = String(box?.value || '').trim();
-  if(!message){ box?.focus(); return; }
-  if(message.length > FB_MAX){
-    fbPush('bot',`That is ${message.length - FB_MAX} characters too long to send.`,'bad');
-    return;
+  if (!box) return;
+  box.style.height = 'auto';
+  box.style.height = Math.min(132, Math.max(40, box.scrollHeight)) + 'px';
+}
+
+/* Files staged for the next report. Same helpers as the manual-ticket form:
+   images are downscaled in the browser, so the screenshot of an error dialog
+   that started as six megabytes arrives as a few hundred KB. */
+let fbFiles = [];
+
+function fbRenderFiles() {
+  const box = document.getElementById('fb-files');
+  const clip = document.getElementById('fb-clip');
+  if (clip) clip.classList.toggle('has', fbFiles.length > 0);
+  if (!box) return;
+  box.innerHTML = fbFiles.map(f => `<div class="fb-file">
+    ${f.previewUrl
+      ? `<img class="fb-file-thumb" src="${esc(f.previewUrl)}" alt="${esc(f.name)}">`
+      : `<span class="fb-file-ext">${esc(atExtLabel(f.name, f.type))}</span>`}
+    <span class="fb-file-meta">
+      <span class="fb-file-name" title="${esc(f.name)}">${esc(f.name)}</span>
+      <span class="fb-file-size">${atFmtSize(f.size)}</span>
+    </span>
+    <button class="fb-file-x" type="button" data-fb-drop="${esc(f.key)}" title="Remove" aria-label="Remove ${esc(f.name)}">&times;</button>
+  </div>`).join('');
+  box.querySelectorAll('[data-fb-drop]').forEach(b => b.addEventListener('click', () => {
+    const gone = fbFiles.find(f => f.key === b.dataset.fbDrop);
+    if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+    fbFiles = fbFiles.filter(f => f.key !== b.dataset.fbDrop);
+    fbRenderFiles();
+    fbUpdateCount();
+  }));
+}
+
+async function fbStageFiles(fileList) {
+  const incoming = Array.from(fileList || []);
+  if (!incoming.length) return;
+  const refused = [];
+  for (const file of incoming) {
+    if (fbFiles.length >= AT_MAX_FILES) { refused.push(`Only ${AT_MAX_FILES} files can go with one report.`); break; }
+    const type = String(file.type || '').toLowerCase().split(';')[0];
+    if (!AT_OK_TYPES.has(type)) { refused.push(`${file.name || 'That file'} is a ${type || 'unknown'} file and cannot be attached.`); continue; }
+    const shrunk = await atShrinkImage(file);
+    const blob = shrunk?.blob || file;
+    if (blob.size > AT_MAX_BYTES) { refused.push(`${file.name} is ${atFmtSize(blob.size)}; the limit is ${atFmtSize(AT_MAX_BYTES)}.`); continue; }
+    const stamped = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+    fbFiles.push({
+      key: 'fb' + Date.now() + Math.random().toString(36).slice(2, 7),
+      name: file.name && file.name !== 'image.png' ? file.name : `screenshot-${stamped}.png`,
+      type, size: blob.size, blob,
+      previewUrl: type.startsWith('image/') ? URL.createObjectURL(blob) : '',
+      width: shrunk?.width || null, height: shrunk?.height || null
+    });
+  }
+  fbRenderFiles();
+  fbUpdateCount();
+  if (refused.length) await fbSay(refused.join(' '), 'warn', 200);
+  else if (fbFiles.length) await fbSay(`Got ${fbFiles.length} file${fbFiles.length === 1 ? '' : 's'} - they go with the report when you send it.`, '', 260);
+}
+
+function fbClearFiles() {
+  fbFiles.forEach(f => { if (f.previewUrl) URL.revokeObjectURL(f.previewUrl); });
+  fbFiles = [];
+  const input = document.getElementById('fb-file-input');
+  if (input) input.value = '';
+  fbRenderFiles();
+}
+
+function fbSaveDraft() {
+  const box = document.getElementById('fb-message');
+  if (!box) return;
+  try {
+    if (box.value.trim()) localStorage.setItem(FB_DRAFT_KEY, box.value);
+    else localStorage.removeItem(FB_DRAFT_KEY);
+  } catch (_) {}
+}
+
+/* Runs as the report is typed: picks the kind, and notices a ticket number in
+   the text. Both are announced once rather than silently, because a board that
+   changes your answers without saying so is worse than one that asks. */
+async function fbOnType() {
+  fbUpdateCount();
+  fbGrow();
+  fbSaveDraft();
+  const text = String(document.getElementById('fb-message')?.value || '');
+
+  const guess = fbGuessCategory(text);
+  // Only ever moves off a category the reporter has not chosen by hand: 'bug'
+  // is the untouched default, and a previous guess may be replaced by a better
+  // one as the sentence grows.
+  if (guess && guess !== fbCategory && !fbCategoryChosen) {
+    const first = !fbAutoCategory;
+    fbCategory = guess;
+    fbAutoCategory = true;
+    fbRenderCats();
+    fbRenderChips();
+    if (first) fbSay(`Filing this as a ${FB_CATEGORY_LABEL[guess]} - tap another if that is wrong.`, '', 260);
   }
 
-  fbPush('me', message);
-  if(box) box.value = '';
+  const named = fbTicketFromText(text);
+  if (named && named.id !== fbPinnedTicket?.id) {
+    fbPinnedTicket = named;
+    fbIncludeTicket = true;
+    fbRenderChips();
+    fbRenderContext();
+    await fbSay(`You mentioned ${named.label}, so I will send that one.`, '', 300);
+    fbLog.push({ role: 'bot', card: named, at: Date.now() });
+    fbRenderLog();
+  }
+}
+
+async function fbSubmit() {
+  if (fbSending) return;
+  const box = document.getElementById('fb-message');
+  const message = String(box?.value || '').trim();
+  if (!message) { box?.focus(); return; }
+  if (message.length > FB_MAX) {
+    await fbSay(`That is ${message.length - FB_MAX} characters too long to send.`, 'bad', 200);
+    return;
+  }
+  /* Two words is not a report. Rather than send it and let somebody on the
+     other end guess, the bot asks once - and if they send it again anyway it
+     goes, because it is their report and they may have a reason. */
+  if (message.length < 15 && !fbAwaitingDetail) {
+    fbAwaitingDetail = true;
+    fbPush('me', message);
+    if (box) box.value = message + ' ';
+    fbUpdateCount();
+    fbGrow();
+    await fbSay(FB_ASKS[fbCategory] || FB_ASKS.other, '', 340);
+    await fbSay('Add a line and send again - or send as-is and I will pass it on.', '', 500);
+    box?.focus();
+    return;
+  }
+  fbAwaitingDetail = false;
+
+  const ticket = fbIncludeTicket ? fbTicketNow() : null;
+  // Encoded before the request so a failure here is reported as a failure to
+  // attach rather than a failure to send.
+  const staged = fbFiles.slice();
+  let sending = [];
+  try {
+    for (const f of staged) {
+      sending.push({ name: f.name, type: f.type, width: f.width, height: f.height, data: await atBlobToBase64(f.blob) });
+    }
+  } catch (error) {
+    await fbSay(`Could not read the attachment: ${String(error?.message || error)}`, 'bad', 200);
+    return;
+  }
+  fbPush('me', message + (staged.length ? `\n\n(${staged.length} attachment${staged.length === 1 ? '' : 's'})` : ''));
+  const mine = fbLog[fbLog.length - 1];
+  if (box) box.value = '';
   fbUpdateCount();
+  fbGrow();
+  fbSaveDraft();
   fbSending = true;
+  fbTyping = true;
   fbRenderLog();
   const send = document.getElementById('fb-send');
-  if(send) send.disabled = true;
+  if (send) send.disabled = true;
 
-  try{
-    const res = await fetch('/api/feedback',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      credentials:'include',
-      body: JSON.stringify({ category: fbCategory, message, context: fbContext() })
+  try {
+    const res = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ category: fbCategory, message, context: fbContext(), files: sending })
     });
-    const out = await res.json().catch(()=>({}));
+    const out = await res.json().catch(() => ({}));
     fbSending = false;
+    fbTyping = false;
 
-    if(!res.ok || !out?.ok){
+    if (!res.ok || !out?.ok) {
       const code = String(out?.error || '');
-      if(res.status === 429) fbPush('bot','A few reports have just gone out - give it a minute and send that again.','warn');
-      else if(code === 'feedback_too_long') fbPush('bot','That report is too long to send.','warn');
-      else fbPush('bot',`That could not be sent: ${out?.detail || code || res.status}`,'bad');
+      if (res.status === 429) await fbSay('A few reports have just gone out - give it a minute and send that again.', 'warn', 200);
+      else if (code === 'feedback_too_long') await fbSay('That report is too long to send.', 'warn', 200);
+      else await fbSay(`That could not be sent: ${out?.detail || code || res.status}`, 'bad', 200);
       return;
     }
 
-    /* Which leg actually delivered it. Named rather than smoothed over: with
-       Outlook down and a Teams webhook set, "sent" alone would leave someone
-       wondering where it went - and when neither works, the reporter has to
-       know their words did not reach anyone. */
-    if(out.notified && out.emailed) fbPush('bot','Sent - posted to Teams and emailed to the platform team.','ok');
-    else if(out.notified) fbPush('bot','Sent - posted to the platform team on Teams.','ok');
-    else if(out.emailed) fbPush('bot','Sent - emailed to the platform team.','ok');
-    else if(out.stored) fbPush('bot','Written down, but it could not be delivered yet. It is saved and someone will see it.','warn');
-    else fbPush('bot','That could not be sent or saved. Please tell someone directly.','bad');
-  }catch(err){
+    // Delivered by either leg is delivered. The tick goes on the reporter's own
+    // message, where an eye looking for confirmation already is.
+    if (mine) mine.delivered = true;
+
+    if (out.notified || out.emailed) await fbSay('Feedback sent - the platform team has it.', 'ok', 260);
+    else if (out.stored) { await fbSay('Written down, but it could not be delivered yet. It is saved and someone will see it.', 'warn', 260); return; }
+    else { await fbSay('That could not be sent or saved. Please tell someone directly.', 'bad', 260); return; }
+
+    // Exactly what left the building, so nobody has to wonder afterwards what
+    // was attached to their name.
+    await fbSay(`They got: you, your email${ticket ? ', ' + ticket.label : ''}, the time, what you wrote${staged.length ? `, and ${staged.length} file${staged.length === 1 ? '' : 's'}` : ''}.`, '', 420);
+    fbClearFiles();
+    // A fresh report starts clean: the guessed category and a ticket named in
+    // the last message should not leak into the next one.
+    fbPinnedTicket = null;
+    fbAutoCategory = false;
+    fbCategoryChosen = false;
+    fbRenderChips();
+    fbRenderContext();
+  } catch (err) {
     fbSending = false;
-    fbPush('bot',`That could not be sent: ${String(err?.message||err)}`,'bad');
-  }finally{
+    fbTyping = false;
+    await fbSay(`That could not be sent: ${String(err?.message || err)}`, 'bad', 200);
+  } finally {
     fbSending = false;
-    if(send) send.disabled = false;
+    fbTyping = false;
+    if (send) send.disabled = false;
     fbRenderLog();
     document.getElementById('fb-message')?.focus();
   }
 }
 
-function fbUpdateCount(){
+function fbUpdateCount() {
   const box = document.getElementById('fb-message');
   const out = document.getElementById('fb-count');
-  if(!box||!out) return;
+  const send = document.getElementById('fb-send');
+  if (!box || !out) return;
   const left = FB_MAX - box.value.length;
   out.textContent = left < 200 ? `${left} left` : '';
   out.classList.toggle('over', left < 0);
+  // Nothing to send, or too much of it: the button says so rather than waiting
+  // to be pressed and then refusing.
+  if (send && !fbSending) send.disabled = (!box.value.trim() && !fbFiles.length) || left < 0;
 }
 
 async function sendFeedbackTest(){
@@ -14393,17 +16178,21 @@ async function sendFeedbackTest(){
     const res = await fetch('/api/feedback/test',{ method:'POST', credentials:'include' });
     const out = await res.json().catch(()=>({}));
     if(res.status === 403){ showToast('Only admins can send a delivery test','warn'); return; }
-    const bits = [];
-    const emailTo = Array.isArray(out.emailTo) ? out.emailTo.join(', ') : (out.emailTo || 'nobody');
-    bits.push(out.emailed ? `email to ${emailTo} sent` : `email failed (${out.emailError||'unknown'})`);
-    if(out.webhookConfigured) bits.push(out.notified ? 'Teams webhook posted' : `Teams failed (${out.webhookError||'unknown'})`);
-    else bits.push('no Teams webhook configured');
-    showToast(bits.join(' - '), out.emailed || out.notified ? 'ok' : 'warn');
-    // The full reason goes to the console as well: a Graph error is longer than
-    // a toast and is the thing worth pasting into a ticket.
-    if(out.emailError || out.webhookError) console.warn('[feedback test]', out);
+    /* Two outcomes, two words each. This used to read out both legs and quote
+       whatever Graph said, so a working deployment with no Mail.Send consent
+       announced a 403 across the screen every time somebody pressed Test -
+       true, and useless: the report had gone to Teams, which is the leg this
+       deployment actually delivers on. Delivered by either leg is sent.
+
+       The reason still exists, in the console, where a Graph error can be read
+       and pasted somewhere rather than skimmed as it slides away. */
+    const delivered = out.emailed || out.notified;
+    showToast(delivered ? 'Feedback sent' : 'Feedback failed to send', delivered ? 'ok' : 'warn');
+    if(!delivered || out.emailError || out.webhookError) console.warn('[feedback test]', out);
   }catch(err){
-    showToast(`Delivery test failed: ${String(err?.message||err)}`,'warn');
+    // Same two words for a network failure; the detail goes to the console.
+    showToast('Feedback failed to send','warn');
+    console.warn('[feedback test]', err);
   }finally{
     btn.disabled = false;
     btn.textContent = label;
@@ -14415,7 +16204,21 @@ document.getElementById('fb-launcher')?.addEventListener('click', ()=>fbToggleCh
 document.getElementById('fb-close')?.addEventListener('click', ()=>fbToggleChat(false));
 document.getElementById('fb-test')?.addEventListener('click', sendFeedbackTest);
 document.getElementById('fb-send')?.addEventListener('click', fbSubmit);
-document.getElementById('fb-message')?.addEventListener('input', fbUpdateCount);
+document.getElementById('fb-message')?.addEventListener('input', fbOnType);
+document.getElementById('fb-clip')?.addEventListener('click', () => document.getElementById('fb-file-input')?.click());
+document.getElementById('fb-file-input')?.addEventListener('change', e => {
+  fbStageFiles(e.target.files);
+  e.target.value = '';
+});
+// Bound to the panel rather than the clip: nobody clicks a paperclip before
+// pressing Ctrl+V, and a paste of text still goes into the box untouched.
+document.getElementById('fb-chat')?.addEventListener('paste', e => {
+  const files = Array.from(e.clipboardData?.items || [])
+    .filter(i => i.kind === 'file').map(i => i.getAsFile()).filter(Boolean);
+  if (!files.length) return;
+  e.preventDefault();
+  fbStageFiles(files);
+});
 fbRenderCats();
 /* Enter sends, Shift+Enter is a new line - the way a chat box behaves. The
    reply composer keeps Ctrl+Enter because a client reply is long and being
@@ -14628,6 +16431,7 @@ async function openEmailModal(ticket){
     document.getElementById('email-modal').classList.add('open');
     trAutoTranslateBody(id);
     emCopyEmail({auto:true});
+    atShowForTicket(id);
     return;
   }
   document.getElementById('email-modal').classList.add('open');

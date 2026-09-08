@@ -5434,85 +5434,105 @@ async function ensureProjectTable() {
   await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProject_sourceUserId_idx" ON "ClaudeProject"("sourceUserId")`;
 }
 
-/* The projects already in use, with the inputs each one asks for in its own
-   description. Seeded once, on an empty table, so the panel opens with the real
-   catalogue rather than a blank page and an "add your first project" prompt.
-   Instructions are left empty on purpose - only the people who wrote each
-   project can supply those, and a guessed system prompt would be worse than an
-   honest gap. Until one is filled in, the project says so and cannot be run. */
-const PROJECT_SEED = [
-  {
-    slug: 'q-seo-implementation', name: 'Q-SEO Implementation', scope: 'org', owner: 'you', accent: 'indigo', pinned: true,
-    description: 'Implementation steps for Q-SEO on a hotel site, for the stack the site actually runs on.',
-    inputs: [
-      { key: 'websiteUrl', label: 'Website URL', type: 'url', required: true, placeholder: 'https://hotel.example' },
-      { key: 'accountId', label: 'Quinta account ID', type: 'text', required: true },
-      { key: 'licenseKey', label: 'License key', type: 'text', required: true },
-      { key: 'serverLanguage', label: 'Server language', type: 'select', required: true, options: ['Node.js', 'Python', 'PHP'] }
-    ]
-  },
-  {
-    slug: 'q-share-mapping', name: 'Q-Share Mapping', scope: 'org', owner: 'you', accent: 'teal', pinned: true,
-    description: 'Q-Share mapping files for hotel webmasters, from a website URL and a teamId.',
-    inputs: [
-      { key: 'websiteUrl', label: 'Website URL', type: 'url', required: true, placeholder: 'https://hotel.example' },
-      { key: 'teamId', label: 'Team ID', type: 'text', required: true, placeholder: '401' }
-    ]
-  },
-  {
-    slug: 'global-check-agent', name: 'Global Check Agent V0.3', scope: 'org', owner: 'JAT Quinta', accent: 'amber',
-    description: 'Full check for one hotel. The name must match the one on the Dashboard exactly.',
-    inputs: [
-      { key: 'hotelName', label: 'Hotel name', type: 'text', required: true, help: 'Must match the name on the Dashboard.' },
-      { key: 'qtId', label: 'QT ID', type: 'text', required: true },
-      { key: 'officialUrl', label: "Hotel's official URL", type: 'url', required: true }
-    ]
-  },
-  {
-    slug: 'q-sync-check', name: 'Q-sync Check', scope: 'org', owner: 'Vincent', accent: 'violet',
-    description: 'Confirms Q-data is set correctly before Q-Sync is launched. Takes one or more hotel IDs.',
-    inputs: [
-      { key: 'hotelIds', label: 'Hotel IDs', type: 'textarea', required: true, placeholder: '401\n252\n19919', help: 'One per line, or comma separated.' }
-    ]
-  },
-  {
-    slug: 'b-signature-mcp', name: 'B Signature MCP', scope: 'mine', owner: 'you', accent: 'rose',
-    description: 'Q-MCP assistant for the six B Signature properties.',
-    inputs: [
-      { key: 'question', label: 'What do you need?', type: 'textarea', required: true, placeholder: 'Ask about any of the six B Signature properties…' }
-    ]
-  },
-  {
-    slug: 'quinta-onboarding-agent', name: 'Quinta Onboarding Agent V2', scope: 'org', owner: 'Quinta', accent: 'emerald',
-    description: 'Walks a new property through onboarding.',
-    inputs: [
-      { key: 'hotelName', label: 'Hotel name', type: 'text', required: true },
-      { key: 'notes', label: 'Anything specific to this onboarding', type: 'textarea', required: false }
-    ]
-  },
-  {
-    slug: 'qa-audit-conversation', name: 'QA AUDIT - Check Conversation', scope: 'org', owner: 'Quinta', accent: 'slate',
-    description: 'Audits a bot conversation for quality issues.',
-    inputs: [
-      { key: 'conversation', label: 'Conversation', type: 'textarea', required: true, placeholder: 'Paste the conversation transcript…' },
-      { key: 'hotelName', label: 'Hotel', type: 'text', required: false }
-    ]
-  }
-];
+/* The catalogue starts empty on purpose.
+   It used to be seeded with the seven projects the team was already running,
+   so the panel opened with something in it. Those rows carried no instructions
+   - nobody but the project's author can supply those - so they could never be
+   run, and an empty table refilled itself the moment it was cleared.
+   Claude fills the catalogue instead, from its own end: register_project over
+   the MCP connector, which reads a project's real instructions out of the
+   conversation running inside it, or a Compliance API sync where the org has a
+   key for it. Either route arrives runnable; a placeholder never did. */
 
-async function seedProjectsIfEmpty() {
-  await ensureProjectTable();
-  const rows = await prisma.$queryRaw`SELECT count(*)::int AS n FROM "ClaudeProject"`;
-  if ((Array.isArray(rows) ? rows[0]?.n : 0) > 0) return 0;
-  for (const p of PROJECT_SEED) {
-    await prisma.$executeRaw`
-      INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","pinned","createdBy","updatedAt")
-      VALUES (${p.slug}, ${p.name}, ${p.description || ''}, ${p.scope}, ${p.owner || ''}, ${''},
-              ${JSON.stringify(p.inputs || [])}::jsonb, ${p.accent || 'slate'}, ${!!p.pinned}, ${'seed'}, CURRENT_TIMESTAMP)
-      ON CONFLICT ("slug") DO NOTHING
-    `;
+/* Results, kept.
+   A project thread in the panel lives in the browser and dies with the tab,
+   which is right for a working session and wrong for the thing the team
+   actually wants to keep: the answer. So a finished run is written here.
+   Two things write to it. The board writes what it ran itself, when a key is
+   set. Claude writes what IT ran, over post_project_run on the connector -
+   which is the only route that works on a deployment with no
+   ANTHROPIC_API_KEY, because the model call happens on Claude's side and only
+   the text comes back. Same table, same panel, a badge saying which. */
+const PROJECT_RUN_KEEP = Math.min(100, Math.max(5, Number(process.env.PROJECT_RUN_KEEP || 20)));
+const PROJECT_RUN_MAX_CHARS = 200_000;
+
+async function ensureProjectRunTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "ClaudeProjectRun" (
+      "id" SERIAL PRIMARY KEY,
+      "projectId" INTEGER NOT NULL,
+      "source" TEXT NOT NULL DEFAULT 'board',
+      "title" TEXT NOT NULL DEFAULT '',
+      "inputs" JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "output" TEXT NOT NULL DEFAULT '',
+      "model" TEXT NOT NULL DEFAULT '',
+      "ms" INTEGER,
+      "inputTokens" INTEGER,
+      "outputTokens" INTEGER,
+      "createdBy" TEXT NOT NULL DEFAULT '',
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProjectRun_projectId_idx" ON "ClaudeProjectRun"("projectId","createdAt" DESC)`;
+}
+
+// The inputs a run was given, flattened to label/value pairs so the panel can
+// show what was asked without needing the project's field list beside it.
+function projectRunInputPairs(project, values) {
+  const fields = Array.isArray(project?.inputs) ? project.inputs : [];
+  const supplied = (values && typeof values === 'object' && !Array.isArray(values)) ? values : {};
+  if (fields.length) {
+    return fields
+      .map(f => ({ label: String(f.label || f.key), value: String(supplied[f.key] ?? '').trim() }))
+      .filter(pair => pair.value)
+      .map(pair => ({ label: pair.label.slice(0, 120), value: pair.value.slice(0, 400) }));
   }
-  return PROJECT_SEED.length;
+  return Object.entries(supplied)
+    .filter(([, v]) => String(v ?? '').trim())
+    .slice(0, 20)
+    .map(([k, v]) => ({ label: String(k).slice(0, 120), value: String(v).trim().slice(0, 400) }));
+}
+
+async function saveProjectRun(entry) {
+  const output = String(entry?.output || '').slice(0, PROJECT_RUN_MAX_CHARS);
+  if (!output.trim()) return null;
+  await ensureProjectRunTable();
+  const rows = await prisma.$queryRaw`
+    INSERT INTO "ClaudeProjectRun" ("projectId","source","title","inputs","output","model","ms","inputTokens","outputTokens","createdBy")
+    VALUES (${Number(entry.projectId)}, ${entry.source === 'claude' ? 'claude' : 'board'}, ${String(entry.title || '').slice(0, 200)},
+            ${JSON.stringify(entry.inputs || [])}::jsonb, ${output}, ${String(entry.model || '').slice(0, 80)},
+            ${entry.ms == null ? null : Number(entry.ms)}, ${entry.inputTokens == null ? null : Number(entry.inputTokens)},
+            ${entry.outputTokens == null ? null : Number(entry.outputTokens)}, ${String(entry.createdBy || '').slice(0, 120)})
+    RETURNING "id"
+  `;
+  // Only the last few runs of a project are worth keeping; the panel shows a
+  // history, not an archive, and the output column is large.
+  await prisma.$executeRaw`
+    DELETE FROM "ClaudeProjectRun"
+    WHERE "projectId" = ${Number(entry.projectId)}
+      AND "id" NOT IN (
+        SELECT "id" FROM "ClaudeProjectRun"
+        WHERE "projectId" = ${Number(entry.projectId)}
+        ORDER BY "createdAt" DESC, "id" DESC
+        LIMIT ${PROJECT_RUN_KEEP}
+      )
+  `;
+  return Array.isArray(rows) ? rows[0]?.id ?? null : null;
+}
+
+function projectRunRow(row) {
+  return {
+    id: row.id,
+    source: row.source === 'claude' ? 'claude' : 'board',
+    title: row.title || '',
+    inputs: Array.isArray(row.inputs) ? row.inputs : [],
+    output: row.output || '',
+    model: row.model || '',
+    ms: row.ms == null ? null : Number(row.ms),
+    usage: { inputTokens: row.inputTokens ?? null, outputTokens: row.outputTokens ?? null },
+    createdBy: row.createdBy || '',
+    createdAt: row.createdAt
+  };
 }
 
 function normalizeProjectInputs(raw) {
@@ -5794,8 +5814,14 @@ function projectRow(row, { includeInstructions = false } = {}) {
     accent: row.accent || 'slate',
     pinned: !!row.pinned,
     source: row.source || 'manual',
+    // Whether the project came from Claude at all - synced over the Compliance
+    // API, or pushed in by register_project, which writes createdBy 'mcp:'.
+    // The panel shows only these.
+    fromClaude: row.source === 'claude' || String(row.createdBy || '').startsWith('mcp:'),
     sourceUserEmail: row.sourceUserEmail || '',
     syncedAt: row.syncedAt || null,
+    runCount: Number(row.runCount || 0),
+    lastRunAt: row.lastRunAt || null,
     // Whether the project can actually be run yet. An empty instruction set is
     // the normal state for a freshly seeded project, not an error.
     ready: !!String(row.instructions || '').trim(),
@@ -5806,8 +5832,18 @@ function projectRow(row, { includeInstructions = false } = {}) {
 
 app.get('/api/projects', requireAuth, async (req, res) => {
   try {
-    await seedProjectsIfEmpty();
-    const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" ORDER BY "pinned" DESC, "updatedAt" DESC`;
+    await ensureProjectTable();
+    await ensureProjectRunTable();
+    // The card shows whether a project has ever produced anything, so the
+    // counts are joined here rather than fetched per card on open.
+    const rows = await prisma.$queryRaw`
+      SELECT p.*, COALESCE(r."n", 0)::int AS "runCount", r."last" AS "lastRunAt"
+      FROM "ClaudeProject" p
+      LEFT JOIN (
+        SELECT "projectId", count(*)::int AS "n", max("createdAt") AS "last"
+        FROM "ClaudeProjectRun" GROUP BY "projectId"
+      ) r ON r."projectId" = p."id"
+      ORDER BY p."pinned" DESC, p."updatedAt" DESC`;
     const isAdmin = isAdminRole(req.session.role);
     const list = (Array.isArray(rows) ? rows : []).map(r => projectRow(r, { includeInstructions: isAdmin }));
     const claudeTokens = await getClaudeConnectionForRequest(req);
@@ -6095,11 +6131,48 @@ async function handleProjectRun(req, res, { withHistory }) {
       ...history.turns
     ]);
     const result = projectRunResponse(message, project, started);
+    // Persisted after the response is built but before it is sent, so a stored
+    // run and the one on screen cannot disagree. A failure to store is logged
+    // and swallowed: losing the history entry is not worth losing the answer.
+    if (result.body?.ok && result.body.text) {
+      try {
+        await saveProjectRun({
+          projectId: project.id,
+          source: 'board',
+          title: withHistory ? 'Follow-up' : 'Run',
+          inputs: projectRunInputPairs(project, req.body?.values),
+          output: result.body.text,
+          model: String(project.model || PROJECT_MODEL),
+          ms: result.body.ms,
+          inputTokens: result.body.usage?.inputTokens,
+          outputTokens: result.body.usage?.outputTokens,
+          createdBy: req.session?.username || ''
+        });
+      } catch (storeError) {
+        console.error('Project run not stored:', storeError?.message || storeError);
+      }
+    }
     return res.status(result.status).json(result.body);
   } catch (error) {
     return projectRunError(error, res);
   }
 }
+
+app.get('/api/projects/:id/runs', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    await ensureProjectRunTable();
+    const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), PROJECT_RUN_KEEP);
+    const rows = await prisma.$queryRaw`
+      SELECT * FROM "ClaudeProjectRun" WHERE "projectId" = ${id}
+      ORDER BY "createdAt" DESC, "id" DESC LIMIT ${limit}`;
+    return res.json({ ok: true, rows: (Array.isArray(rows) ? rows : []).map(projectRunRow) });
+  } catch (error) {
+    console.error('Project run history failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_runs_failed' });
+  }
+});
 
 app.post('/api/projects/:id/run', requireAuth, projectRunLimiter, async (req, res) => {
   return handleProjectRun(req, res, { withHistory: false });
@@ -6834,12 +6907,16 @@ async function mcpRegisterProject(apiUser, args) {
   const instructions = String(args?.instructions || '');
 
   await prisma.$executeRaw`
-    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","createdBy","updatedAt")
+    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","createdBy","updatedAt","source","syncedAt")
     VALUES (${slug}, ${name}, ${String(args?.description || '').slice(0, 600)}, ${scope}, ${String(args?.owner || '').slice(0, 80)},
-            ${instructions}, ${JSON.stringify(inputs)}::jsonb, ${String(args?.accent || 'slate')}, ${'mcp:' + (apiUser?.username || '')}, CURRENT_TIMESTAMP)
+            ${instructions}, ${JSON.stringify(inputs)}::jsonb, ${String(args?.accent || 'slate')}, ${'mcp:' + (apiUser?.username || '')}, CURRENT_TIMESTAMP,
+            'claude', CURRENT_TIMESTAMP)
     ON CONFLICT ("slug") DO UPDATE SET
       "name" = EXCLUDED."name", "description" = EXCLUDED."description", "scope" = EXCLUDED."scope",
       "owner" = EXCLUDED."owner", "inputs" = EXCLUDED."inputs", "accent" = EXCLUDED."accent",
+      -- Pushed over the connector IS from Claude. Without this the row landed
+      -- as 'manual', which is what the panel now filters out.
+      "source" = 'claude', "syncedAt" = CURRENT_TIMESTAMP,
       -- An empty instructions field means "leave what is there", so a partial
       -- re-register cannot wipe a project that was already set up properly.
       "instructions" = CASE WHEN ${instructions} = '' THEN "ClaudeProject"."instructions" ELSE ${instructions} END,
@@ -6872,6 +6949,64 @@ async function mcpListBoardProjects() {
     inputs: (r.inputs || []).map(f => ({ key: f.key, label: f.label, type: f.type, required: !!f.required })),
     ready: !!String(r.instructions || '').trim()
   }));
+}
+
+// Claude ran the project on its own side and hands the answer over. This is
+// what makes the panel useful on a deployment with no ANTHROPIC_API_KEY: the
+// board never calls a model, it stores and renders what came back.
+//
+// Not admin-gated, unlike register_project. Registering changes what the board
+// offers; posting a result adds one, and every token here belongs to a member
+// of the team. The row records which token wrote it either way.
+async function mcpPostProjectRun(apiUser, args) {
+  const wanted = String(args?.project || '').trim();
+  if (!wanted) throw Object.assign(new Error('project_required'), { status: 400 });
+  const output = String(args?.output || '').trim();
+  if (!output) throw Object.assign(new Error('output_required: pass the result text as output'), { status: 400 });
+
+  await ensureProjectTable();
+  const slug = projectSlugFromName(wanted);
+  const rows = await prisma.$queryRaw`
+    SELECT "id","name","slug","inputs" FROM "ClaudeProject"
+    WHERE "slug" = ${slug} OR lower("name") = ${wanted.toLowerCase()} OR "slug" = ${wanted}
+    LIMIT 1`;
+  const project = Array.isArray(rows) ? rows[0] : null;
+  if (!project) {
+    const known = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" ORDER BY "name" LIMIT 25`;
+    const names = (Array.isArray(known) ? known : []).map(r => r.name).join(', ');
+    throw Object.assign(new Error(
+      `project_not_found: nothing on the board matches "${wanted}". ${names ? `On the board: ${names}.` : 'The board has no projects yet.'} Call register_project first.`
+    ), { status: 404 });
+  }
+
+  // inputs arrive either as the label/value pairs the panel shows, or as a
+  // plain object of field values, which is what a project's own form produces.
+  const raw = args?.inputs;
+  const pairs = Array.isArray(raw)
+    ? raw.map(p => ({ label: String(p?.label || p?.key || '').slice(0, 120), value: String(p?.value ?? '').trim().slice(0, 400) }))
+        .filter(p => p.label && p.value).slice(0, 20)
+    : projectRunInputPairs(project, raw);
+
+  const id = await saveProjectRun({
+    projectId: project.id,
+    source: 'claude',
+    title: String(args?.title || '').trim() || 'Run from Claude',
+    inputs: pairs,
+    output,
+    model: String(args?.model || '').trim(),
+    createdBy: 'mcp:' + (apiUser?.username || ''),
+    ms: null,
+    inputTokens: null,
+    outputTokens: null
+  });
+
+  return {
+    ok: true,
+    runId: id,
+    project: project.name,
+    stored: output.length,
+    status: `Result stored against "${project.name}". The team can read it in QT-Tools -> Projects, on that project's card under Results.`
+  };
 }
 
 async function mcpShiftHandover(hours) {
@@ -7347,6 +7482,27 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
     },
     async () => {
       try { return mcpTextResult(await mcpListBoardProjects()); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'post_project_run',
+    {
+      title: 'Put a result on the support board',
+      description: "Hand the board the result of running a project, so the team can read it in QT-Tools without opening Claude. Use this after you have run a registered project's work for someone: pass the project name and the finished answer as output. This is the route that works when the board has no ANTHROPIC_API_KEY of its own - you do the run, the board keeps and renders the answer. Markdown in output is rendered (headings, lists, tables, code). Register the project first with register_project if it is not on the board yet.",
+      inputSchema: {
+        project: z.string().min(1).describe('The project name or slug as it appears on the board. Check with list_board_projects.'),
+        output: z.string().min(1).describe('The finished result, verbatim. Markdown is rendered on the board.'),
+        title: z.string().optional().describe('A short label for this run, e.g. the hotel or URL it was about. Shown in the history list.'),
+        model: z.string().optional().describe('Which model produced it, if worth recording.'),
+        inputs: z.array(z.object({
+          label: z.string().describe('What was asked for, e.g. Website URL.'),
+          value: z.string().describe('What was supplied.')
+        })).optional().describe('The inputs this run was given, so the board can show what the answer was for.')
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpPostProjectRun(apiUser, args)); } catch (error) { return mcpErrorResult(error); }
     }
   );
 
@@ -8181,6 +8337,223 @@ async function fetchMessageImageAttachments(mailbox, msgId, req) {
 
 // One inline image, streamed from the mail store.
 //
+// ---------------------------------------------------------------------------
+// Ticket attachments
+//
+// A manual ticket is typed by an agent, and until now the only thing they
+// could hand over was prose. Half of what support actually needs is a
+// screenshot: the error dialog, the broken layout, the console. Describing a
+// screenshot in words is lossy work nobody should be doing.
+//
+// Keyed by the ticket's externalId, not by Ticket.id. A manual ticket is
+// created in the browser and lands in the board's state snapshot; its database
+// row appears later, or not at all. Hanging attachments off the external id
+// means an upload never has to wait for a row to exist.
+//
+// The bytes live in Postgres. It is the one store this deployment already has
+// - no bucket, no credentials, no PVC on a read-only root filesystem - and the
+// ceilings below are what keep that honest. Images are downscaled in the
+// browser before they are sent, so the common case is a few hundred KB rather
+// than the six megabytes a phone screenshot starts at.
+// ---------------------------------------------------------------------------
+const TICKET_ATTACH_MAX_FILES = 10;
+const TICKET_ATTACH_MAX_BYTES = 10 * 1024 * 1024;
+const TICKET_ATTACH_MAX_TOTAL = 40 * 1024 * 1024;
+// What may be stored. Anything not here is refused by name rather than being
+// quietly dropped, so an agent knows the file did not go.
+const TICKET_ATTACH_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif',
+  'application/pdf', 'text/plain', 'text/csv', 'application/json',
+  'application/zip', 'message/rfc822', 'application/vnd.ms-outlook',
+  'application/msword', 'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+]);
+// Served inline rather than downloaded. Deliberately narrow: an SVG or an HTML
+// file rendered in the board's own origin is a script execution, so neither is
+// on this list even though both are harmless to store.
+const TICKET_ATTACH_INLINE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif', 'application/pdf']);
+const attachmentUploadLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+
+async function ensureTicketAttachmentTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "TicketAttachment" (
+      "id" SERIAL PRIMARY KEY,
+      "ticketExternalId" TEXT NOT NULL,
+      "filename" TEXT NOT NULL DEFAULT 'attachment',
+      "contentType" TEXT NOT NULL DEFAULT 'application/octet-stream',
+      "size" INTEGER NOT NULL DEFAULT 0,
+      "width" INTEGER,
+      "height" INTEGER,
+      "data" BYTEA NOT NULL,
+      "uploadedBy" TEXT NOT NULL DEFAULT '',
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "TicketAttachment_ticket_idx" ON "TicketAttachment"("ticketExternalId","createdAt")`;
+}
+
+// A filename from a browser is caller-controlled, and it ends up in a
+// Content-Disposition header. Strip anything that could break out of the
+// quoted string or walk a path.
+function safeAttachmentName(raw) {
+  const base = String(raw || 'attachment').split(/[\\/]/).pop();
+  const cleaned = base.replace(/[\u0000-\u001f\u007f"\\]/g, '').trim();
+  return (cleaned || 'attachment').slice(0, 180);
+}
+
+function ticketAttachmentRow(row) {
+  const type = String(row.contentType || 'application/octet-stream');
+  return {
+    id: row.id,
+    filename: row.filename,
+    contentType: type,
+    size: Number(row.size || 0),
+    width: row.width == null ? null : Number(row.width),
+    height: row.height == null ? null : Number(row.height),
+    isImage: type.startsWith('image/'),
+    inline: TICKET_ATTACH_INLINE.has(type),
+    uploadedBy: row.uploadedBy || '',
+    createdAt: row.createdAt,
+    url: `/api/ticket-attachments/${row.id}`
+  };
+}
+
+function feedbackAttachmentKey(logId) {
+  return `feedback:${Number(logId)}`;
+}
+
+function attachmentError(code, status, message) {
+  return Object.assign(new Error(message || code), { code, status });
+}
+
+/* Validates and stores a batch of base64 files against one key.
+   Throws on the first thing it will not take, rather than storing half a batch
+   and reporting success: a reporter who attached three files and got one is
+   worse off than one who was told which file was refused. */
+async function saveAttachmentFiles({ key, files, uploadedBy }) {
+  const list = Array.isArray(files) ? files : [];
+  if (!list.length) throw attachmentError('no_files', 400, 'No files were sent.');
+  if (list.length > TICKET_ATTACH_MAX_FILES) {
+    throw attachmentError('too_many_files', 400, `Up to ${TICKET_ATTACH_MAX_FILES} files at a time.`);
+  }
+  await ensureTicketAttachmentTable();
+  const existing = await prisma.$queryRaw`
+    SELECT COALESCE(sum("size"), 0)::bigint AS total FROM "TicketAttachment" WHERE "ticketExternalId" = ${key}`;
+  let running = Number(Array.isArray(existing) ? existing[0]?.total || 0 : 0);
+
+  const rows = [];
+  for (const file of list) {
+    const type = String(file?.type || '').toLowerCase().split(';')[0].trim();
+    const filename = safeAttachmentName(file?.name);
+    if (!TICKET_ATTACH_TYPES.has(type)) {
+      throw attachmentError('unsupported_type', 415, `"${filename}" is a ${type || 'unknown'} file, which cannot be attached.`);
+    }
+    // Base64 rather than multipart: express.json already accepts 25mb, and a
+    // multipart parser would be a new dependency for two routes. The cost is
+    // the 33% encoding overhead on the wire.
+    const buffer = Buffer.from(String(file?.data || ''), 'base64');
+    if (!buffer.length) throw attachmentError('empty_file', 400, `"${filename}" arrived empty.`);
+    if (buffer.length > TICKET_ATTACH_MAX_BYTES) {
+      throw attachmentError('file_too_large', 413, `"${filename}" is ${(buffer.length / 1048576).toFixed(1)}MB; the limit is ${TICKET_ATTACH_MAX_BYTES / 1048576}MB per file.`);
+    }
+    running += buffer.length;
+    if (running > TICKET_ATTACH_MAX_TOTAL) {
+      throw attachmentError('quota', 413, `That would go over ${TICKET_ATTACH_MAX_TOTAL / 1048576}MB of attachments here.`);
+    }
+    const width = Number.isFinite(Number(file?.width)) ? Math.max(0, Math.min(20000, Number(file.width))) : null;
+    const height = Number.isFinite(Number(file?.height)) ? Math.max(0, Math.min(20000, Number(file.height))) : null;
+    const saved = await prisma.$queryRaw`
+      INSERT INTO "TicketAttachment" ("ticketExternalId","filename","contentType","size","width","height","data","uploadedBy")
+      VALUES (${key}, ${filename}, ${type}, ${buffer.length}, ${width}, ${height}, ${buffer}, ${String(uploadedBy || '')})
+      RETURNING "id","filename","contentType","size","width","height","uploadedBy","createdAt"`;
+    const row = Array.isArray(saved) ? saved[0] : null;
+    if (row) rows.push(ticketAttachmentRow(row));
+  }
+  return { rows };
+}
+
+app.get('/api/tickets/:externalId/attachments', requireAuth, async (req, res) => {
+  const externalId = String(req.params.externalId || '').trim();
+  if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+  try {
+    await ensureTicketAttachmentTable();
+    const rows = await prisma.$queryRaw`
+      SELECT "id","filename","contentType","size","width","height","uploadedBy","createdAt"
+      FROM "TicketAttachment" WHERE "ticketExternalId" = ${externalId}
+      ORDER BY "createdAt", "id"`;
+    return res.json({ ok: true, rows: (Array.isArray(rows) ? rows : []).map(ticketAttachmentRow) });
+  } catch (error) {
+    console.error('Attachment list failed:', error?.message || error);
+    return res.status(500).json({ error: 'attachment_list_failed' });
+  }
+});
+
+app.post('/api/tickets/:externalId/attachments', requireAuth, attachmentUploadLimiter, async (req, res) => {
+  const externalId = String(req.params.externalId || '').trim();
+  if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+  try {
+    const { rows } = await saveAttachmentFiles({
+      key: externalId,
+      files: req.body?.files,
+      uploadedBy: req.session?.username || ''
+    });
+    return res.json({ ok: true, rows });
+  } catch (error) {
+    if (error?.code) {
+      return res.status(error.status || 400).json({ error: error.code, message: error.message });
+    }
+    console.error('Attachment upload failed:', error?.message || error);
+    return res.status(500).json({ error: 'attachment_upload_failed', message: String(error?.message || error).slice(0, 200) });
+  }
+});
+
+// The bytes. Same posture as the mail-image route below: cached hard but only
+// in the agent's own browser, never sniffed, and sandboxed so that even a type
+// which can carry script cannot run in the board's origin.
+app.get('/api/ticket-attachments/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    await ensureTicketAttachmentTable();
+    const rows = await prisma.$queryRaw`SELECT "filename","contentType","data" FROM "TicketAttachment" WHERE "id" = ${id} LIMIT 1`;
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return res.status(404).json({ error: 'attachment_not_found' });
+    const type = String(row.contentType || 'application/octet-stream');
+    const inline = TICKET_ATTACH_INLINE.has(type);
+    res.set('Content-Type', inline ? type : 'application/octet-stream');
+    res.set('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${safeAttachmentName(row.filename)}"`);
+    res.set('Cache-Control', 'private, max-age=86400, immutable');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+    return res.send(Buffer.from(row.data));
+  } catch (error) {
+    console.error('Attachment fetch failed:', error?.message || error);
+    return res.status(500).json({ error: 'attachment_failed' });
+  }
+});
+
+app.delete('/api/ticket-attachments/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    await ensureTicketAttachmentTable();
+    const rows = await prisma.$queryRaw`SELECT "uploadedBy" FROM "TicketAttachment" WHERE "id" = ${id} LIMIT 1`;
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return res.status(404).json({ error: 'attachment_not_found' });
+    // Whoever attached it, or an admin. An agent removing their own mistaken
+    // screenshot should not have to find one.
+    const own = String(row.uploadedBy || '') === String(req.session?.username || '');
+    if (!own && !isAdminRole(req.session.role)) return res.status(403).json({ error: 'not_yours' });
+    await prisma.$executeRaw`DELETE FROM "TicketAttachment" WHERE "id" = ${id}`;
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Attachment delete failed:', error?.message || error);
+    return res.status(500).json({ error: 'attachment_delete_failed' });
+  }
+});
+
 // The mailbox is not a parameter. This route turns an id in a URL into a read
 // from Graph with the agent's delegated token, and letting the caller name the
 // mailbox would make it a general-purpose mail reader for anything that token
@@ -8833,35 +9206,52 @@ const FEEDBACK_CATEGORIES = {
 // collects this itself (which view, which build, which browser), and it is the
 // difference between "the board is broken" and a reproducible report - but it
 // arrives from a browser, so none of it is trusted to be sane.
+/* A report carries five things: who wrote it, how to reach them, the ticket
+   they had open if they had one, when, and what they said.
+
+   It used to carry the build, the page, the viewport, the theme and the full
+   user agent as well. That was defensible for a bug report and noise for
+   everything else, and it went to a Teams channel where nobody reads a user
+   agent. Now none of it is collected, so none of it can be sent - the honest
+   way to stop sending something. */
 function sanitizeFeedbackContext(raw) {
   const context = (raw && typeof raw === 'object') ? raw : {};
   const str = (value, max) => String(value == null ? '' : value).trim().slice(0, max);
   return {
-    view: str(context.view, 40),
     ticketId: str(context.ticketId, 200),
-    build: str(context.build, 60),
-    url: str(context.url, 300),
-    theme: str(context.theme, 20),
-    viewport: str(context.viewport, 24),
-    userAgent: str(context.userAgent, 300)
+    // What the board calls that ticket on screen (#0042). The id is internal
+    // and means nothing to whoever reads the report.
+    ticketLabel: str(context.ticketLabel, 60)
   };
 }
 
-function feedbackContextRows(context, actor) {
+// The ticket line is present only when there was a ticket. An empty row saying
+// "Ticket: -" is a row somebody has to read before learning nothing.
+function feedbackFacts(context, actor, sentAt) {
+  const ticket = context.ticketLabel || context.ticketId || '';
   return [
-    ['From', actor.label],
-    ['View', context.view || 'board'],
-    ['Ticket', context.ticketId || '-'],
-    ['Build', context.build || 'unknown'],
-    ['Page', context.url || '-'],
-    ['Screen', `${context.viewport || '-'}${context.theme ? ` (${context.theme} theme)` : ''}`],
-    ['Browser', context.userAgent || '-']
+    ['User', actor.label],
+    ['Email', actor.email || 'not on file'],
+    ...(ticket ? [['Ticket', ticket]] : []),
+    ['Time', sentAt || new Date().toISOString()]
   ];
 }
 
-function buildFeedbackEmailHtml({ category, message, context, actor }) {
+function feedbackAttachmentLinks(attachments, base) {
+  const list = Array.isArray(attachments) ? attachments : [];
+  if (!list.length) return '';
+  const items = list.map(a =>
+    `<li style="margin:2px 0;"><a href="${escapeHtml(base + a.url)}" style="color:#4f46e5;">${escapeHtml(a.filename)}</a>`
+    + ` <span style="color:#98a2b3;">(${Math.max(1, Math.round((a.size || 0) / 1024))} KB)</span></li>`
+  ).join('');
+  return `<div style="margin-top:14px;font-size:12px;"><strong>Attached</strong>`
+    + `<ul style="margin:5px 0 0;padding-left:18px;">${items}</ul>`
+    + `<div style="margin-top:5px;font-size:11px;color:#98a2b3;">Opening these needs a board login.</div></div>`;
+}
+
+function buildFeedbackEmailHtml({ category, message, context, actor, sentAt, attachments }) {
   const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
-  const rows = feedbackContextRows(context, actor)
+  const rows = feedbackFacts(context, actor, sentAt)
     .map(([key, value]) => `<tr><td style="padding:3px 12px 3px 0;color:#667085;font-size:12px;white-space:nowrap;vertical-align:top;">${escapeHtml(key)}</td><td style="padding:3px 0;font-size:12px;color:#0f172a;word-break:break-all;">${escapeHtml(value)}</td></tr>`)
     .join('');
   return [
@@ -8871,26 +9261,41 @@ function buildFeedbackEmailHtml({ category, message, context, actor }) {
     // hand and the part that has to be read.
     `<div style="margin:10px 0 16px;padding:13px 15px;border-left:3px solid #${meta.colour};background:#f8fafc;border-radius:0 8px 8px 0;white-space:pre-wrap;font-size:14px;">${escapeHtml(message)}</div>`,
     `<table style="border-collapse:collapse;">${rows}</table>`,
+    feedbackAttachmentLinks(attachments, APP_BASE_URL),
     '<div style="margin-top:14px;font-size:11px;color:#98a2b3;">Sent by the Feedback button on the support board. Reply to this mail to answer the reporter.</div>',
     '</div>'
   ].join('');
 }
 
-function buildFeedbackWebhookPayload({ category, message, context, actor }) {
+function buildFeedbackWebhookPayload({ category, message, context, actor, sentAt, attachments }) {
   const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
   const title = `${meta.emoji} ${meta.label} from ${actor.label}`;
-  const facts = feedbackContextRows(context, actor).map(([name, value]) => ({ name, value }));
+  const when = sentAt || new Date().toISOString();
+  const ticket = context.ticketLabel || context.ticketId || '';
+  const facts = feedbackFacts(context, actor, when).map(([name, value]) => ({ name, value }));
+  const files = (Array.isArray(attachments) ? attachments : []).map(a => ({
+    name: a.filename,
+    size: a.size,
+    url: APP_BASE_URL + a.url
+  }));
   return {
     // Read by a Power Automate flow, or by anything else pointed at this URL.
+    //
+    // Five fields, and the ticket only when there was one - a flow checking
+    // for it should find it absent rather than find an empty string. The
+    // browser/build/page block and the recipient list that used to ride along
+    // here are gone; anything reading them needs updating.
     kind: 'support_kanban_feedback',
     category,
-    categoryLabel: meta.label,
+    user: actor.label,
+    email: actor.email || '',
+    ...(ticket ? { ticket } : {}),
+    time: when,
     message,
-    reporter: actor.label,
-    reporterEmail: actor.email || '',
-    recipientEmail: FEEDBACK_EMAIL,
-    recipientEmails: FEEDBACK_EMAILS,
-    context,
+    // Named files, not attachments: this payload already carries an
+    // attachments array for the Adaptive Card, and the later key in an object
+    // literal wins - which silently ate this field the first time.
+    ...(files.length ? { files } : {}),
     // Rendered by a Teams incoming webhook without a flow in between.
     '@type': 'MessageCard',
     '@context': 'https://schema.org/extensions',
@@ -8898,7 +9303,7 @@ function buildFeedbackWebhookPayload({ category, message, context, actor }) {
     summary: title,
     title,
     text: message,
-    sections: [{ facts, markdown: false }],
+    sections: [{ facts: facts.concat(files.length ? [{ name: 'Attached', value: files.map(f => f.name).join(', ') }] : []), markdown: false }],
     /* And the Adaptive Card, for Teams Workflows.
 
        Microsoft retired the Office 365 connector that consumed the MessageCard
@@ -8918,7 +9323,12 @@ function buildFeedbackWebhookPayload({ category, message, context, actor }) {
         body: [
           { type: 'TextBlock', text: title, weight: 'Bolder', size: 'Medium', wrap: true },
           { type: 'TextBlock', text: message, wrap: true, spacing: 'Small' },
-          { type: 'FactSet', facts: facts.map(f => ({ title: f.name, value: f.value })), spacing: 'Medium' }
+          { type: 'FactSet', facts: facts.map(f => ({ title: f.name, value: f.value })), spacing: 'Medium' },
+          ...(files.length ? [{
+            type: 'TextBlock',
+            text: files.map(f => `[${f.name}](${f.url})`).join('  ·  '),
+            wrap: true, spacing: 'Small', isSubtle: true
+          }] : [])
         ],
         actions: actor.email
           ? [{ type: 'Action.OpenUrl', title: `Email ${actor.username || 'the reporter'}`, url: `mailto:${actor.email}` }]
@@ -8981,26 +9391,34 @@ async function sendFeedbackEmail({ req, subject, html, actor }) {
   return 'graph';
 }
 
-async function deliverFeedback({ req, category, message, context, actor }) {
+async function deliverFeedback({ req, category, message, context, actor, attachments }) {
   const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
   const subject = `[Kanban ${meta.label}] ${feedbackFirstLine(message)}`;
+  const sentAt = new Date().toISOString();
   const result = { emailed: false, notified: false, emailError: '', webhookError: '', emailVia: '' };
-
-  try {
-    result.emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
-    result.emailed = true;
-  } catch (error) {
-    result.emailError = String(error?.message || error).slice(0, 300);
-    console.warn('Feedback email failed:', result.emailError);
-  }
 
   if (FEEDBACK_WEBHOOK_URL) {
     try {
-      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
+      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor, sentAt, attachments }));
       result.notified = true;
     } catch (error) {
       result.webhookError = String(error?.message || error).slice(0, 300);
       console.warn('Feedback webhook failed:', result.webhookError);
+    }
+  }
+
+  // Skip the Graph-delegated fallback when Teams is the only channel this
+  // deployment has configured: without MAIL_WEBHOOK_URL that fallback needs
+  // Mail.Send consent nobody granted, so it always 403s and reports a scary
+  // "email failed" for a leg nobody meant to use. Still attempted when there
+  // is a mail flow (safe to try) or no Teams webhook either (the only leg left).
+  if (MAIL_WEBHOOK_URL || !FEEDBACK_WEBHOOK_URL) {
+    try {
+      result.emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor, sentAt, attachments }), actor });
+      result.emailed = true;
+    } catch (error) {
+      result.emailError = String(error?.message || error).slice(0, 300);
+      console.warn('Feedback email failed:', result.emailError);
     }
   }
   return result;
@@ -9029,14 +9447,8 @@ async function feedbackActorFor(req) {
 app.post('/api/feedback/test', requireAdmin, feedbackLimiter, async (req, res) => {
  try {
   const actor = await feedbackActorFor(req);
-  const context = sanitizeFeedbackContext({
-    view: 'delivery test',
-    build: APP_BUILD_VERSION,
-    url: '/api/feedback/test',
-    theme: '-',
-    viewport: '-',
-    userAgent: String(req.headers['user-agent'] || '')
-  });
+  const context = sanitizeFeedbackContext({});
+  const sentAt = new Date().toISOString();
   const message = [
     `This is a delivery test for the Feedback button on the support board.`,
     ``,
@@ -9106,30 +9518,26 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
     console.error('Feedback could not be recorded:', String(error?.message || error).slice(0, 200));
   }
 
-  const meta = FEEDBACK_CATEGORIES[category];
-  const subject = `[Kanban ${meta.label}] ${message.split(/\r?\n/)[0].slice(0, 90)}`;
-  let emailed = false;
-  let emailError = '';
-  let emailVia = '';
-  try {
-    emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
-    emailed = true;
-  } catch (error) {
-    emailError = String(error?.message || error).slice(0, 200);
-    console.warn('Feedback email failed:', emailError);
-  }
-
-  let notified = false;
-  let webhookError = '';
-  if (FEEDBACK_WEBHOOK_URL) {
+  // Files the reporter attached, stored against the record that was just
+  // written so a screenshot cannot outlive the report it belongs to.
+  let attachments = [];
+  if (logId && Array.isArray(req.body?.files) && req.body.files.length) {
     try {
-      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
-      notified = true;
+      const saved = await saveAttachmentFiles({
+        key: feedbackAttachmentKey(logId),
+        files: req.body.files,
+        uploadedBy: username
+      });
+      attachments = saved.rows;
     } catch (error) {
-      webhookError = String(error?.message || error).slice(0, 200);
-      console.warn('Feedback webhook failed:', webhookError);
+      // A report that arrives without its screenshot is worth far more than no
+      // report, so this is logged and the send continues.
+      console.warn('Feedback attachments not stored:', String(error?.message || error).slice(0, 200));
     }
   }
+
+  const { emailed, notified, emailError, webhookError, emailVia } =
+    await deliverFeedback({ req, category, message, context, actor, attachments });
 
   if (logId) {
     // What actually happened to it, on the record itself - so a report nobody
