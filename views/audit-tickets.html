@@ -431,10 +431,15 @@
           + ' across ' + data.totals.tickets + ' ticket' + (data.totals.tickets === 1 ? '' : 's')
           + ' in the last ' + data.days + ' days'
           + (data.includeSync ? ', mail-sync changes included' : ', agent changes only')
+          + (data.scope === 'own_tickets' ? ', limited to the tickets assigned to you' : '')
           + '. Read at ' + formatDate(data.generatedAt) + '.';
 
         if (!data.totals.events) {
-          content.innerHTML = '<div class="card"><div class="empty">No ticket updates in this window.</div></div>';
+          content.innerHTML = '<div class="card"><div class="empty">'
+            + (data.scope === 'own_tickets'
+              ? 'No updates in this window on the tickets assigned to you.'
+              : 'No ticket updates in this window.')
+            + '</div></div>';
           return;
         }
 

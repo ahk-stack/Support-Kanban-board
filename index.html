@@ -1709,6 +1709,24 @@ header {
   min-width: 0;
 }
 
+/* The free-text sub-category field on a card. Same pill as the selects it sits
+   beside - the only differences are the ones that say it is typed into rather
+   than picked from. */
+.cat-sub-text {
+  cursor: text;
+  font-family: inherit;
+}
+
+.cat-sub-text::placeholder {
+  color: var(--slate-400);
+}
+
+.cat-sub-text:focus {
+  outline: none;
+  border-color: var(--teal-700);
+  background: var(--white);
+}
+
 .sla-row {
   margin-bottom: 6px;
 }
@@ -4713,6 +4731,32 @@ th {
   color: var(--amber-800, #92400e);
   font-size: 11px;
 }
+/* Six columns saying "No tickets" look like a board with nothing on it, not
+   like a filter hiding everything - which is how an agent ends up reporting
+   that they cannot see any tickets at all. Same shape as the WIP warning, in
+   the blue that means "this is information" rather than the amber that means
+   "something is wrong": a filter doing its job is not a fault. */
+.board-filter-notice {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 var(--content-pad, 16px) 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--blue-300, #93c5fd);
+  border-radius: 10px;
+  background: var(--blue-50, #eff6ff);
+  color: var(--blue-800, #1e40af);
+  font-size: 11px;
+}
+.board-filter-notice button {
+  border: 1px solid var(--blue-300, #93c5fd);
+  background: var(--white, #fff);
+  color: var(--blue-800, #1e40af);
+  border-radius: 8px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.board-filter-notice button:hover { background: var(--blue-100, #dbeafe); }
 .wip-warn-agent { font-weight: 600; }
 .wip-warn-note { color: var(--amber-700, #b45309); font-style: italic; }
 .wip-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
@@ -5748,6 +5792,15 @@ th {
   <button class="chip" data-pf="Medium"> Med</button>
   <button class="chip" data-pf="Low"> Low</button>
   <div class="sep"></div>
+  <!-- Support only: how wide their own board is. Shown by
+       syncRoleRestrictedControls, which is also what hides it from admin (who
+       has the Team filter for this) and from CS (who has no wider view). -->
+  <span class="filter-label board-scope-control hidden">Show:</span>
+  <div class="sort-toggle board-scope-control hidden">
+    <button class="sort-btn active" id="scope-all-btn" title="Every ticket on the board">All tickets</button>
+    <button class="sort-btn" id="scope-mine-btn" title="Only the tickets assigned to you">Only mine</button>
+  </div>
+  <div class="sep board-scope-control hidden"></div>
   <span class="filter-label agent-filter-control">Team:</span>
   <select class="filter-sel agent-filter-control" id="agent-filter"><option value="all">All CS & Support</option></select>
   <div class="sep agent-filter-control"></div>
@@ -5766,7 +5819,11 @@ th {
   </select>
   <div class="sep"></div>
   <span class="filter-label">Search:</span>
-  <input class="filter-sel ticket-number-filter" id="ticket-number-filter" type="text" autocomplete="off" placeholder="e.g. #0012, QS-8634, client@email.com or a keyword"/>
+  <!-- name/data-* as well as autocomplete: Chrome and the password managers
+       ignore autocomplete="off" on a lone text field and offer the saved
+       login for the site, which lands the agent's own username in here and
+       empties the board. -->
+  <input class="filter-sel ticket-number-filter" id="ticket-number-filter" name="board-ticket-search" type="text" autocomplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" placeholder="e.g. #0012, QS-8634, client@email.com or a keyword"/>
   <div class="sep"></div>
   <button class="chip" id="tagged-filter" data-af="tagged" style="display:none"> Tagged me</button>
   <div class="sep"></div>
@@ -5803,6 +5860,7 @@ th {
   </div>
 </div>
 <div class="wip-warning" id="wip-warning" style="display:none"></div>
+<div class="board-filter-notice" id="board-filter-notice" style="display:none"></div>
 <div class="lane-board" id="lane-board" style="display:none"></div>
 <div class="board" id="main-board">
   <div class="column col-new"><div class="col-header"> New <span class="col-badge" id="badge-new">0</span></div><div class="col-body" id="col-new" data-col="new"><div class="loading"><div class="spinner"></div><span>Fetching</span></div></div></div>
@@ -5904,6 +5962,9 @@ th {
       <div style="font-size:12px;color:var(--muted);" id="assignlog-summary">Loading&hellip;</div>
     </div>
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <!-- Hidden for everyone but admin: the server already narrows the log to
+           the caller's own assignments, so there is nobody else in it to
+           filter down to. -->
       <select class="filter-sel" id="assignlog-agent-filter" style="max-width:190px;"><option value="all">All agents</option></select>
       <button class="chip" id="assignlog-reverts-only" type="button" title="Show only changes that undid the previous one">Reverts only</button>
       <button class="chip" id="assignlog-refresh" type="button">Refresh</button>
@@ -5968,16 +6029,9 @@ th {
     <div style="font-family:'Caladea',serif;font-size:24px;">KPI Dashboard</div>
     <div style="display:flex;align-items:center;gap:8px;">
       <label for="kpi-time-filter" style="font-size:12px;color:var(--legacy-555);">Time range</label>
-      <select class="filter-sel" id="kpi-time-filter" style="max-width:210px;">
-        <option value="today">Today</option>
-        <option value="this_week">This week</option>
-        <option value="this_month">This month</option>
-        <option value="last_week">Last week</option>
-        <option value="last_30_days">Last 30 days</option>
-        <option value="this_quarter">This quarter</option>
-        <option value="last_quarter">Last quarter</option>
-        <option value="this_year">This year</option>
-      </select>
+      <!-- Options are rendered from KPI_RANGES at startup, so this list and
+           the bounds that back it cannot drift apart. -->
+      <select class="filter-sel" id="kpi-time-filter" style="max-width:210px;"></select>
       <label for="kpi-team-filter" style="font-size:12px;color:var(--legacy-555);">Team</label>
       <select class="filter-sel" id="kpi-team-filter" style="max-width:170px;">
         <option value="all">All CS & Support</option>
@@ -6359,7 +6413,11 @@ th {
       <div class="form-row">
         <div class="form-field">
           <label>Sub-category</label>
+          <!-- Two controls, one shown at a time by populateCreateSubtypeOptions:
+               the numbered picker for every category that has numbered
+               sub-categories, a free text field for "Other", which has none. -->
           <select id="ct-subtype" class="form-input"></select>
+          <input id="ct-subtype-text" class="form-input" type="text" maxlength="80" placeholder="Describe the subtype" hidden />
         </div>
         <div class="form-field">
           <label>Jira ticket <span style="color:var(--slate-400);font-weight:400;">(optional)</span></label>
@@ -6630,6 +6688,7 @@ const TICKET_SUBTYPES=[
 {id:'3.3',type:'Config Request',label:'Channel implementation',tier:'P3',priority:'Medium',responseHours:24},
 {id:'3.4',type:'Config Request',label:'Language addition',tier:'P3',priority:'Medium',responseHours:24},
 {id:'3.5',type:'Config Request',label:'Transactional link update',tier:'P3',priority:'Medium',responseHours:24},
+{id:'3.6',type:'Config Request',label:'BE implementation',tier:'P3',priority:'Medium',responseHours:24},
 {id:'4.1',type:'Platform / Access',label:'Velma fully down',tier:'P1',priority:'High',responseHours:2},
 {id:'4.2',type:'Platform / Access',label:'Account access issue',tier:'P3',priority:'Medium',responseHours:24},
 {id:'4.3',type:'Platform / Access',label:'Account status stuck',tier:'P3',priority:'Medium',responseHours:24},
@@ -7003,6 +7062,12 @@ let hubspotTicketSyncStartedAt={};
 const taggedTickets=new Set();
 let inlineCommentOpen={};
 let inlineCommentDrafts={};
+/* ticketId -> what is currently typed in the "Other" sub-category field, for
+   the same reason inlineCommentDrafts exists: a live patch from another agent
+   re-renders the board, and without this the half-typed value on screen would
+   be replaced by the stored one mid-word. Cleared once the value is committed,
+   so the card falls back to ticketSubtype. */
+let subtypeDrafts={};
 let inlineTagDrafts={};
 let allTickets=[],pollSecsLeft=POLL_SECS,activeP='all',activeA='all',activeCompany='all',activeJira=false,sortDesc=true,activeStage='all',activeSLA=false;
 let viewMode='board',comTicketId=null,jiraTicketId=null,selectedTags=new Set();
@@ -7033,6 +7098,24 @@ function normalizeAgentCode(value){
   const code=String(value||'').trim().toUpperCase();
   return ALL_AGENTS.includes(code)||code==='YOU'||code==='ADMIN'?code:'';
 }
+/* The same value, but without dropping an account that is not on the roster.
+
+   normalizeAgentCode answers "is this one of the trigrams the board knows",
+   which is the right question for a dropdown and the wrong one for "whose
+   ticket is this". SUPPORT_AGENTS and CS_AGENTS are hard-coded, so every
+   account outside them - a new hire, a test login, anyone whose username is
+   not one of the twenty-one - normalized to the empty string and then failed
+   every "is this mine" comparison it was put through: a CS account off the
+   roster saw an empty board, because both halves of its visibility rule
+   compare against a code that had just been thrown away.
+
+   So identity keeps whatever the account actually is. Nothing here widens
+   what a dropdown offers; ticketMatchesAgentFilter still only ever receives
+   roster codes, and an off-roster code simply matches none of them. */
+function agentIdentityCode(value){
+  const raw=String(value||'').trim().toUpperCase();
+  return normalizeAgentCode(raw)||raw;
+}
 function resolveUserAgentCode(user){
   const candidates=[
     user?.username,
@@ -7047,7 +7130,21 @@ function resolveUserAgentCode(user){
   }
   return '';
 }
-const currentUser=()=>normalizeAgentCode(document.getElementById('current-user')?.value) || resolveUserAgentCode(currentSessionUser) || 'ADMIN';
+/* Who is signed in, as a code the rest of the board can compare against.
+
+   The last resort used to be the literal 'ADMIN', which is not a neutral
+   default - it is a real code that normalizeAgentCode accepts. Any account
+   whose username is not on the roster therefore answered "ADMIN" to "who am
+   I": their tickets were measured against somebody else's name, and the code
+   went on to be written into ticketCreatedBy, comment authors, snoozes and
+   resolutions, so their work was attributed to an admin who never touched it.
+
+   The account's own username is the honest answer, and 'ADMIN' is now only
+   what an actual admin session resolves to. */
+const currentUser=()=>normalizeAgentCode(document.getElementById('current-user')?.value)
+  || resolveUserAgentCode(currentSessionUser)
+  || String(currentSessionUser?.username||'').trim().toUpperCase()
+  || 'ADMIN';
 function currentUserIsAdmin(){
   return currentSessionUser?.role==='admin'||currentSessionUser?.role==='owner';
 }
@@ -7056,8 +7153,26 @@ function currentUserRole(){
   if(role==='agent'||role==='viewer')return'support';
   return role;
 }
+/* Support agents choose how wide their board is; CS never does.
+
+   A support agent works the queue, so they see all of it by default and can
+   narrow it to their own tickets with the Only mine toggle - their choice,
+   remembered with the rest of their filters. CS see the tickets they opened
+   and nothing else, so there is no wider view for them to switch to.
+
+   This is the board only. The KPI dashboard stays pinned to the person asking
+   whatever this returns: reading the queue is part of the job, reading a
+   colleague's numbers is not. */
+let supportOnlyMine=false;
 function currentUserCanViewAllTickets(){
-  return currentUserIsAdmin();
+  if(currentUserIsAdmin())return true;
+  if(currentUserTeam()!=='support')return false;
+  return !supportOnlyMine;
+}
+// Whether to offer the toggle at all, which is not the same question as
+// whether it is currently on.
+function currentUserHasBoardScopeToggle(){
+  return !currentUserIsAdmin()&&currentUserTeam()==='support';
 }
 /* Handing a ticket to a support agent is CS's decision, not support's.
 
@@ -7087,13 +7202,54 @@ function currentUserTeam(){
 }
 function currentUserCanAssignTicket(ticket){
   if(currentUserIsAdmin())return true;
+  // A support agent may open the menu, but only their own name is in it - see
+  // assignableSupportAgents(). Taking a ticket is picking up work; handing one
+  // to a colleague is the decision this restriction protects.
+  if(currentUserTeam()==='support')return !!supportIdentityCode();
   if(currentUserTeam()!=='cs')return false;
   // Deliberately not ticketVisibleToCurrentUser: for a CS agent whose account
   // still says 'agent' that helper asks "am I the assignee", which a CS agent
   // never is, and would refuse them every ticket they own.
-  const me=normalizeCSAgent(currentUser());
+  const me=currentUser();
   const {csOwner}=ticketFilterAgentValues(ticket);
-  return !!me&&me===normalizeCSAgent(csOwner);
+  return !!me&&me===csOwner;
+}
+/* The code a support agent takes a ticket under.
+
+   Their roster trigram where they have one, their own username where they do
+   not - a support account that is not one of the seven hard-coded trigrams
+   could not take a single ticket before this, because the only name it was
+   ever offered was the empty string. 'YOU' and 'ADMIN' are placeholders
+   rather than people (the field's pre-login value, and what an admin session
+   resolves to), so neither is a code anything may be assigned to. */
+function supportIdentityCode(){
+  const me=currentUser();
+  return (me==='YOU'||me==='ADMIN')?'':me;
+}
+// What the assign button offers, which for a support agent is one thing.
+function assignTriggerTitle(){
+  return currentUserTeam()==='support'&&!currentUserIsAdmin()?'Take this ticket':'Assign support agent';
+}
+// Why an assignment was refused, phrased for whoever is being refused: a
+// support agent is not being told to ask an admin, they are being told they
+// may only take the ticket themselves.
+function assignRefusedMessage(){
+  return currentUserTeam()==='support'
+    ?'Support can only take a ticket for themselves - ask the ticket CS to hand it to someone else'
+    :'Only admins and the ticket CS can change support assignment';
+}
+// Who the signed-in person may hand a ticket to. The whole support roster for
+// admin and CS; for a support agent, themselves and nobody else. The server
+// enforces the same rule per ticket in applyRolePermissionsToStateWrite, so
+// this is about not offering a choice that would be refused.
+function assignableSupportAgents(){
+  if(currentUserIsAdmin()||currentUserTeam()==='cs')return SUPPORT_AGENTS;
+  const me=supportIdentityCode();
+  return me?[me]:[];
+}
+function currentUserCanAssignTicketTo(ticket,agentCode){
+  if(!currentUserCanAssignTicket(ticket))return false;
+  return assignableSupportAgents().includes(agentIdentityCode(agentCode));
 }
 // Signing a resolved ticket off for good. Same rule, stated separately because
 // it is a different decision and reads better at both call sites than one
@@ -7101,8 +7257,8 @@ function currentUserCanAssignTicket(ticket){
 function currentUserCanConfirmResolution(csOwner){
   if(currentUserIsAdmin())return true;
   if(currentUserTeam()!=='cs')return false;
-  const me=normalizeCSAgent(currentUser());
-  return !!me&&me===normalizeCSAgent(csOwner);
+  const me=currentUser();
+  return !!me&&me===agentIdentityCode(csOwner);
 }
 // Replying to the client is the work itself, so whoever holds the ticket can
 // do it: the support agent it is assigned to, the CS who owns it, or an admin.
@@ -7113,24 +7269,97 @@ function currentUserCanReplyToTicket(ticket){
 function currentUserCanEditManualTicket(ticket){
   if(!ticket?.isManual)return false;
   if(currentUserIsAdmin())return true;
-  return normalizeAgentCode(ticketCreatedBy[ticket.id])===currentUser();
+  return agentIdentityCode(ticketCreatedBy[ticket.id])===currentUser();
 }
+// The agent code the KPI dashboard is pinned to when the signed-in person is
+// not allowed to look wider. The board is NOT a caller - it asks
+// boardAgentFilter, because how wide your board is and whose numbers you may
+// read are different questions. currentUserTeam rather than currentUserRole: a
+// CS agent whose account still says 'agent' would otherwise be pinned to a
+// support code they do not have, and match nothing.
 function enforcedAgentFilter(){
-  if(currentUserCanViewAllTickets())return activeA;
-  const role=currentUserRole();
   const me=currentUser();
-  if(role==='cs')return normalizeCSAgent(me)||me;
-  if(role==='support')return normalizeSupportAgent(me)||me;
+  if(currentUserIsAdmin())return activeA;
+  const team=currentUserTeam();
+  if(team==='cs')return normalizeCSAgent(me)||me;
+  if(team==='support')return normalizeSupportAgent(me)||me;
   return me;
 }
+/* The agent code the BOARD filters by, which is a different question from the
+   one enforcedAgentFilter answers - and not a helper to fold back into it,
+   because five of that one's six callers are the KPI dashboard, where pinning
+   to the person asking is the whole point.
+
+   Here the pinning was the bug. A support agent on All tickets passes
+   ticketVisibleToCurrentUser for every ticket and was then filtered straight
+   back down to their own trigram, so the toggle could never widen anything and
+   an agent holding nothing saw an empty board. CS lost every ticket they had
+   raised and since handed on, for the same reason: the filter matches CS
+   ownership alone, while the rule also counts what they created.
+
+   So the board asks the rule, not the person. ticketVisibleToCurrentUser
+   decides what is on the board; this is only the dropdown, and where the
+   dropdown is hidden - CS, and support who asked for Only mine - there is no
+   control here to apply. Not read off activeA in that case even though
+   syncRoleRestrictedControls has just forced it to 'all': that ordering is not
+   this function's to rely on. */
+function boardAgentFilter(){
+  return currentUserCanViewAllTickets()?activeA:'all';
+}
+/* Whether this ticket may be counted in the signed-in person's KPI figures.
+
+   Deliberately NOT ticketVisibleToCurrentUser. A support agent viewing the
+   whole board passes that for every ticket, and the dashboard would then be
+   reporting the whole team's throughput to them. The board is the work queue -
+   wide by default, because you cannot pick up work you cannot see. The
+   dashboard measures a person, so it stays pinned whatever the board is
+   showing, and only admin reads it wider.
+
+   The local fallback already narrows by kpiAgentFilter, which for a non-admin
+   is their own code, so this is belt and braces. It is here because that is a
+   filter - something a control sets - and this is a rule. */
+function ticketInCurrentUserKpiScope(ticket){
+  if(currentUserIsAdmin())return true;
+  const me=currentUser();
+  if(!me)return false;
+  const {assignee,csOwner}=ticketFilterAgentValues(ticket);
+  // Same reasoning as ticketVisibleToCurrentUser: an account off the roster
+  // owns its tickets under its own code, so that is what it is measured on.
+  if(currentUserTeam()==='cs'){
+    if(agentIdentityCode(ticketCreatedBy[ticket.id])===me)return true;
+    return !!csOwner&&csOwner===me;
+  }
+  return !!assignee&&assignee===me;
+}
+/* Whether this ticket belongs on the signed-in person's board.
+
+   CS see the tickets they opened. In practice that is two things which are
+   the same thing: a manual ticket stamps its creator into ticketCreatedBy,
+   and creating one as CS also makes them its CS owner - while an email ticket
+   has no creator at all and is placed by which CS the sender belongs to. So
+   both are consulted, and a CS agent who raised a ticket keeps it even if the
+   CS owner is later moved to somebody else.
+
+   Support see the whole queue unless they have asked for only their own, in
+   which case it is the tickets assigned to them. */
 function ticketVisibleToCurrentUser(ticket){
   if(currentUserCanViewAllTickets()) return true;
   const me = currentUser();
   if(!me) return false;
   const { assignee, csOwner } = ticketFilterAgentValues(ticket);
-  const role=currentUserRole();
-  if(role==='cs')return csOwner === normalizeCSAgent(me);
-  if(role==='support')return assignee === normalizeSupportAgent(me);
+  const team=currentUserTeam();
+  /* Compared against me as it is, not against normalizeCSAgent(me) /
+     normalizeSupportAgent(me). Those two ask "is my own code on the roster"
+     and answer '' when it is not, so an account off the roster was compared
+     against the empty string and matched nothing it owned - an empty board
+     with no way to widen it. currentUserTeam has already settled which side
+     of the board this person is on; this only has to ask which tickets are
+     theirs. */
+  if(team==='cs'){
+    if(agentIdentityCode(ticketCreatedBy[ticket.id])===me) return true;
+    return !!csOwner && csOwner === me;
+  }
+  if(team==='support')return !!assignee && assignee === me;
   return false;
 }
 
@@ -8006,6 +8235,20 @@ function getSLAStatus(id){
   const wallElapsed=Date.now()-createdMs;
   const resetAt=Number(ticketSlaResetAt[id]||0)>new Date(createdAt).getTime()?Number(ticketSlaResetAt[id]):0;
   const wallText=fmtDuration(wallElapsed)+(resetAt?' since the last reply':' since received');
+  /* Linked to Jira, so the clock is off. The commitment is a response time
+     from us, and once the ticket is with engineering the turnaround is not
+     ours to make - telling the agent holding it that they are late asks them
+     to chase something nobody on the team can move, and counts engineering's
+     time against support's compliance.
+
+     A status is still returned rather than null: null hides the badge, and a
+     card with no SLA line at all reads as a bug rather than as a deliberate
+     hold. So the badge says which issue it is waiting on instead. overdue
+     stays false, so it drops out of the Overdue filter, the workload counts
+     and the KPI figures on its own. Mirrors the jira_hold state in
+     ticketSlaSnapshot, which is what the dashboard is computed from. */
+  const jiraHoldKey=canonicalJiraKey(ticketJira[id]);
+  if(jiraHoldKey)return{text:`SLA on hold - ${jiraHoldKey}`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,jiraHold:jiraHoldKey};
   if(st?.tier==='Paused')return{text:'Paused (awaiting hotel)',cls:'sla-warn',overdue:false,wallText,shiftMs:0};
   const pr=ticketPriority[id]||st?.priority||'Medium';
   const hrs=(SLA_HOURS[pr]||st?.responseHours||24);
@@ -8033,6 +8276,14 @@ function getSLAStatus(id){
 }
 function slaTooltip(status){
   if(!status)return'';
+  // A ticket on Jira hold has no countdown to explain, so the tooltip says
+  // what stopped the clock and what would start it again, rather than listing
+  // shift hours that are not being counted against anything.
+  if(status.jiraHold){
+    return['SLA is not counting: this ticket is linked to '+status.jiraHold+'.',
+      'Wall clock: '+(status.wallText||''),
+      'Unlinking the Jira issue starts the clock again.'].join('\n');
+  }
   return[status.shiftText?'Shift time: '+status.shiftText:'Shift clock not running',
     'Wall clock: '+(status.wallText||''),
     ...(status.resetAt?['Clock restarted by the reply on '+fmtDate(new Date(status.resetAt).toISOString())]:[]),
@@ -8092,6 +8343,7 @@ function saveLastWorkspaceSession(mode){
       activeStage,
       activeSLA,
       sortDesc,
+      supportOnlyMine,
       kpiTimeFilter,
       kpiTeamFilter,
       kpiAgentFilter,
@@ -8119,7 +8371,11 @@ function restoreLastWorkspaceSession(){
   if(session?.activeStage==='all'||STAGES.includes(session?.activeStage))activeStage=session.activeStage;
   activeSLA=session?.activeSLA===true;
   if(typeof session?.sortDesc==='boolean')sortDesc=session.sortDesc;
-  if(typeof session?.kpiTimeFilter==='string')kpiTimeFilter=session.kpiTimeFilter;
+  if(typeof session?.supportOnlyMine==='boolean')supportOnlyMine=session.supportOnlyMine;
+  // Normalized, not taken as-is: a session saved before this build can name a
+  // range the dashboard no longer offers, and leaving it in place showed one
+  // period's figures under another period's heading.
+  if(typeof session?.kpiTimeFilter==='string')kpiTimeFilter=normalizeKpiRange(session.kpiTimeFilter);
   if(typeof session?.kpiTeamFilter==='string')kpiTeamFilter=session.kpiTeamFilter;
   if(typeof session?.kpiAgentFilter==='string')kpiAgentFilter=session.kpiAgentFilter;
   applyRestoredWorkspaceControls();
@@ -8153,8 +8409,12 @@ function applyRestoredWorkspaceControls(){
   const stageEl=document.getElementById('stage-filter');
   if(stageEl&&[...stageEl.options].some(o=>o.value===activeStage))stageEl.value=activeStage;
   document.getElementById('sla-filter-btn')?.classList.toggle('active',activeSLA);
+  // Options first, then the value - a restored session is read before the
+  // dashboard has ever been opened, so the select is still empty at this point
+  // and setting .value on it would be dropped on the floor.
+  populateKpiRangeOptions();
   const timeEl=document.getElementById('kpi-time-filter');
-  if(timeEl&&[...timeEl.options].some(o=>o.value===kpiTimeFilter))timeEl.value=kpiTimeFilter;
+  if(timeEl)timeEl.value=kpiTimeFilter;
   const teamEl=document.getElementById('kpi-team-filter');
   if(teamEl&&[...teamEl.options].some(o=>o.value===kpiTeamFilter))teamEl.value=kpiTeamFilter;
   const kpiAgentEl=document.getElementById('kpi-agent-filter');
@@ -8176,6 +8436,34 @@ function normalizeJiraInput(value){const raw=String(value||'').trim().toUpperCas
 function canonicalJiraKey(value){const key=normalizeJiraInput(value);return /^[A-Z][A-Z0-9]+-\d+$/.test(key)?key:'';}
 function manualTicketCategories(){return CATEGORIES.filter(c=>c!=='Spam');}
 function subtypeOptionsForCategory(category){return TICKET_SUBTYPES.filter(x=>x.type===category);}
+/* "Other" is the category for everything the numbered list does not cover, so
+   it has no numbered sub-categories and never will - picking it used to leave
+   a dead control reading "No subtype", and whatever the ticket was actually
+   about went unrecorded or into the description where no filter can see it.
+
+   For that one category the control is a text field instead, and what the
+   agent types is stored in ticketSubtype like any other value. Nothing else
+   changes: ticketSubtype has always been a free-form map, and every reader
+   already looks the value up in SUBTYPE_BY_ID and copes with a miss - the SLA
+   badge falls back to the ticket's own priority, which is the right answer for
+   a sub-category we know nothing about. */
+const FREE_TEXT_SUBTYPE_CATEGORY='Other';
+function categoryUsesFreeTextSubtype(category){
+  return String(category||'')===FREE_TEXT_SUBTYPE_CATEGORY;
+}
+const SUBTYPE_MAX_LEN=80;
+function normalizeFreeTextSubtype(value){
+  // Collapsed and clipped: this is a label on a card, and it is round-tripped
+  // through the state blob to every other open board.
+  return String(value||'').replace(/\s+/g,' ').trim().slice(0,SUBTYPE_MAX_LEN);
+}
+// What to print for a ticket's sub-category: the numbered label when it is one
+// of ours, otherwise whatever was typed.
+function subtypeDisplayLabel(subtype){
+  const st=SUBTYPE_BY_ID[subtype||''];
+  if(st)return`${st.id} - ${st.label}`;
+  return normalizeFreeTextSubtype(subtype);
+}
 function populateCreateCategoryOptions(selected='Other'){
   const sel=document.getElementById('ct-category');
   if(!sel)return;
@@ -8185,11 +8473,29 @@ function populateCreateCategoryOptions(selected='Other'){
 }
 function populateCreateSubtypeOptions(category,selected=''){
   const sel=document.getElementById('ct-subtype');
+  const text=document.getElementById('ct-subtype-text');
   if(!sel)return;
+  // "Other" has no numbered sub-categories, so it gets a text field. Swapped
+  // with `hidden` rather than by rebuilding the row, so whatever was typed
+  // survives flipping to another category and back within one draft.
+  const freeText=categoryUsesFreeTextSubtype(category);
+  sel.hidden=freeText;
+  if(text){
+    text.hidden=!freeText;
+    if(freeText&&!SUBTYPE_BY_ID[selected])text.value=normalizeFreeTextSubtype(selected||text.value);
+  }
+  if(freeText){sel.innerHTML='';return;}
   const options=subtypeOptionsForCategory(category);
   sel.innerHTML=`<option value="">No sub-category</option>`+options.map(st=>`<option value="${esc(st.id)}"${st.id===selected?' selected':''}>${esc(st.id)} - ${esc(st.label)}</option>`).join('');
   if(selected&&options.some(st=>st.id===selected))sel.value=selected;
   else sel.value='';
+}
+// The value the create form is currently offering, from whichever of the two
+// controls is on screen.
+function createFormSubtypeValue(){
+  const category=document.getElementById('ct-category')?.value||'Other';
+  if(categoryUsesFreeTextSubtype(category))return normalizeFreeTextSubtype(document.getElementById('ct-subtype-text')?.value||'');
+  return document.getElementById('ct-subtype')?.value||'';
 }
 function normalizeStoredJiraLinks(){
   let changed=false;
@@ -8216,24 +8522,62 @@ function renderJiraConnectionStatus(){
   }
   el.textContent=bits.join(' ');
 }
+/* Which entry points this person gets. Three different audiences, so three
+   different answers rather than one isAdmin flag:
+
+   - Users, Jira settings: admin.
+   - Insights: admin. Every panel in it reads across the whole board to say how
+     the team is performing, which is not something an agent sees about their
+     colleagues. The four routes behind it are requireAdmin.
+   - The ticket audit trail: admin and support. "What happened to this ticket"
+     is a question the person working it has to be able to ask, and the page
+     narrows a support agent to their own tickets server-side. CS is out.
+
+   Hiding a button is presentation only - each endpoint enforces the same rule
+   itself. This is so nothing is offered that would come back 403. */
 function setAdminOnlyNavigationVisible(isAdmin){
+  const canReadAudit=isAdmin||currentUserTeam()==='support';
   document.querySelector('.account-users-link')?.classList.toggle('hidden', !isAdmin);
-  document.querySelector('.audit-board-btn')?.classList.toggle('hidden', !isAdmin);
+  const auditBtn=document.querySelector('.audit-board-btn');
+  auditBtn?.classList.toggle('hidden', !canReadAudit);
+  // The link promised a view of every agent's activity. A support agent gets
+  // their own tickets, so it says that instead of over-promising and landing
+  // them on a page that looks half broken.
+  if(auditBtn)auditBtn.title=isAdmin
+    ?'Which tickets each Support agent and each CS updated, and what they changed'
+    :'What changed on the tickets assigned to you, and who changed it';
   document.getElementById('jira-settings-btn')?.classList.toggle('hidden', !isAdmin);
+  document.getElementById('insights-view-btn')?.classList.toggle('hidden', !isAdmin);
 }
 function syncRoleRestrictedControls(){
   const canViewAll=currentUserCanViewAllTickets();
   document.querySelectorAll('.agent-filter-control').forEach(el=>el.classList.toggle('hidden', !canViewAll));
+  /* With the Team filter hidden, the filter is opened right up rather than
+     pinned to this person's own code. ticketVisibleToCurrentUser is what
+     restricts the board, and it is the wider of the two rules: a CS agent sees
+     the tickets they opened as well as the ones they own, and pinning the
+     filter to their trigram - which matches on CS ownership alone - hid every
+     ticket they had raised and since handed on. The rule decides what is on
+     the board; the filter is only a control, and there is no control here. */
   if(!canViewAll){
-    activeA=currentUser();
+    activeA='all';
     const agentEl=document.getElementById('agent-filter');
-    if(agentEl)agentEl.value=activeA;
+    if(agentEl)agentEl.value='all';
   }
+  /* The support-only board width toggle. Offered on the roster, not on the
+     current state, so it does not disappear the moment it is switched on -
+     which would leave a support agent looking at their own tickets with no
+     way back. */
+  const hasScopeToggle=currentUserHasBoardScopeToggle();
+  document.querySelectorAll('.board-scope-control').forEach(el=>el.classList.toggle('hidden', !hasScopeToggle));
+  document.getElementById('scope-all-btn')?.classList.toggle('active', !supportOnlyMine);
+  document.getElementById('scope-mine-btn')?.classList.toggle('active', supportOnlyMine);
   // Admin-only tools. Hiding the entry point is presentation only - the
   // endpoints behind them are requireAdmin server-side.
   const isAdmin=currentUserIsAdmin();
   document.querySelectorAll('.admin-only').forEach(el=>{el.style.display=isAdmin?'':'none';});
   if(!isAdmin&&viewMode==='qtDetect')showBoardView();
+  if(!isAdmin&&viewMode==='insights')showBoardView();
 }
 async function loadBuildVersion(){
   try{
@@ -8317,12 +8661,12 @@ function dupSubjectOverlap(a,b){
 function duplicateCandidates(id){
   const source=allTickets.find(t=>t.id===id);
   if(!source)return[];
-  const sourceMs=ticketTimestampMs(source)??Date.now();
+  const sourceMs=ticketArrivedMs(source)??Date.now();
   const sourceEmail=String(ticketClientEmail[id]||source.email?.sender||'').toLowerCase();
   return allTickets
     .filter(t=>t.id!==id&&!isDuplicateTicket(t.id)&&ticketCategory[t.id]!=='Spam')
     .map(t=>{
-      const ms=ticketTimestampMs(t)??0;
+      const ms=ticketArrivedMs(t)??0;
       if(ms>sourceMs)return null;
       const email=String(ticketClientEmail[t.id]||t.email?.sender||'').toLowerCase();
       const sameClient=!!email&&email===sourceEmail;
@@ -9101,6 +9445,11 @@ function openCreateModal(){
   document.getElementById('ct-subject').value='';
   document.getElementById('ct-desc').value='';
   document.getElementById('ct-priority').value='Medium';
+  // Cleared before populate, which otherwise keeps whatever the last draft
+  // typed - populateCreateSubtypeOptions preserves it on purpose so flipping
+  // category and back within one draft does not lose it.
+  const subText=document.getElementById('ct-subtype-text');
+  if(subText)subText.value='';
   populateCreateCategoryOptions('Other');
   populateCreateSubtypeOptions('Other','');
   document.getElementById('ct-jira').value='';
@@ -9133,7 +9482,7 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   ticketCreatedBy[id]=currentUser();
   const priority=document.getElementById('ct-priority').value;
   const category=document.getElementById('ct-category').value||'Other';
-  const subtype=document.getElementById('ct-subtype').value||'';
+  const subtype=createFormSubtypeValue();
   const ticket={id,email:fakeEmail,priority,isManual:true};
   ensureTicketNumber(id);
   if(clientEmail)ticketClientEmail[id]=clientEmail;
@@ -9211,7 +9560,12 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
 });
 
 //  View switching
-function hidePrimaryViews(){stopKpiAutoRefresh();document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';document.getElementById('mail-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
+function hidePrimaryViews(){stopKpiAutoRefresh();
+  // Belongs to the board and sits above it, so it goes with the board rather
+  // than hanging over whichever list is opened next. renderBoard() puts it
+  // back when there is still something to say.
+  const filterNotice=document.getElementById('board-filter-notice');if(filterNotice){filterNotice.style.display='none';filterNotice.innerHTML='';}
+  document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';document.getElementById('mail-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();/* renderBoard() shows the flat board or the swimlanes, per boardGrouping */}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
@@ -9508,8 +9862,11 @@ async function qtDetectImportFile(file){
      Reopened   - resolves that did not stick.
      Rewind     - what the board looked like at a past moment.
 
-   All four come from /api/insights/*, scoped server-side to whatever the
-   signed-in agent is allowed to see.
+   All four come from /api/insights/*, which are requireAdmin: each one reads
+   across the whole board to say how the team is performing, and an agent does
+   not see that about their colleagues. The nav button is hidden for everyone
+   else and showInsightsView refuses to open, but the gate that matters is the
+   one on the routes.
    =========================================================================== */
 
 let insightsData={bounce:null,dwell:null,reopened:null,rewind:null};
@@ -9519,6 +9876,10 @@ let insightsDaysWindow=30;
 let insightsTab='bounce';
 
 function showInsightsView(){
+  // A restored session, a copied link, or a stale tab can all ask for this
+  // view. All three end up on the board instead of on four empty panels
+  // reporting 403.
+  if(!currentUserIsAdmin())return showBoardView();
   viewMode='insights';
   setBoardChromeVisible(false);
   hidePrimaryViews();
@@ -10537,6 +10898,13 @@ async function renderAssignLogView(){
   const body=document.getElementById('assignlog-rows');
   const summary=document.getElementById('assignlog-summary');
   if(!body)return;
+  // /api/audit/assignments returns the whole log to admin and only the rows
+  // that name the caller to everyone else. So there is no per-agent filter to
+  // offer a support or CS agent - every row is already theirs.
+  const isAdmin=currentUserIsAdmin();
+  const agentFilterEl=document.getElementById('assignlog-agent-filter');
+  if(agentFilterEl)agentFilterEl.classList.toggle('hidden',!isAdmin);
+  if(!isAdmin)assignLogAgent='all';
   if(!assignLogRows.length&&!assignLogLoading){
     assignLogLoading=true;
     body.innerHTML='<tr><td colspan="6" style="padding:16px;color:var(--muted);">Loading assignment history&hellip;</td></tr>';
@@ -10554,9 +10922,12 @@ async function renderAssignLogView(){
   if(assignLogRevertsOnly)rows=rows.filter(r=>r.isRevert);
   if(assignLogAgent!=='all')rows=rows.filter(r=>r.from===assignLogAgent||r.to===assignLogAgent||r.actor===assignLogAgent);
   const reverts=assignLogRows.filter(r=>r.isRevert).length;
-  if(summary)summary.textContent=`${assignLogRows.length} change${assignLogRows.length===1?'':'s'} recorded  ${reverts} revert${reverts===1?'':'s'}  showing ${rows.length}`;
+  // Says whose log this is, so a short list reads as "mine" rather than as the
+  // team having had a quiet month.
+  const scopeNote=isAdmin?'':'  your assignments only';
+  if(summary)summary.textContent=`${assignLogRows.length} change${assignLogRows.length===1?'':'s'} recorded  ${reverts} revert${reverts===1?'':'s'}  showing ${rows.length}${scopeNote}`;
   if(!rows.length){
-    body.innerHTML='<tr><td colspan="6" style="padding:16px;color:var(--muted);">No assignment changes match this filter.</td></tr>';
+    body.innerHTML=`<tr><td colspan="6" style="padding:16px;color:var(--muted);">${isAdmin?'No assignment changes match this filter.':'No assignment changes involving you match this filter.'}</td></tr>`;
     return;
   }
   body.innerHTML=rows.map(r=>{
@@ -10586,38 +10957,108 @@ async function renderAssignLogView(){
     </tr>`;
   }).join('');
 }
-function ticketTimestampMs(t){
+function ticketArrivedMs(t){
   const id=t?.id;
   const raw=t?.email?.receivedDateTime||ticketCreatedAt[id]||null;
   const ms=raw?new Date(raw).getTime():NaN;
   return Number.isFinite(ms)?ms:null;
 }
+/* The single date that decides which KPI range a ticket counts in. Mirrors
+   kpiTicketInRange in server.js: an open ticket belongs to the range it
+   arrived in, a resolved one to the range it was resolved in - which is what
+   "resolved last week" is asking for.
+
+   One date per ticket, so the ranges add up: a ticket that arrived in March
+   and was resolved in April is in March's Created and April's Resolved, and in
+   neither range twice. The fallbacks walk from the most precise stamp we hold
+   to the least: CS's confirmation, then when the card was last moved between
+   columns, then arrival. */
+function ticketTimestampMs(t){
+  const id=t?.id;
+  const arrived=ticketArrivedMs(t);
+  if(normalizeTicketStage(ticketState[id]||'new')!=='res')return arrived;
+  const confirmed=Date.parse(ticketResolutionMeta[id]?.confirmedAt||'');
+  if(Number.isFinite(confirmed))return confirmed;
+  const touched=Number(ticketStageTouchedAt[id]||0);
+  return touched>0?touched:arrived;
+}
 function startOfDayMs(d){return new Date(d.getFullYear(),d.getMonth(),d.getDate()).getTime();}
 function quarterStartMonth(m){return Math.floor(m/3)*3;}
+/* The seven ranges the dashboard offers. Mirrors KPI_RANGE_KEYS,
+   normalizeKpiRange and kpiDateBounds in server.js, which is what the live
+   figures are computed with - this side is the offline fallback and the
+   dropdown, and the two have to agree about what "last week" means or the
+   fallback reads as the dashboard being wrong.
+
+   Every range is a calendar period, not a rolling window of days. A period
+   that has ended stops on its own last millisecond; one still running stops
+   now, because there is nothing yet to report past that. This list used to be
+   missing this_week, this_month and last_month altogether, and a key it did
+   not know fell through to `start=0` - so picking "This week" quietly measured
+   from the epoch and reported all time under a one-week heading. */
+const KPI_RANGES=[
+  {key:'today',label:'Today'},
+  {key:'this_week',label:'This week'},
+  {key:'last_week',label:'Last week'},
+  {key:'this_month',label:'This month'},
+  {key:'last_month',label:'Last month'},
+  {key:'this_quarter',label:'This quarter'},
+  {key:'last_quarter',label:'Last quarter'}
+];
+const KPI_RANGE_LABELS=Object.fromEntries(KPI_RANGES.map(r=>[r.key,r.label]));
+// Ranges this build no longer offers, mapped to the nearest one it does, so a
+// stored session or an old link resolves to a real period instead of silently
+// reading as Today.
+const KPI_RANGE_ALIASES={day:'today',week:'this_week',month:'this_month',quarter:'this_quarter',last_30_days:'this_month',this_year:'this_quarter'};
+function normalizeKpiRange(key){
+  const value=String(key||'today').trim().toLowerCase();
+  if(KPI_RANGE_LABELS[value])return value;
+  return KPI_RANGE_ALIASES[value]||'today';
+}
+// The dropdown is built from KPI_RANGES rather than written out in the
+// markup, so a range can never appear in the list without bounds behind it -
+// which is how "This quarter" once ended up showing a single day of data.
+function populateKpiRangeOptions(){
+  const sel=document.getElementById('kpi-time-filter');
+  if(!sel||sel.options.length===KPI_RANGES.length)return;
+  sel.innerHTML=KPI_RANGES.map(r=>`<option value="${esc(r.key)}">${esc(r.label)}</option>`).join('');
+}
 function getKpiBounds(key){
   const now=new Date();
   const nowMs=now.getTime();
   const dayStart=startOfDayMs(now);
   const dayMs=86400000;
-  let start=0,end=nowMs;
-  if(key==='today'){start=dayStart;}
-  else if(key==='last_week'){const dow=(now.getDay()+6)%7;const thisWeekStart=dayStart-(dow*dayMs);start=thisWeekStart-(7*dayMs);end=thisWeekStart-1;}
-  else if(key==='last_30_days'){start=dayStart-(29*dayMs);}
-  else if(key==='this_quarter'){start=new Date(now.getFullYear(),quarterStartMonth(now.getMonth()),1).getTime();}
-  else if(key==='last_quarter'){const thisQuarterStart=new Date(now.getFullYear(),quarterStartMonth(now.getMonth()),1).getTime();const thisQuarterDate=new Date(thisQuarterStart);start=new Date(thisQuarterDate.getFullYear(),thisQuarterDate.getMonth()-3,1).getTime();end=thisQuarterStart-1;}
-  else if(key==='this_year'){start=new Date(now.getFullYear(),0,1).getTime();}
-  return{start,end};
+  const year=now.getFullYear();
+  const month=now.getMonth();
+  // (day + 6) % 7 turns JS's Sunday-is-0 into a Monday-is-0 offset.
+  const thisWeekStart=dayStart-(((now.getDay()+6)%7)*dayMs);
+  const monthStart=new Date(year,month,1).getTime();
+  const quarterStart=new Date(year,quarterStartMonth(month),1).getTime();
+  switch(normalizeKpiRange(key)){
+    case 'this_week':return{start:thisWeekStart,end:nowMs};
+    case 'last_week':return{start:thisWeekStart-(7*dayMs),end:thisWeekStart-1};
+    case 'this_month':return{start:monthStart,end:nowMs};
+    case 'last_month':return{start:new Date(year,month-1,1).getTime(),end:monthStart-1};
+    case 'this_quarter':return{start:quarterStart,end:nowMs};
+    case 'last_quarter':{
+      const q=new Date(quarterStart);
+      return{start:new Date(q.getFullYear(),q.getMonth()-3,1).getTime(),end:quarterStart-1};
+    }
+    default:return{start:dayStart,end:nowMs};
+  }
 }
 function fmtKpiRangeLabel(key,b){
   const fmt=ms=>new Date(ms).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
-  const labels={today:'Today',last_week:'Last week',last_30_days:'Last 30 days',this_quarter:'This quarter',last_quarter:'Last quarter',this_year:'This year'};
-  return`${labels[key]||'Range'}  ${fmt(b.start)} to ${fmt(b.end)}`;
+  return`${KPI_RANGE_LABELS[normalizeKpiRange(key)]||'Range'}  ${fmt(b.start)} to ${fmt(b.end)}`;
 }
 function ticketFilterAgentValues(ticket){
   const id=ticket?.id;
   if(!id)return{assignee:'',csOwner:''};
-  const assignee=normalizeAgentCode(ticketAssignee[id]||'');
-  const csOwner=normalizeAgentCode(ensureTicketCSOwnerResolved(id,ticket.email)||ticketCSOwner[id]||'');
+  // agentIdentityCode, not normalizeAgentCode: a ticket held by an account
+  // that is not on the roster still has a holder, and reporting it as
+  // unassigned hid it from the one person it belonged to.
+  const assignee=agentIdentityCode(ticketAssignee[id]||'');
+  const csOwner=agentIdentityCode(ensureTicketCSOwnerResolved(id,ticket.email)||ticketCSOwner[id]||'');
   return{assignee,csOwner};
 }
 function normalizeSupportAgent(value){const code=normalizeAgentCode(value);return SUPPORT_AGENTS.includes(code)?code:'';}
@@ -10799,15 +11240,20 @@ document.getElementById('kpi-status-cards').addEventListener('keydown',e=>{
   openKpiDrilldown(card.dataset.kpiDrilldown);
 });
 async function renderKpiView(){
-  if(!currentUserCanViewAllTickets()){
-    const role=currentUserRole();
-    if(role==='cs')kpiTeamFilter='cs';
-    else if(role==='support')kpiTeamFilter='support';
+  /* Admin, not currentUserCanViewAllTickets(). A support agent reading the
+     whole board still reads only their own numbers here: the board is the work
+     queue, the dashboard is a measure of a person. The server pins the figures
+     the same way in loadKpiWorkingSet, so all this does is stop the controls
+     offering a filter whose result would come back pinned anyway. */
+  const canViewAllKpis=currentUserIsAdmin();
+  if(!canViewAllKpis){
+    kpiTeamFilter=currentUserTeam()==='cs'?'cs':'support';
     kpiAgentFilter=enforcedAgentFilter();
   }
-  const canViewAllTickets=currentUserCanViewAllTickets();
+  const canViewAllTickets=canViewAllKpis;
   const agentFilterEl=document.getElementById('kpi-agent-filter');
   const teamFilterEl=document.getElementById('kpi-team-filter');
+  populateKpiRangeOptions();
   document.getElementById('kpi-time-filter').value=kpiTimeFilter;
   document.getElementById('kpi-team-filter').value=kpiTeamFilter;
   // Only announce loading on the first pull - a timed refresh that blanked the
@@ -10916,10 +11362,9 @@ async function renderKpiView(){
   }
 }
 function renderKpiViewLocal(){
-  if(!currentUserCanViewAllTickets()){
-    const role=currentUserRole();
-    if(role==='cs')kpiTeamFilter='cs';
-    else if(role==='support')kpiTeamFilter='support';
+  // Same rule as renderKpiView - see the note there.
+  if(!currentUserIsAdmin()){
+    kpiTeamFilter=currentUserTeam()==='cs'?'cs':'support';
     kpiAgentFilter=enforcedAgentFilter();
   }
   const bounds=getKpiBounds(kpiTimeFilter);
@@ -10944,7 +11389,7 @@ function renderKpiViewLocal(){
     .filter(ticketMatchesCompany)
     .filter(t=>!activeJira||!!ticketJira[t.id])
     .filter(ticketMatchesTeam)
-    .filter(t=>ticketVisibleToCurrentUser(t))
+    .filter(ticketInCurrentUserKpiScope)
     .filter(t=>ticketMatchesAgentFilter(t,kpiAgentFilter));
   const statusCounts={new:0,inp:0,wus:0,dft:0,wct:0,res:0};
   const agentRows={};
@@ -10966,7 +11411,7 @@ function renderKpiViewLocal(){
   const uniqueCsCount=Object.keys(csCounts).filter(k=>k!=='Unassigned').length;
   const agentFilterEl=document.getElementById('kpi-agent-filter');
   const teamFilterEl=document.getElementById('kpi-team-filter');
-  const canViewAllTickets = currentUserCanViewAllTickets();
+  const canViewAllTickets = currentUserIsAdmin();
 
   if (canViewAllTickets) {
     const teamAgents=kpiTeamFilter==='cs'?CS_AGENTS:(kpiTeamFilter==='support'?SUPPORT_AGENTS:ALL_AGENTS);
@@ -10987,6 +11432,7 @@ function renderKpiViewLocal(){
     teamFilterEl.disabled = true;
   }
 
+  populateKpiRangeOptions();
   document.getElementById('kpi-time-filter').value=kpiTimeFilter;
   document.getElementById('kpi-team-filter').value=kpiTeamFilter;
   const teamLabel=kpiTeamFilter==='cs'?'CS only':(kpiTeamFilter==='support'?'Support only':'All CS & Support');
@@ -10994,7 +11440,7 @@ function renderKpiViewLocal(){
   document.getElementById('kpi-range-label').textContent=`Tickets considered: ${inRange.length} (non-spam, ${duplicatesInView.length} duplicate${duplicatesInView.length===1?'':'s'} excluded)  ${fmtKpiRangeLabel(kpiTimeFilter,bounds)}  ${teamLabel}  ${agentLabel}`;
   // Same SLA clock the board's badges use, aggregated. Open tickets only -
   // getSLAStatus deliberately has nothing to say about a resolved one.
-  const openLocal=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&!isDuplicateTicket(t.id)&&normalizeTicketStage(ticketState[t.id]||'new')!=='res'&&ticketVisibleToCurrentUser(t)&&ticketMatchesAgentFilter(t,kpiAgentFilter));
+  const openLocal=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&!isDuplicateTicket(t.id)&&normalizeTicketStage(ticketState[t.id]||'new')!=='res'&&ticketInCurrentUserKpiScope(t)&&ticketMatchesAgentFilter(t,kpiAgentFilter));
   const localSla=openLocal.map(t=>({t,status:getSLAStatus(t.id)})).filter(x=>x.status);
   const localOverdue=localSla.filter(x=>x.status.overdue);
   const localAtRisk=localSla.filter(x=>!x.status.overdue&&x.status.cls==='sla-urgent');
@@ -11374,7 +11820,7 @@ document.getElementById('kpi-autorefresh').addEventListener('change',e=>{
 document.addEventListener('visibilitychange',()=>{
   if(document.visibilityState==='visible'&&viewMode==='kpi'&&kpiAutoRefresh)void renderKpiView();
 });
-document.getElementById('kpi-time-filter').addEventListener('change',e=>{kpiTimeFilter=e.target.value||'today';saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();});
+document.getElementById('kpi-time-filter').addEventListener('change',e=>{kpiTimeFilter=normalizeKpiRange(e.target.value);saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();});
 document.getElementById('kpi-team-filter').addEventListener('change',e=>{kpiTeamFilter=e.target.value||'all';kpiAgentFilter='all';saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();});
 document.getElementById('kpi-agent-filter').addEventListener('change',e=>{kpiAgentFilter=e.target.value||'all';saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();});
 document.getElementById('jira-filter-btn').addEventListener('click',()=>{activeJira=!activeJira;saveLastWorkspaceSession();updateJiraBadge();if(viewMode==='kpi')renderKpiView();else renderBoard();});
@@ -11766,7 +12212,7 @@ function updateWorkload(){
 }
 function showToast(msg,cls=''){const t=document.getElementById('toast');t.textContent=msg;t.className='show'+(cls?' '+cls:'');clearTimeout(t._timer);t._timer=setTimeout(()=>{t.className='';},4500);}
 function startCountdown(){pollSecsLeft=POLL_SECS;const cd=document.getElementById('poll-cd');const tick=setInterval(()=>{pollSecsLeft--;cd.textContent=pollSecsLeft>0?' '+pollSecsLeft+'s':' checking';if(pollSecsLeft<=0)clearInterval(tick);},1000);}
-function rebuildTagged(){taggedTickets.clear();const me=currentUser();Object.entries(ticketComments).forEach(([id,cs])=>{if(cs.some(c=>Array.isArray(c.tags)&&c.tags.map(normalizeAgentCode).includes(me)))taggedTickets.add(id);});document.getElementById('tagged-filter').style.display=taggedTickets.size?'':'none';updateMentionsBadge();}
+function rebuildTagged(){taggedTickets.clear();const me=currentUser();Object.entries(ticketComments).forEach(([id,cs])=>{if(cs.some(c=>Array.isArray(c.tags)&&c.tags.map(agentIdentityCode).includes(me)))taggedTickets.add(id);});document.getElementById('tagged-filter').style.display=taggedTickets.size?'':'none';updateMentionsBadge();}
 async function buildAgentUI(){
   let loggedUser = {
     username: 'admin',
@@ -11812,11 +12258,19 @@ async function buildAgentUI(){
   }
 
   const isAdmin = isPrivilegedUser;
-  const canViewAllTickets = isAdmin;
   setAdminOnlyNavigationVisible(isAdmin);
 
-  if (!canViewAllTickets) {
-    kpiTeamFilter = currentUserRole()==='cs' ? 'cs' : 'support';
+  /* The dashboard is pinned to whoever is asking unless they are admin - which
+     is a different question from how wide their board is, so it is asked of
+     the role and not of currentUserCanViewAllTickets(). A support agent may
+     read every ticket and still not read a colleague's numbers.
+
+     currentUserTeam rather than currentUserRole: the seven CS accounts still
+     carrying the legacy 'agent' role would otherwise be pinned to the support
+     team and match nothing. The server applies the same rule in
+     loadKpiWorkingSet either way; this is so the controls agree with it. */
+  if (!isAdmin) {
+    kpiTeamFilter = currentUserTeam()==='cs' ? 'cs' : 'support';
     kpiAgentFilter = enforcedAgentFilter() || 'all';
   }
 
@@ -11824,10 +12278,12 @@ async function buildAgentUI(){
   af.innerHTML='<option value="all">All CS & Support</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><option value="tagged">Tagged me</option>';
   syncRoleRestrictedControls();
 
+  // Only the agents this person may hand a ticket to - for a support agent
+  // raising one, that is themselves.
   const ctAgent=document.getElementById('ct-agent');
   if(ctAgent){
     ctAgent.innerHTML =
-      '<optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('')+'</optgroup>';
+      '<optgroup label="Support">'+assignableSupportAgents().map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('')+'</optgroup>';
   }
 
   const grid=document.getElementById('tag-grid');
@@ -11872,9 +12328,13 @@ function agentAssignMenuHtml(selected,tagged=[]){
       <span class="agent-assign-dot" style="background:${agentColor(a)}"></span>
     </button>`;
   const renderGroup=(label,agents,extra='')=>agents.length?`<div class="agent-assign-group">${label}</div>`+agents.map(a=>renderOption(a,extra)).join(''):'';
-  const taggedList=(Array.isArray(tagged)?tagged:[]).filter(a=>SUPPORT_AGENTS.includes(a));
+  // Only the agents this person may actually assign to. For a support agent
+  // that is one name - their own - so the menu becomes "take this ticket".
+  const assignable=assignableSupportAgents();
+  if(!assignable.length)return '<div class="agent-assign-group">Nobody you can assign to</div>';
+  const taggedList=(Array.isArray(tagged)?tagged:[]).filter(a=>assignable.includes(a));
   return renderGroup('Tagged in the email',taggedList,' <span style="opacity:.6;">in mail</span>')
-    +renderGroup(taggedList.length?'All support':'Support',SUPPORT_AGENTS);
+    +renderGroup(taggedList.length?'All support':'Support',assignable);
 }
 
 function getAgentAssignMenuElement(wrap){
@@ -11933,8 +12393,14 @@ function positionAgentAssignMenu(wrap){
 
 function applyTicketAgentSelection(id,previousAgent,selected){
   if(!id||!selected)return;
-  const supportAgent=normalizeSupportAgent(selected);
-  if(!supportAgent)return;
+  /* Was normalizeSupportAgent, which only recognises the seven hard-coded
+     trigrams: a support account off that roster picked its own name out of
+     the menu and nothing happened at all, with nothing said. Who may be
+     assigned is already settled by assignableSupportAgents() - the whole
+     roster for admin and CS, themselves and nobody else for support - so
+     that is what this checks against. */
+  const supportAgent=agentIdentityCode(selected);
+  if(!supportAgent||!assignableSupportAgents().includes(supportAgent))return;
   if(!ticketCSOwner[id]){
     const cs=currentUserCSAgent();
     if(cs)ticketCSOwner[id]=cs;
@@ -12816,6 +13282,13 @@ function makeCard(ticket,isNew=false){
   const recentCommentsHtml=recentComments.length?recentComments.map(c=>{const tagHtml=(c.tags||[]).map(t=>`<span class="ctag" style="background:${t===CLIENT_TAG?'var(--slate-600)':agentColor(t)}">@${esc(t)}</span>`).join('');return`<div class="card-inline-comment"><div class="card-inline-head"><span class="card-inline-author">${esc(c.author||'SYSTEM')}</span><span class="card-inline-time">${fmtTime(c.ts)}</span>${tagHtml}</div><div class="card-inline-text">${esc(c.text||'')}</div></div>`;}).join(''):'<div class="card-inline-empty">No internal comments yet.</div>';
   const inlineSectionHtml=inlineOpen?`<div class="card-inline-thread"><div class="card-inline-comments">${recentCommentsHtml}</div><div class="card-inline-compose"><textarea class="card-inline-textarea" data-inline-text="${id}" placeholder="Add an internal note or tag a teammate...">${esc(inlineDraft)}</textarea><div class="card-inline-tags">${inlineTagsHtml}</div><div class="card-inline-actions"><button class="btn-out" data-inline-modal="${id}" style="font-size:10px;padding:3px 8px;">Full thread</button><button class="btn-primary" data-inline-post="${id}" style="font-size:10px;padding:4px 10px;">Post comment</button></div></div></div>`:'';
   const subtype=ticketSubtype[id]||'';const catOpts=CATEGORIES.map(c=>`<option value="${esc(c)}"${c===cat?' selected':''}>${esc(c)}</option>`).join('');const subOpts=TICKET_SUBTYPES.filter(x=>x.type===cat).map(x=>`<option value="${x.id}"${x.id===subtype?' selected':''}>${x.id} ? ${esc(x.label)}</option>`).join('');
+  // Under "Other" the sub-category is typed rather than picked - see
+  // categoryUsesFreeTextSubtype. Any other category with no numbered
+  // sub-categories keeps the old inert "No subtype" placeholder.
+  const subDraft=Object.prototype.hasOwnProperty.call(subtypeDrafts,id)?String(subtypeDrafts[id]):null;
+  const subControlHtml=categoryUsesFreeTextSubtype(cat)
+    ?`<input class="cat-select cat-sub-text" data-sub-text="${id}" type="text" value="${esc(subDraft!==null?subDraft:normalizeFreeTextSubtype(subtype))}" maxlength="${SUBTYPE_MAX_LEN}" placeholder="Describe the subtype" title="${esc(subtypeDisplayLabel(subtype)||'Type what this ticket is about - saved as its sub-category')}" />`
+    :`<select class="cat-select" data-sub="${id}">${subOpts||'<option value="">No subtype</option>'}</select>`;
   const clientEmail=ticketClientEmail[id]||null;
   const isInternalReply=isQuintaSender(email.sender)&&!!clientEmail;
   const hs=clientEmail?hsCache[clientEmail]:undefined;
@@ -12940,7 +13413,7 @@ function makeCard(ticket,isNew=false){
       <button class="pbadge pb-${priority}" data-pr="${id}">${priority}</button>
     </div>
     <div class="card-summary">${esc(trView?trView.summary:(email.summary||'No preview.'))}</div>
-    <div class="card-controls"><select class="cat-select" data-cat="${id}">${catOpts}</select><select class="cat-select" data-sub="${id}">${subOpts||'<option value="">No subtype</option>'}</select></div>
+    <div class="card-controls"><select class="cat-select" data-cat="${id}">${catOpts}</select>${subControlHtml}</div>
     ${trBannerHtml}${snoozeRowHtml}${proposedHtml}${dupBadgeHtml}${slaBadgeHtml}${hsHtml}${jiraDetailsHtml}${resolvedHtml}
     <div class="card-footer">
       ${senderHtml}
@@ -12956,7 +13429,7 @@ function makeCard(ticket,isNew=false){
         <button class="btn-out" data-snooze-open="${id}" title="Hide this ticket until later - a client reply wakes it early" style="font-size:10px;padding:2px 7px;">${snooze?'Snoozed':'Snooze'}</button>
         <button class="btn-out" data-archive="${id}" title="Archive this ticket" style="font-size:10px;padding:2px 7px;"> Archive</button>
         <div class="agent-assign-wrap" data-agent-menu="${id}">
-          <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? (taggedSupport.length?`Assign support agent - tagged in the email: ${esc(taggedSupport.join(', '))}` : 'Assign support agent') : 'Only admins and the ticket CS can change support assignment'}"${canAssign ? '' : ' disabled'}>
+          <button class="agent-assign-trigger" type="button" data-agent-trigger="${id}" title="${canAssign ? (taggedSupport.length?`Assign support agent - tagged in the email: ${esc(taggedSupport.join(', '))}` : assignTriggerTitle()) : esc(assignRefusedMessage())}"${canAssign ? '' : ' disabled'}>
             <span class="agent-assign-label">${esc(agent)}</span>
             <span class="agent-assign-chevron">v</span>
           </button>
@@ -12986,7 +13459,7 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-agent-trigger]').addEventListener('click',e=>{
     e.stopPropagation();
     if(!currentUserCanAssignTicket(ticket)){
-      showToast('Only admins and the ticket CS can change support assignment','warn');
+      showToast(assignRefusedMessage(),'warn');
       return;
     }
     document.querySelectorAll('.agent-assign-wrap.open').forEach(w=>{
@@ -13020,8 +13493,11 @@ function makeCard(ticket,isNew=false){
   });
   agentWrap.querySelectorAll('[data-agent-pick]').forEach(btn=>btn.addEventListener('click',e=>{
     e.stopPropagation();
-    if(!currentUserCanAssignTicket(ticket)){
-      showToast('Only admins and the ticket CS can change support assignment','warn');
+    // On the destination, not just on who is asking: the menu already only
+    // lists names this person may pick, and this is what keeps that true if a
+    // card is rendered from a stale roster.
+    if(!currentUserCanAssignTicketTo(ticket,btn.dataset.agentPick)){
+      showToast(assignRefusedMessage(),'warn');
       return;
     }
     const menu=getAgentAssignMenuElement(agentWrap);
@@ -13032,9 +13508,54 @@ function makeCard(ticket,isNew=false){
       restoreAgentAssignMenuToWrap(agentWrap);
     }
     agentWrap.classList.remove('open');
-    applyTicketAgentSelection(id,agent,normalizeAgentCode(btn.dataset.agentPick));
+    applyTicketAgentSelection(id,agent,agentIdentityCode(btn.dataset.agentPick));
   }));
-    div.querySelector('[data-cat]').addEventListener('change',e=>{const newCat=e.target.value;ticketCategory[id]=newCat;if(newCat==='Spam'){const spamEmail=ticketClientEmail[id]||email.sender?.toLowerCase();if(spamEmail&&!isQuintaSender(spamEmail)){const rc=recordSpamSender(spamEmail);showToast(rc>1?` Spam recorded  ${rc} tickets marked`:' Spam sender recorded','spam-t');}}saveState();renderBoard();updateSpamBadge();});
+    div.querySelector('[data-cat]').addEventListener('change',e=>{const newCat=e.target.value;ticketCategory[id]=newCat;
+    /* The sub-category belonged to the category that was just replaced, so it
+       is dropped rather than left describing the old one - a numbered id from
+       another category would render as a bare code, and free text typed under
+       "Other" says nothing once the ticket is an Integration ticket. renderBoard
+       below redraws the control as a text field or a select to match. */
+    if(ticketSubtype[id])delete ticketSubtype[id];
+    delete subtypeDrafts[id];
+    if(newCat==='Spam'){const spamEmail=ticketClientEmail[id]||email.sender?.toLowerCase();if(spamEmail&&!isQuintaSender(spamEmail)){const rc=recordSpamSender(spamEmail);showToast(rc>1?` Spam recorded  ${rc} tickets marked`:' Spam sender recorded','spam-t');}}saveState();renderBoard();updateSpamBadge();});
+  /* The numbered sub-category picker. This had no listener at all before, so
+     changing it on a card looked like it worked and was gone on the next
+     render - worth wiring while the free-text field next to it is being
+     added, since both write the same field. */
+  div.querySelector('[data-sub]')?.addEventListener('change',e=>{
+    const next=String(e.target.value||'');
+    if(next)ticketSubtype[id]=next;else delete ticketSubtype[id];
+    saveState();renderBoard();
+  });
+  /* The free-text sub-category under "Other". Saved on blur and on Enter
+     rather than per keystroke: every save is a state write broadcast to every
+     open board, and one per letter would be a lot of noise for a field
+     somebody is still typing in. renderBoard is deliberately NOT called - it
+     would rebuild the card under the cursor mid-edit. */
+  const subTextEl=div.querySelector('[data-sub-text]');
+  if(subTextEl){
+    const commitSubText=()=>{
+      const next=normalizeFreeTextSubtype(subTextEl.value);
+      delete subtypeDrafts[id];
+      if(next===String(ticketSubtype[id]||'')){subTextEl.value=next;return;}
+      if(next)ticketSubtype[id]=next;else delete ticketSubtype[id];
+      subTextEl.value=next;
+      saveState();
+    };
+    subTextEl.addEventListener('click',ev=>ev.stopPropagation());
+    subTextEl.addEventListener('input',ev=>{subtypeDrafts[id]=ev.target.value;});
+    subTextEl.addEventListener('change',commitSubText);
+    subTextEl.addEventListener('blur',commitSubText);
+    subTextEl.addEventListener('keydown',ev=>{
+      if(ev.key==='Enter'){ev.preventDefault();subTextEl.blur();}
+      else if(ev.key==='Escape'){
+        delete subtypeDrafts[id];
+        subTextEl.value=normalizeFreeTextSubtype(ticketSubtype[id]||'');
+        subTextEl.blur();
+      }
+    });
+  }
   div.querySelector('[data-jira-edit]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openJiraModal(id);});
   div.querySelector('[data-jira-open]').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(jiraKey&&JIRA_URL){window.open(`${JIRA_URL}${encodeURIComponent(jiraKey)}`,'_blank');return;}openJiraModal(id);});
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
@@ -13712,7 +14233,9 @@ async function bulkAssign(agent){
   const code=normalizeSupportAgent(agent);
   if(!code)return showToast('Unknown agent');
   const all=selectionList();
-  const allowed=all.filter(id=>{const t=allTickets.find(x=>x.id===id);return t&&currentUserCanAssignTicket(t);});
+  // Destination-aware, so a bulk assign to a colleague is skipped for a
+  // support agent rather than sent and refused ticket by ticket.
+  const allowed=all.filter(id=>{const t=allTickets.find(x=>x.id===id);return t&&currentUserCanAssignTicketTo(t,code);});
   if(!allowed.length)return showToast('You cannot reassign any of the selected tickets','warn');
   const before=captureTicketState(allowed,['assignee']);
   allowed.forEach(id=>setTicketAssignee(id,code,Date.now(),'bulk'));
@@ -13813,7 +14336,7 @@ function paletteCommands(){
     {kind:'cmd',label:'Ungroup board',run:()=>{boardGrouping='none';syncFilterControlsToState();renderBoard();},hint:'board'},
     {kind:'cmd',label:'Show only overdue',run:()=>{activeSLA=true;syncFilterControlsToState();renderBoard();},hint:'filter'},
     {kind:'cmd',label:'Show snoozed tickets',run:()=>{showSnoozed=true;syncFilterControlsToState();renderBoard();},hint:'filter'},
-    {kind:'cmd',label:'Clear all filters',run:()=>{activeP='all';activeA='all';activeCompany='all';activeStage='all';activeLanguage='all';activeSLA=false;activeJira=false;activeTicketNumber='';showSnoozed=false;syncFilterControlsToState();renderBoard();},hint:'filter'},
+    {kind:'cmd',label:'Clear all filters',run:clearAllBoardFilters,hint:'filter'},
     {kind:'cmd',label:'Set WIP limits',run:openWipModal,hint:'board'},
     {kind:'cmd',label:'Save this view',run:saveCurrentView,hint:'view'},
     {kind:'cmd',label:'Copy a link to this view',run:copyViewLink,hint:'view'},
@@ -14041,7 +14564,7 @@ function renderBoard(){
   rebuildTagged();
   syncRoleRestrictedControls();
   document.getElementById('ticket-number-filter').value=activeTicketNumber;
-  const agentFilter=enforcedAgentFilter();
+  const agentFilter=boardAgentFilter();
   const visible=allTickets.filter(t=>ticketPassesBoardFilters(t,agentFilter));
   visibleBoardTicketIds=new Set(visible.map(t=>t.id));
   pruneSelectionToVisible();
@@ -14083,7 +14606,7 @@ function renderBoard(){
     });
   }
 
-  updateWorkload();updateSpamBadge();updateArchiveBadge();updateJiraBadge();updateSnoozeBadge();updateWipWarning();renderSelectionBar();
+  updateWorkload();updateSpamBadge();updateArchiveBadge();updateJiraBadge();updateSnoozeBadge();updateWipWarning();renderBoardFilterNotice(visible.length);renderSelectionBar();
 }
 
 /* Swimlanes.
@@ -14157,6 +14680,75 @@ function updateSnoozeBadge(){
 
 // One line, above the columns, naming whoever is over their own ceiling. The
 // column headers already say which column is heavy; this says which person is.
+/* Which filters are on, named the way the filter bar names them.
+
+   Written for the moment an agent says "I cannot see any tickets": the answer
+   is nearly always one control they do not remember touching - or, in the
+   case the search box, one the browser filled in for them. */
+function activeBoardFilterLabels(){
+  const on=[];
+  if(activeP!=='all')on.push(`priority ${activeP}`);
+  if(activeA==='tagged')on.push('tagged me');
+  else if(activeA!=='all')on.push(`team ${activeA}`);
+  if(activeCompany!=='all')on.push(`company ${activeCompany}`);
+  if(activeStage!=='all')on.push(`stage ${COL_NAMES[activeStage]||activeStage}`);
+  if(activeLanguage!=='all')on.push(`language ${activeLanguage}`);
+  if(activeJira)on.push('Jira only');
+  if(activeSLA)on.push('overdue only');
+  if(showSnoozed)on.push('snoozed only');
+  if(String(activeTicketNumber||'').trim())on.push(`search "${String(activeTicketNumber).trim()}"`);
+  if(supportOnlyMine)on.push('only mine');
+  return on;
+}
+/* How many tickets the board would hold with every filter off.
+
+   supportOnlyMine is stood down for the count because it is a filter like the
+   others and the most likely one to be hiding everything - and because a
+   support agent is allowed the whole queue anyway, so counting it for them
+   discloses nothing they could not switch the toggle and see. For CS the rule
+   is not a control and is left alone: they are told about their own tickets,
+   never about the size of a queue that is not theirs. */
+function boardTicketCountWithoutFilters(){
+  const wasOnlyMine=supportOnlyMine;
+  if(currentUserHasBoardScopeToggle())supportOnlyMine=false;
+  try{
+    return allTickets.filter(t=>
+      ticketCategory[t.id]!=='Spam'
+      &&!isArchivedTicket(t.id)
+      &&!isSnoozed(t.id)
+      &&!isResolvedTicketHidden(t.id)
+      &&ticketVisibleToCurrentUser(t)
+    ).length;
+  }finally{supportOnlyMine=wasOnlyMine;}
+}
+function clearAllBoardFilters(){
+  activeP='all';activeA='all';activeCompany='all';activeStage='all';activeLanguage='all';
+  activeSLA=false;activeJira=false;activeTicketNumber='';showSnoozed=false;
+  // Only for whoever is actually offered the toggle - clearing it for CS would
+  // be clearing a rule, not a filter.
+  if(currentUserHasBoardScopeToggle())supportOnlyMine=false;
+  syncFilterControlsToState();
+  syncRoleRestrictedControls();
+  saveLastWorkspaceSession();
+  renderBoard();
+}
+function renderBoardFilterNotice(visibleCount){
+  const el=document.getElementById('board-filter-notice');
+  if(!el)return;
+  // renderBoard() is called from the spam and archive views so the board is
+  // correct when somebody comes back to it; the notice belongs to the board
+  // and must not appear over one of those lists.
+  const labels=(visibleCount>0||viewMode!=='board')?[]:activeBoardFilterLabels();
+  const total=labels.length?boardTicketCountWithoutFilters():0;
+  if(!labels.length||!total){el.style.display='none';el.innerHTML='';return;}
+  el.style.display='';
+  el.innerHTML=`<span><strong>${total}</strong> ticket${total===1?'':'s'} on your board, none of them matching the filters you have on (${esc(labels.join(', '))}).</span>`;
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.textContent='Clear filters';
+  btn.addEventListener('click',clearAllBoardFilters);
+  el.appendChild(btn);
+}
 function updateWipWarning(){
   const el=document.getElementById('wip-warning');
   if(!el)return;
@@ -14171,6 +14763,23 @@ document.getElementById('sort-desc').addEventListener('click',()=>{sortDesc=true
 document.getElementById('sort-asc').addEventListener('click',()=>{sortDesc=false;document.getElementById('sort-asc').classList.add('active');document.getElementById('sort-desc').classList.remove('active');saveLastWorkspaceSession();renderBoard();});
 document.querySelectorAll('[data-pf]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-pf]').forEach(x=>x.classList.remove('active'));b.classList.add('active');activeP=b.dataset.pf;saveLastWorkspaceSession();renderBoard();}));
 document.getElementById('agent-filter').addEventListener('change',e=>{activeA=e.target.value;saveLastWorkspaceSession();renderBoard();});
+/* The support-only board width toggle. Narrowing the board changes which
+   tickets exist as far as every other view is concerned - spam, archive and
+   snooze all read ticketVisibleToCurrentUser - so the badges are refreshed
+   alongside the board rather than left showing counts for tickets that are no
+   longer on it. renderActiveView, not renderBoard, so switching while on the
+   spam or archive list updates the list actually on screen. */
+function setSupportBoardScope(onlyMine){
+  if(!currentUserHasBoardScopeToggle())return;
+  if(supportOnlyMine===onlyMine)return;
+  supportOnlyMine=onlyMine;
+  saveLastWorkspaceSession();
+  syncRoleRestrictedControls();
+  updateSpamBadge();updateArchiveBadge();
+  renderActiveView();
+}
+document.getElementById('scope-all-btn')?.addEventListener('click',()=>setSupportBoardScope(false));
+document.getElementById('scope-mine-btn')?.addEventListener('click',()=>setSupportBoardScope(true));
 document.getElementById('company-filter').addEventListener('change',e=>{activeCompany=e.target.value;saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();else renderBoard();});
 document.getElementById('stage-filter').addEventListener('change',e=>{activeStage=e.target.value;saveLastWorkspaceSession();renderBoard();});
 // The workload bar hides its scrollbar for a cleaner header look, which
@@ -14233,7 +14842,19 @@ setInterval(()=>{
 // A view link is only useful if opening it actually applies the view.
 window.addEventListener('hashchange',()=>{if(applyViewHash(location.hash))renderBoard();});
 
-document.getElementById('ticket-number-filter').addEventListener('input',e=>{activeTicketNumber=e.target.value||'';renderBoard();});
+/* Only a value this person actually typed filters the board.
+
+   A lone text input on a page you have just signed in to is exactly what a
+   password manager fills with the username it saved, and it does that by
+   setting the value and firing `input` - so the board silently narrowed to a
+   search for the agent's own login name and came up empty, with the reason
+   sitting in plain sight in a box nobody reads. Autofill happens without the
+   box ever being focused; typing and pasting cannot. */
+document.getElementById('ticket-number-filter').addEventListener('input',e=>{
+  if(document.activeElement!==e.target){e.target.value=activeTicketNumber;return;}
+  activeTicketNumber=e.target.value||'';
+  renderBoard();
+});
 // Some browsers restore a text input's previously typed value on reload or
 // back/forward-cache navigation even with autocomplete off, and can apply
 // that restoration asynchronously after the page has already finished
@@ -15068,7 +15689,10 @@ function renderEmContext(){
   host.querySelectorAll('[data-emc-assign]').forEach(btn=>btn.addEventListener('click',async ()=>{
     const ticket=allTickets.find(t=>t.id===id);
     if(!ticket)return;
-    if(!currentUserCanAssignTicket(ticket))return showToast('Only admins and the ticket CS can change support assignment','warn');
+    // Accepting a suggestion is still an assignment, so it answers to the same
+    // rule - a support agent may accept one that names them, not one that
+    // names a colleague.
+    if(!currentUserCanAssignTicketTo(ticket,btn.dataset.emcAssign))return showToast(assignRefusedMessage(),'warn');
     const before=captureTicketState([id],['assignee']);
     setTicketAssignee(id,btn.dataset.emcAssign,Date.now(),'suggestion');
     pushUndo(`Assigned ${ticketDisplayNumber(id)} to ${btn.dataset.emcAssign}`,()=>restoreTicketState(before,['assignee']));
@@ -15383,6 +16007,24 @@ async function emSendReply(){
       showToast(emReplyErrorMessage(res.status,out),'warn');
       return;
     }
+    /* The reply is out, so the response clock starts again from here.
+
+       The commitment is a response time, not a lifetime: once the client has
+       been answered, the minutes until they write back are theirs, and leaving
+       the clock running would breach a ticket that was replied to inside its
+       target and then simply waited.
+
+       Stamped here rather than left to the mail poll. A reply sent from the
+       board leaves through the helpdesk mailbox, so the only copy of it is in
+       Sent - polling reads the inbox, so it never comes back and never reset
+       anything. mergeEmailIntoExistingTicket does stamp this for messages that
+       do arrive, which is the client's next reply, and the two agree: whoever
+       spoke last restarts the clock.
+
+       Set before postTicketComment because that saves the state and re-renders
+       the board, so the new stamp travels on the same write and the badge is
+       right immediately rather than after the next poll. */
+    ticketSlaResetAt[id]=Date.now();
     // The board's own record of the reply. CLIENT_TAG marks it as something the
     // client was actually told, as opposed to an internal note.
     postTicketComment(id,`Replied to ${out.to.join(', ')||'client'} from ${out.from}:\n\n${bodyText}`,[CLIENT_TAG]);
@@ -16696,7 +17338,7 @@ if(comTrState.undo||comTrState.lang){comTrState.undo=null;comTrState.lang=null;t
 const trNotes=trTicketIsOn(id)?(trNotesCache.get(id)||{}):null;
 const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}el.innerHTML=cs.map((c,ci)=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';const shown=trNotes&&typeof trNotes[ci]==='string'?trNotes[ci]:c.text;const trMark=trNotes&&typeof trNotes[ci]==='string'&&trNotes[ci]!==c.text?' tr-seg':'';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text${trMark}">${esc(shown)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
 function openComModal(ticket){const{email,id}=ticket;comTicketId=id;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee}  CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr}  ${agInfo}  ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
-function postTicketComment(ticketId,text,tags){if(!text||!ticketId)return false;if(!ticketComments[ticketId])ticketComments[ticketId]=[];const author=currentUser();const normalizedTags=[...new Set((Array.isArray(tags)?tags:[]).map(t=>t===CLIENT_TAG?CLIENT_TAG:normalizeAgentCode(t)).filter(Boolean))];ticketComments[ticketId].push({author,text,tags:normalizedTags,ts:Date.now()});saveState('ticket_comment_added');renderBoard();if(comTicketId===ticketId)renderThread(ticketId);const at=normalizedTags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast(`Bell alert sent to: ${at.join(', ')}`,'ok');else showToast('Comment posted','ok');return true;}
+function postTicketComment(ticketId,text,tags){if(!text||!ticketId)return false;if(!ticketComments[ticketId])ticketComments[ticketId]=[];const author=currentUser();const normalizedTags=[...new Set((Array.isArray(tags)?tags:[]).map(t=>t===CLIENT_TAG?CLIENT_TAG:agentIdentityCode(t)).filter(Boolean))];ticketComments[ticketId].push({author,text,tags:normalizedTags,ts:Date.now()});saveState('ticket_comment_added');renderBoard();if(comTicketId===ticketId)renderThread(ticketId);const at=normalizedTags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast(`Bell alert sent to: ${at.join(', ')}`,'ok');else showToast('Comment posted','ok');return true;}
 function addInternalComment(ticketId,text,tags){if(!postTicketComment(ticketId,text,tags))return;if(comTicketId===ticketId)renderThread(ticketId);}
 document.getElementById('com-post').addEventListener('click',()=>{const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;const tags=[...selectedTags];if(!postTicketComment(comTicketId,text,tags))return;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));if(comTicketId)renderThread(comTicketId);});
 document.getElementById('com-debug-expert').addEventListener('click',async()=>{if(!comTicketId)return;const btn=document.getElementById('com-debug-expert');const ticket=allTickets.find(t=>t.id===comTicketId);if(!ticket)return;const assignee=ticketAssignee[comTicketId]||null;btn.disabled=true;btn.textContent='Analyzing';try{const ce=ticketClientEmail[comTicketId]||getClientEmail(ticket.email)||null;const hs=ce?hsCache[ce]:null;const resp=await fetch('/api/debug-expert',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({ticketId:comTicketId,email:ticket.email,assignee,companyName:hs?.companyName||null})});const out=await resp.json().catch(()=>({}));if(!resp.ok){showToast(`Debug Expert failed: ${out?.error||resp.status}`);return;}const parts=[];parts.push('Debug Expert proposed solution');if(out?.summary)parts.push(out.summary);if(Array.isArray(out?.steps)&&out.steps.length){parts.push('Recommended steps:');out.steps.slice(0,6).forEach((s,i)=>parts.push(`${i+1}. ${s}`));}if(Array.isArray(out?.articles)&&out.articles.length){parts.push('Relevant HubSpot KB articles:');out.articles.slice(0,5).forEach(a=>parts.push(`- ${a.title}${a.url?` (${a.url})`:''}`));}if(Array.isArray(out?.attachmentFindings)&&out.attachmentFindings.length){parts.push('Attachment findings:');out.attachmentFindings.slice(0,5).forEach(a=>parts.push(`- ${a}`));}const tags=assignee?[assignee]:[];addInternalComment(comTicketId,parts.join('\n'),tags);showToast(assignee?`Debug proposal posted and tagged ${assignee}`:'Debug proposal posted','ok');}catch(e){showToast(`Debug Expert error: ${String(e?.message||e)}`);}finally{btn.disabled=false;btn.textContent='Debug Expert';}});
@@ -16717,19 +17359,19 @@ async function checkForBrowserNotifications(){
     const ticketsById=new Map((Array.isArray(s.allTickets)?s.allTickets:[]).map(t=>[t.id,t]));
     const ticketLabel=id=>ticketsById.get(id)?.email?.subject||`Ticket ${id}`;
     Object.entries(next.ticketAssignee).forEach(([id,agent])=>{
-      if(prev.ticketAssignee[id]!==agent&&(normalizeAgentCode(agent)===me||currentUserIsAdmin()))showBrowserNotification(currentUserIsAdmin()&&normalizeAgentCode(agent)!==me?`Ticket assigned to ${agent||'unassigned'}`:'Ticket assigned to you',ticketLabel(id));
+      if(prev.ticketAssignee[id]!==agent&&(agentIdentityCode(agent)===me||currentUserIsAdmin()))showBrowserNotification(currentUserIsAdmin()&&agentIdentityCode(agent)!==me?`Ticket assigned to ${agent||'unassigned'}`:'Ticket assigned to you',ticketLabel(id));
     });
     Object.entries(next.ticketState).forEach(([id,stage])=>{
       if(!prev.ticketState[id]||prev.ticketState[id]===stage)return;
-      const assignee=normalizeAgentCode(next.ticketAssignee[id]);
-      const csOwner=normalizeAgentCode((s.ticketCSOwner||{})[id]);
+      const assignee=agentIdentityCode(next.ticketAssignee[id]);
+      const csOwner=agentIdentityCode((s.ticketCSOwner||{})[id]);
       if(assignee===me||csOwner===me||currentUserIsAdmin())showBrowserNotification('Ticket moved to '+(COL_NAMES[normalizeTicketStage(stage)]||stage),ticketLabel(id));
     });
     Object.entries(next.commentCounts).forEach(([id,count])=>{
       const prevCount=prev.commentCounts[id]||0;
       if(count<=prevCount)return;
       (s.ticketComments[id]||[]).slice(prevCount).forEach(c=>{
-        const tags=(c.tags||[]).map(normalizeAgentCode).filter(Boolean);
+        const tags=(c.tags||[]).map(agentIdentityCode).filter(Boolean);
         const forMe=currentUserIsAdmin()?tags.length>0:tags.includes(me);
         if(forMe)showBrowserNotification('New comment on '+ticketLabel(id),c.text||'');
       });
@@ -16741,7 +17383,7 @@ async function checkForBrowserNotifications(){
   notifySnapshot=next;
 }
 
-function getMentions(user){const me=normalizeAgentCode(user);const isAdminUser=currentUserIsAdmin();const r=[];Object.entries(ticketComments).forEach(([tid,cs])=>{const t=allTickets.find(x=>x.id===tid);cs.forEach((c,ci)=>{const normalizedTags=Array.isArray(c.tags)?c.tags.map(normalizeAgentCode).filter(Boolean):[];const matches=isAdminUser?normalizedTags.length>0:normalizedTags.includes(me);if(matches)r.push({ticketId:tid,ci,comment:c,ticket:t,key:`${tid}:${ci}`});});});return r.sort((a,b)=>(b.comment.ts||0)-(a.comment.ts||0));}
+function getMentions(user){const me=agentIdentityCode(user);const isAdminUser=currentUserIsAdmin();const r=[];Object.entries(ticketComments).forEach(([tid,cs])=>{const t=allTickets.find(x=>x.id===tid);cs.forEach((c,ci)=>{const normalizedTags=Array.isArray(c.tags)?c.tags.map(agentIdentityCode).filter(Boolean):[];const matches=isAdminUser?normalizedTags.length>0:normalizedTags.includes(me);if(matches)r.push({ticketId:tid,ci,comment:c,ticket:t,key:`${tid}:${ci}`});});});return r.sort((a,b)=>(b.comment.ts||0)-(a.comment.ts||0));}
 function unreadMentionCountForTicket(ticketId,user=currentUser()){return getMentions(user).filter(m=>m.ticketId===String(ticketId)&&!readMentions.has(m.key)).length;}
 function unreadAlertCountForTicket(ticketId,user=currentUser()){return unreadMentionCountForTicket(ticketId,user)+unreadJiraAlertCountForTicket(ticketId,user);}
 function getAlertFeed(user=currentUser()){

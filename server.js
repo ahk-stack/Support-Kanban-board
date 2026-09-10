@@ -392,6 +392,23 @@ function canConfirmResolution(role, username) {
   return team === 'cs' || team === 'admin';
 }
 function canAssignSupportAgent(role, username) { return canConfirmResolution(role, username); }
+
+/* Handing a ticket out is CS's call, with one exception: a support agent may
+   take a ticket for themselves. Picking up your own work is not the decision
+   this restriction exists to protect - what it stops is one agent quietly
+   passing a ticket to somebody else. So the check is on the destination, not
+   just on who is asking. */
+function canAssignSupportAgentTo(role, username, nextAssignee) {
+  if (canAssignSupportAgent(role, username)) return true;
+  const me = String(username || '').trim().toUpperCase();
+  const to = String(nextAssignee || '').trim().toUpperCase();
+  return !!me && me === to;
+}
+
+// The team the request is being made by, and the agent code to scope rows to.
+function actorTeam(req) { return effectiveTeam(req?.session?.role, req?.session?.username); }
+function actorAgentCode(req) { return String(req?.session?.username || '').trim().toUpperCase(); }
+
 function requireAdmin(req, res, next) {
   if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
   // Revalidate first, so the role checked below is the one on the row rather
@@ -400,6 +417,30 @@ function requireAdmin(req, res, next) {
     if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
     return next();
   });
+}
+/* The audit trail is a support and admin tool: it answers "what happened to
+   this ticket", which is a question the person working the ticket has to be
+   able to ask. CS is deliberately out - they see the tickets they opened and
+   nothing about how the rest of the board was handled.
+
+   Passing the gate is not the same as seeing everything: a support agent's
+   rows are narrowed to their own tickets by auditTicketWhereForActor below.
+   Admin is the only team that reads the whole log. */
+function requireSupportOrAdmin(req, res, next) {
+  if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
+  return revalidateSession(req, res, () => {
+    const team = actorTeam(req);
+    if (team !== 'admin' && team !== 'support') return res.status(403).json({ error: 'support_or_admin_required' });
+    return next();
+  });
+}
+/* The ticket-side half of the same rule, as a Prisma filter. Null means "no
+   restriction" (admin); otherwise only the tickets this support agent holds.
+   Returned as a filter rather than applied by the caller so the four audit
+   routes cannot drift apart on what "his ticket" means. */
+function auditTicketWhereForActor(req) {
+  if (actorTeam(req) === 'admin') return null;
+  return { assignedAgent: actorAgentCode(req) };
 }
 function hashApiToken(rawToken) {
   return crypto.createHash('sha256').update(String(rawToken || '')).digest('hex');
@@ -698,59 +739,105 @@ function normalizeDbStatusForBoard(status) {
 function startOfLocalDay(date = new Date()) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
+/* The seven ranges the dashboard offers, and the only seven it accepts.
+
+   Each is a calendar period, not a rolling count of days: "this week" is the
+   week you are in, "last month" is the month before this one. A period that
+   has finished ends on its own last millisecond; a period still running ends
+   now, because there is nothing yet to report past that.
+
+   `label` is what the dashboard prints, so the heading and the figures under it
+   can only ever come from the same entry. An unrecognised key falls back to
+   today - and says so, by returning today's label with it, which is what stops
+   the old failure where picking a quarter showed a single day of data under a
+   quarter's heading.
+
+   Weeks start Monday: `(day + 6) % 7` turns JS's Sunday-is-0 into a
+   Monday-is-0 offset. */
+const KPI_RANGE_KEYS = ['today', 'this_week', 'last_week', 'this_month', 'last_month', 'this_quarter', 'last_quarter'];
+// Aliases kept so an older client, or a session that stored one of the ranges
+// this list replaced, still resolves to a real period instead of silently
+// reading as Today.
+const KPI_RANGE_ALIASES = {
+  day: 'today', week: 'this_week', month: 'this_month', quarter: 'this_quarter',
+  last_30_days: 'this_month', this_year: 'this_quarter'
+};
+function normalizeKpiRange(range) {
+  const key = String(range || 'today').trim().toLowerCase();
+  if (KPI_RANGE_KEYS.includes(key)) return key;
+  return KPI_RANGE_ALIASES[key] || 'today';
+}
+function endOfPeriod(startOfNext) { return new Date(startOfNext.getTime() - 1); }
 function kpiDateBounds(range) {
   const now = new Date();
   const dayStart = startOfLocalDay(now);
   const dayMs = 24 * 60 * 60 * 1000;
-  const key = String(range || 'today').trim().toLowerCase();
-  if (key === 'today' || key === 'day') return { start: dayStart, end: now, label: 'Today' };
-  if (key === 'this_week' || key === 'week') {
-    const dow = (dayStart.getDay() + 6) % 7;
-    return { start: new Date(dayStart.getTime() - dow * dayMs), end: now, label: 'This week' };
-  }
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const mondayOffset = (dayStart.getDay() + 6) % 7;
+  const thisWeekStart = new Date(dayStart.getTime() - mondayOffset * dayMs);
+  const key = normalizeKpiRange(range);
+
+  if (key === 'today') return { key, start: dayStart, end: now, label: 'Today' };
+  if (key === 'this_week') return { key, start: thisWeekStart, end: now, label: 'This week' };
   if (key === 'last_week') {
-    const dow = (dayStart.getDay() + 6) % 7;
-    const thisWeekStart = dayStart.getTime() - dow * dayMs;
-    return { start: new Date(thisWeekStart - 7 * dayMs), end: new Date(thisWeekStart - 1), label: 'Last week' };
+    return { key, start: new Date(thisWeekStart.getTime() - 7 * dayMs), end: endOfPeriod(thisWeekStart), label: 'Last week' };
   }
-  if (key === 'this_month' || key === 'month') return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now, label: 'This month' };
-  if (key === 'last_30_days') return { start: new Date(dayStart.getTime() - 29 * dayMs), end: now, label: 'Last 30 days' };
-  if (key === 'this_quarter' || key === 'quarter') {
-    return { start: new Date(now.getFullYear(), quarterStartMonth(now.getMonth()), 1), end: now, label: 'This quarter' };
+  if (key === 'this_month') return { key, start: new Date(year, month, 1), end: now, label: 'This month' };
+  if (key === 'last_month') {
+    return { key, start: new Date(year, month - 1, 1), end: endOfPeriod(new Date(year, month, 1)), label: 'Last month' };
+  }
+  if (key === 'this_quarter') {
+    return { key, start: new Date(year, quarterStartMonth(month), 1), end: now, label: 'This quarter' };
   }
   if (key === 'last_quarter') {
-    const thisQuarterStart = new Date(now.getFullYear(), quarterStartMonth(now.getMonth()), 1);
-    const start = new Date(thisQuarterStart.getFullYear(), thisQuarterStart.getMonth() - 3, 1);
-    return { start, end: new Date(thisQuarterStart.getTime() - 1), label: 'Last quarter' };
+    const thisQuarterStart = new Date(year, quarterStartMonth(month), 1);
+    return {
+      key,
+      start: new Date(thisQuarterStart.getFullYear(), thisQuarterStart.getMonth() - 3, 1),
+      end: endOfPeriod(thisQuarterStart),
+      label: 'Last quarter'
+    };
   }
-  if (key === 'this_year') return { start: new Date(now.getFullYear(), 0, 1), end: now, label: 'This year' };
-  return { start: dayStart, end: now, label: 'Today' };
+  return { key: 'today', start: dayStart, end: now, label: 'Today' };
 }
-// The client offers quarter ranges in its dropdown. They were missing above, so
-// picking "This quarter" silently fell through to Today and the dashboard
-// showed a day of data under a quarter's heading.
 function quarterStartMonth(month) { return Math.floor(month / 3) * 3; }
 function isDateInBounds(value, bounds) {
   if (!value || !bounds?.start || !bounds?.end) return false;
   const date = value instanceof Date ? value : new Date(value);
   return !Number.isNaN(date.getTime()) && date >= bounds.start && date <= bounds.end;
 }
-// A resolved ticket belongs to the range it was resolved in, not the one it
-// arrived in. But only when we actually know when that was: resolvedAt is
-// nullable, and every ticket resolved before that column started being written
-// still has NULL in it. Keying on resolvedAt alone dropped those tickets out
-// of Total, Resolved and every by-category/company/CS figure at once, which is
-// what made the breakdown table read low - the same board showed 57 tickets
-// and 52 resolved for an agent, then 43 and 32, with nothing resolved in
-// between. Unstamped ones fall back to when the row was last touched, which is
-// the closest thing to a resolution date we hold for them.
+/* Which range a ticket counts in: exactly one, decided by one date.
+
+   An open ticket belongs to the range it arrived in. A resolved one belongs to
+   the range it was resolved in, not the one it arrived in - that is the figure
+   "resolved this week" is asking for.
+
+   Every ticket therefore has a single date that places it, which is what makes
+   the ranges add up: a ticket created in March and resolved in April is in
+   March's Created and April's Resolved, and in neither range twice.
+
+   `updatedAt` is deliberately NOT one of those dates. It used to be: a ticket
+   counted if it was created OR last touched inside the range, and since
+   `updatedAt` moves on every save - a note, a priority change, a mail sync -
+   a ticket from January reappeared in Today's figures the moment anyone
+   touched it, and the same ticket was counted again in every range it had ever
+   been edited in. That is what made the numbers drift from the board.
+
+   The one place it survives is a resolved ticket with no `resolvedAt`.
+   That column is nullable and everything resolved before it started being
+   written still has NULL in it. Keying those on nothing at all dropped them
+   out of Total, Resolved and every by-category/company/CS figure at once - the
+   same board showed 57 tickets and 52 resolved for an agent, then 43 and 32,
+   with nothing resolved in between. For those rows the last time the row was
+   touched is the closest thing to a resolution date we hold. */
 function kpiTicketInRange(ticket, bounds) {
   const statusKey = normalizeDbStatusForBoard(ticket?.status);
   if (statusKey === 'res') {
     if (ticket?.resolvedAt) return isDateInBounds(ticket.resolvedAt, bounds);
-    return isDateInBounds(ticket?.updatedAt, bounds) || isDateInBounds(ticket?.createdAt, bounds);
+    return isDateInBounds(ticket?.updatedAt, bounds);
   }
-  return isDateInBounds(ticket?.createdAt, bounds) || isDateInBounds(ticket?.updatedAt, bounds);
+  return isDateInBounds(ticket?.createdAt, bounds);
 }
 function resolvedAtFromState(state, ticketId) {
   const touched = Number(state?.ticketStageTouchedAt?.[ticketId] || 0);
@@ -1489,6 +1576,16 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     "4h left" for a ticket nobody owns would be a fiction, so
 //                     these are counted and reported separately rather than
 //                     folded into compliance.
+//   jira_hold       - linked to a Jira issue, so the clock is off entirely.
+//
+// The last one is a commitment we are no longer the ones able to keep. Once a
+// ticket is handed to engineering, the time it takes is theirs, and the
+// support agent holding it cannot answer any faster by being told they are
+// late. Left running it did two wrong things at once: it drove agents to chase
+// tickets nobody on the team could move, and it counted every engineering
+// turnaround against support's compliance figure. So a Jira-linked ticket is
+// reported under its own heading and kept out of the percentage - the same
+// treatment no_clock already gets, and for the same reason.
 
 function ticketSlaSnapshot(ticket, now = Date.now()) {
   const arrivedMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
@@ -1507,6 +1604,10 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
     ? (ticket?.resolvedAt ? new Date(ticket.resolvedAt).getTime() : now)
     : now;
   const wallMs = Math.max(0, (Number.isFinite(endMs) ? endMs : now) - createdMs);
+  // Checked before the assignee, and before resolved/open is decided: a
+  // Jira-linked ticket has no SLA position at all, so there is nothing for
+  // either branch below to say about it.
+  if (String(ticket?.jiraTicketKey || '').trim()) return { ...base, state: 'jira_hold', wallMs };
   if (!agent) return { ...base, wallMs };
 
   const shiftMs = shiftElapsedMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
@@ -1540,8 +1641,10 @@ function medianOf(values) {
    - moving a ticket into Resolved. Support finishes the work; CS signs it off.
    - the FIRST assignment of a ticket that has nobody on it, because that is the
      client's auto-assign for a newly ingested ticket and every open tab runs
-     it, not a person handing work around. Only changing an existing assignment
-     is CS's call. */
+     it, not a person handing work around.
+   - taking a ticket for themselves. Picking up work is not the decision this
+     guard exists to protect; passing work to somebody else is. So a support
+     agent may reassign a ticket to their own code and to no other. */
 function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
   const role = normalizeRole(actor?.role) || 'support';
   const username = actor?.username || '';
@@ -1583,13 +1686,18 @@ function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
     });
   }
 
-  if (!canAssignSupportAgent(role, username)) {
+  {
     const currentAssignee = isMap(currentState.ticketAssignee) ? currentState.ticketAssignee : {};
     const incomingAssignee = isMap(nextState.ticketAssignee) ? nextState.ticketAssignee : {};
     Object.keys(incomingAssignee).forEach((ticketId) => {
       const before = String(currentAssignee[ticketId] || '').trim();
       const after = String(incomingAssignee[ticketId] || '').trim();
       if (!before || before === after) return;
+      // Checked per ticket rather than once for the whole save, because a
+      // support agent taking a ticket for themselves is allowed and handing
+      // one to somebody else is not - so it is the destination that decides,
+      // and one save can legitimately contain both.
+      if (canAssignSupportAgentTo(role, username, after)) return;
       incomingAssignee[ticketId] = currentAssignee[ticketId];
       // manualSupportOverride and ticketAssignmentMode describe the assignment
       // and are merged on its clock, so a refused reassignment must not leave
@@ -4162,8 +4270,18 @@ const KPI_TICKET_SELECT = {
   slaResetAt: true
 };
 async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.range);
-  const role = normalizeRole(req.session.role) || 'support';
-  const username = String(req.session.username || '').trim().toUpperCase();
+  const username = actorAgentCode(req);
+  /* The KPI dashboard is the one view where "see all tickets" does not carry
+     over. A support agent may read the whole board - that is what the Only
+     mine toggle is for - but the dashboard is a measure of a person's work,
+     and nobody outside admin gets to see how a colleague is performing. So
+     the figures are pinned to whoever is asking, whatever team/agent the
+     query string names.
+
+     effectiveTeam rather than the role column: seven CS agents' accounts still
+     carry the legacy `agent` role, and scoping those by assignedAgent - which
+     a CS agent is never in - showed them an empty dashboard. */
+  const myTeam = actorTeam(req);
   const team = String(req.query.team || 'all').trim().toLowerCase();
   const agent = String(req.query.agent || 'all').trim().toUpperCase();
   const company = String(req.query.company || 'all').trim();
@@ -4176,8 +4294,8 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
 
   const accessWhere = {};
-  if (role === 'cs') accessWhere.csAgent = username;
-  else if (role === 'support') accessWhere.assignedAgent = username;
+  if (myTeam === 'cs') accessWhere.csAgent = username;
+  else if (myTeam === 'support') accessWhere.assignedAgent = username;
   else if (agent && agent !== 'ALL') {
     if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
     else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
@@ -4223,7 +4341,7 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   // anywhere in the data for the filter dropdown. Extracting this function left
   // it behind, so /api/tickets/kpis threw ReferenceError: tickets is not defined
   // on every request and the whole dashboard 500d.
-  return { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
+  return { bounds, myTeam, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
 }
 function kpiDrilldownRow(t, detail) {
   return {
@@ -4240,7 +4358,7 @@ function kpiDrilldownRow(t, detail) {
 }
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
+    const { bounds, myTeam, team, agent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -4318,13 +4436,25 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     // ---------------------------------------------------------------------
     const now = Date.now();
     const openWorkTickets = workTickets.filter(t => normalizeDbStatusForBoard(t.status) !== 'res');
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0 };
+    /* snake_case state -> camelCase tally, spelled out because they are not
+       the same word. This used to be `if (snapshot.state in backlog)`, and
+       'at_risk' is not a key of { atRisk }: only `overdue` ever matched, so
+       the At risk, On track and No clock figures reported a flat zero however
+       many tickets were in them. The per-agent columns were counted by
+       separate code just below and were right all along, which is what made
+       the headline card disagree with the table under it. */
+    const BACKLOG_KEY_BY_STATE = {
+      overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
+      no_clock: 'noClock', jira_hold: 'jiraHold'
+    };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
     for (const ticket of openWorkTickets) {
       const snapshot = ticketSlaSnapshot(ticket, now);
-      if (snapshot.state in backlog) backlog[snapshot.state]++;
+      const backlogKey = BACKLOG_KEY_BY_STATE[snapshot.state];
+      if (backlogKey) backlog[backlogKey]++;
       oldestOpenMs = Math.max(oldestOpenMs, snapshot.wallMs);
       if (snapshot.state === 'overdue' || snapshot.state === 'at_risk') {
         for (const key of rowKeysForTicket(ticket)) {
@@ -4403,7 +4533,14 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       }
     }).catch(() => 0);
 
-    const createdInRange = scopedTickets.filter(t => isDateInBounds(t.createdAt, bounds)).length;
+    /* Counted off `tickets` - the raw range query - and not off scopedTickets.
+       scopedTickets places a resolved ticket by its resolution date, so a
+       ticket created inside the range but resolved after it is not in there:
+       reading Created off that set undercounted every range that had work
+       still open at its end. "How many arrived" and "how many were closed"
+       are two independent questions about the same window, so each is asked
+       of its own date. */
+    const createdInRange = tickets.filter(t => !t.duplicateOfExternalId && isDateInBounds(t.createdAt, bounds)).length;
     const avgOf = values => (values.length ? Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10 : 0);
 
     const sortRows = obj => Object.entries(obj).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
@@ -4416,7 +4553,13 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     return res.json({
       ok: true,
       generatedAt: new Date().toISOString(),
-      range: { key: String(req.query.range || 'today'), label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() },
+      // bounds.key, not the raw query value: if the client sent a range this
+      // build no longer offers, the heading has to name the period the figures
+      // were actually computed over.
+      range: { key: bounds.key, label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() },
+      // 'own' when the figures are pinned to the caller, so the dashboard can
+      // say so rather than looking like a board-wide total that reads low.
+      scope: myTeam === 'admin' ? 'all' : 'own',
       filters: { team, agent, company, jiraOnly },
       totals: {
         tickets: workTickets.length,
@@ -4435,12 +4578,17 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         backlog,
         overdue: backlog.overdue,
         atRisk: backlog.atRisk,
+        // Open tickets whose clock is off because they are waiting on Jira.
+        // Reported so they are visibly parked rather than just missing from
+        // the other three figures.
+        jiraHold: backlog.jiraHold,
         oldestOpenHours: hoursFromMs(oldestOpenMs),
         resolvedInRange: resolvedInRange.length,
         met: slaMet,
         breached: slaBreached,
-        // Resolved with no assignee, so no shift clock ever ran for them.
-        // Excluded from the percentage rather than silently counted as met.
+        // Resolved but with no SLA position to report: no assignee, so no shift
+        // clock ever ran, or linked to Jira, so the clock was off. Excluded
+        // from the percentage rather than silently counted as met.
         unmeasured: slaUnmeasured,
         compliancePct: slaMeasured ? Math.round((slaMet / slaMeasured) * 1000) / 10 : null,
         avgResolveShiftHours: avgOf(resolveShiftHours),
@@ -4638,12 +4786,23 @@ const INSIGHT_TICKET_SELECT = {
   duplicateOfExternalId: true
 };
 
+/* The four routes behind the Insights view - bounce, dwell, reopened and
+   board-at - are requireAdmin. Every one of them reads across the whole board
+   to say how the team is doing: which tickets get passed around, who sits on
+   them, whose resolutions come back. That is a management view, not something
+   an agent sees about their colleagues.
+
+   /api/insights/suggest-assignee and /api/insights/languages stay requireAuth
+   on purpose. They are named "insights" but they are not part of this view -
+   they answer a question about one ticket the agent already has open, and the
+   board itself calls them while rendering. */
+
 // --- Bounce detection ------------------------------------------------------
 //
 // A ticket that changed hands three times, or re-entered a column it had
 // already left, is the painful kind. No existing figure surfaces it: it can sit
 // inside SLA the whole time it is being passed around.
-app.get('/api/insights/bounce', requireAuth, async (req, res) => {
+app.get('/api/insights/bounce', requireAdmin, async (req, res) => {
   try {
     const days = insightsDays(req.query.days, 30);
     const since = new Date(Date.now() - days * 86400000);
@@ -4783,7 +4942,7 @@ function nextIsoWeekStart(ms) {
   return monday + 7 * 86400000;
 }
 
-app.get('/api/insights/dwell', requireAuth, async (req, res) => {
+app.get('/api/insights/dwell', requireAdmin, async (req, res) => {
   try {
     const weeks = Math.min(26, Math.max(1, Number(req.query.weeks) || 8));
     const since = new Date(Date.now() - weeks * 7 * 86400000);
@@ -4909,7 +5068,7 @@ app.get('/api/insights/dwell', requireAuth, async (req, res) => {
 //
 // A resolve that comes straight back is not a resolve. Throughput counts it the
 // same as one that stuck, so this is what tells the two apart.
-app.get('/api/insights/reopened', requireAuth, async (req, res) => {
+app.get('/api/insights/reopened', requireAdmin, async (req, res) => {
   try {
     const days = insightsDays(req.query.days, 30);
     const windowHours = Math.min(720, Math.max(1, Number(req.query.windowHours) || 72));
@@ -4996,7 +5155,7 @@ app.get('/api/insights/reopened', requireAuth, async (req, res) => {
 // running the log backwards: for each ticket, the first status change recorded
 // AFTER the target time carries, in its oldValue, exactly the status the
 // ticket was sitting in at that time. No snapshot table needed.
-app.get('/api/insights/board-at', requireAuth, async (req, res) => {
+app.get('/api/insights/board-at', requireAdmin, async (req, res) => {
   try {
     const at = new Date(String(req.query.at || ''));
     if (Number.isNaN(at.getTime())) return res.status(400).json({ error: 'invalid_at' });
@@ -6209,7 +6368,7 @@ app.get('/api/insights/languages', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
+app.get('/api/tickets/:id/audit', requireSupportOrAdmin, async (req, res) => {
   const ticketId = Number(req.params.id);
 
   if (!Number.isInteger(ticketId) || ticketId <= 0) {
@@ -6222,6 +6381,14 @@ app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
     });
 
     if (!ticket) {
+      return res.status(404).json({ error: 'ticket_not_found' });
+    }
+
+    // A support agent reads the history of the tickets they hold. Answered as
+    // 404 rather than 403 so the response cannot be used to confirm that a
+    // ticket somebody else holds exists.
+    const ticketWhere = auditTicketWhereForActor(req);
+    if (ticketWhere && String(ticket.assignedAgent || '').toUpperCase() !== ticketWhere.assignedAgent) {
       return res.status(404).json({ error: 'ticket_not_found' });
     }
 
@@ -6253,15 +6420,40 @@ app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
   }
 });
 
-// Assignment history: who moved which ticket from whom to whom, and whether a
-// change undid the one before it. requireAuth rather than requireAdmin - the
-// board already shows every assignee to every agent, and the whole point is
-// that the team can see when a ticket bounces.
+/* Assignment history: who moved which ticket from whom to whom, and whether a
+   change undid the one before it.
+
+   requireAuth rather than requireAdmin, but each team sees a different slice:
+   admin reads the whole log, and everyone else reads only their own
+   assignments. "Their own" means a row that names them - a ticket handed to
+   them, taken off them, or moved by them - which is the same question from
+   either side of a handover, and is why the filter looks at three fields
+   rather than one.
+
+   Note this is applied in SQL, so the limit counts rows the caller may
+   actually see; filtering afterwards would have let one busy day of other
+   people's handovers push an agent's own history out of the window. */
 app.get('/api/audit/assignments', requireAuth, async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit || 300), 1), 1000);
+  const team = actorTeam(req);
+  const me = actorAgentCode(req);
+  /* Four clauses, on plain columns. `metadata.actor` - who the board says made
+     the change - is deliberately not among them: a JSON-path filter for one
+     more clause, when the four below already cover every way a row can be
+     someone's own. A support agent can now only assign to themselves, so they
+     are the newValue of anything they did; a CS agent only reassigns tickets
+     they own, so ticket.csAgent has it. */
+  const scopeWhere = team === 'admin' ? {} : {
+    OR: [
+      { oldValue: me },
+      { newValue: me },
+      { ticket: { assignedAgent: me } },
+      { ticket: { csAgent: me } }
+    ]
+  };
   try {
     const events = await prisma.ticketEvent.findMany({
-      where: { eventType: 'ticket_assignedAgent_changed' },
+      where: { AND: [{ eventType: 'ticket_assignedAgent_changed' }, scopeWhere] },
       take: limit,
       include: {
         ticket: { select: { id: true, externalId: true, subject: true, displayNumber: true } },
@@ -6316,11 +6508,15 @@ app.get('/api/audit/assignments', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/audit/tickets', requireAdmin, async (req, res) => {
+app.get('/api/audit/tickets', requireSupportOrAdmin, async (req, res) => {
   const limit = Math.min(Number(req.query.limit || 100), 500);
+  // Narrowed in SQL for a support agent, so the limit counts rows they may
+  // see rather than being spent on tickets that get filtered out.
+  const ticketWhere = auditTicketWhereForActor(req);
 
   try {
     const events = await prisma.ticketEvent.findMany({
+      where: ticketWhere ? { ticket: ticketWhere } : {},
       take: limit,
       include: {
         ticket: true,
@@ -6410,7 +6606,7 @@ function clipAuditValue(value) {
 
 // The grouping itself, kept out of the route handler so it can be exercised
 // without a database.
-function buildAgentActivity(events, { includeSync = false } = {}) {
+function buildAgentActivity(events, { includeSync = false, wholeBoard = true } = {}) {
   const kept = events.filter(e => includeSync
     ? (AGENT_DRIVEN_EVENTS.has(e.eventType) || SYNC_DRIVEN_EVENTS.has(e.eventType))
     : AGENT_DRIVEN_EVENTS.has(e.eventType));
@@ -6483,7 +6679,13 @@ function buildAgentActivity(events, { includeSync = false } = {}) {
   // Agents on the roster with nothing in the window are still listed, at zero.
   // "No updates from this agent in 30 days" is a finding; an absent row reads
   // as an oversight.
+  //
+  // Only on the whole-board read, though. A support agent's page is already
+  // narrowed to their own tickets, so padding it out with the rest of the
+  // roster at zero would not be a finding about those agents - it would just
+  // be a list of colleagues this view is not allowed to report on.
   const withRoster = (kind, rows) => {
+    if (!wholeBoard) return rows;
     const roster = kind === 'support' ? SUPPORT_AGENT_CODES : CS_AGENT_CODES;
     const present = new Set(rows.map(r => r.code));
     const missing = [...roster].filter(c => !present.has(c))
@@ -6505,14 +6707,18 @@ function buildAgentActivity(events, { includeSync = false } = {}) {
 
 const AGENT_ACTIVITY_EVENT_CAP = 5000;
 
-app.get('/api/audit/agent-activity', requireAdmin, async (req, res) => {
+app.get('/api/audit/agent-activity', requireSupportOrAdmin, async (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days || 30), 1), 365);
   const includeSync = String(req.query.includeSync || '') === '1';
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  // Null for admin, who reads the whole board; a support agent is narrowed to
+  // the tickets they hold, in SQL, so the event cap is spent on rows they may
+  // actually see.
+  const ticketWhere = auditTicketWhereForActor(req);
 
   try {
     const events = await prisma.ticketEvent.findMany({
-      where: { createdAt: { gte: since } },
+      where: { createdAt: { gte: since }, ...(ticketWhere ? { ticket: ticketWhere } : {}) },
       take: AGENT_ACTIVITY_EVENT_CAP,
       include: {
         ticket: {
@@ -6529,7 +6735,8 @@ app.get('/api/audit/agent-activity', requireAdmin, async (req, res) => {
       // True when the cap bit, so the page can say the window is partial rather
       // than quietly under-reporting it.
       truncated: events.length >= AGENT_ACTIVITY_EVENT_CAP,
-      ...buildAgentActivity(events, { includeSync })
+      scope: ticketWhere ? 'own_tickets' : 'all',
+      ...buildAgentActivity(events, { includeSync, wholeBoard: !ticketWhere })
     });
   } catch (error) {
     console.error('Read agent activity audit failed:', error);
@@ -6537,7 +6744,7 @@ app.get('/api/audit/agent-activity', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/audit/tickets', requireAdmin, (req, res) => {
+app.get('/audit/tickets', requireSupportOrAdmin, (req, res) => {
   res.type('html').sendFile(path.join(VIEWS_DIR, 'audit-tickets.html'));
 });
 
