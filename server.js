@@ -445,21 +445,36 @@ function auditTicketWhereForActor(req) {
 function hashApiToken(rawToken) {
   return crypto.createHash('sha256').update(String(rawToken || '')).digest('hex');
 }
-// Bearer-token auth for the MCP connector, independent of the cookie session
-// used by the browser app - each token maps 1:1 to an existing Kanban user,
-// so a tool call can never do more than that person could already do in the UI.
-async function requireApiToken(req, res, next) {
+// Looks up and validates the bearer token itself, shared by the general
+// (requireApiToken) and scoped (requireScopedApiToken) middleware below so
+// the actual lookup/validation logic can't drift between the two. Returns
+// null for "no/invalid token" and re-throws for a real DB error, so callers
+// can tell the two apart.
+async function loadBearerApiToken(req) {
   const header = String(req.headers.authorization || '');
   const match = header.match(/^Bearer\s+(.+)$/i);
-  if (!match) return res.status(401).json({ error: 'missing_token' });
+  if (!match) return null;
   const tokenHash = hashApiToken(match[1].trim());
+  const token = await prisma.apiToken.findUnique({ where: { tokenHash }, include: { user: true } });
+  if (!token || token.revokedAt || !token.user || token.user.isActive === false) return null;
+  prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } }).catch(() => null);
+  return token;
+}
+// Bearer-token auth for the MCP connector and general ticket API, independent
+// of the cookie session used by the browser app - each token maps 1:1 to an
+// existing Kanban user, so a tool call can never do more than that person
+// could already do in the UI.
+//
+// Rejects any token that carries a scope (see ApiToken.scope): a scoped
+// token is meant for exactly one narrow endpoint (requireScopedApiToken
+// below) and must not also work here, or "narrow" would be a lie the moment
+// someone reused this middleware on a new route without thinking about it.
+async function requireApiToken(req, res, next) {
   try {
-    const token = await prisma.apiToken.findUnique({ where: { tokenHash }, include: { user: true } });
-    if (!token || token.revokedAt || !token.user || token.user.isActive === false) {
-      return res.status(401).json({ error: 'invalid_token' });
-    }
+    const token = await loadBearerApiToken(req);
+    if (!token) return res.status(401).json({ error: 'invalid_token' });
+    if (token.scope) return res.status(403).json({ error: 'token_scope_mismatch' });
     req.apiUser = { id: token.user.id, username: token.user.username, role: token.user.role, displayName: token.user.displayName };
-    prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } }).catch(() => null);
     return next();
   } catch (error) {
     console.error('API token auth failed:', error.message || error);
@@ -11500,6 +11515,472 @@ app.get('/', (req, res) => {
   res.set('Cache-Control', 'no-store, must-revalidate');
   res.type('html').sendFile(path.join(__dirname, 'index.html'));
 });
+
+// ===========================================================================
+// Churn signals API - bulk, pre-aggregated per-company friction signals for
+// the anti-churn n8n workflow (support-api.md is the full spec). This is a
+// first pass, not the complete spec - see the deviations noted inline and
+// in each response's `meta` block, rather than silently approximating them.
+//
+// Known deviations from support-api.md:
+// - `quinta_property_id` is not stored anywhere in this app (tickets only
+//   carry a free-text `companyName` from HubSpot) and no HubSpot custom
+//   property is wired up to fetch it either. Every result is keyed by
+//   `company_name` instead - exact match, no fuzzy matching, matching the
+//   spec's own warning about name variants.
+// - `recurring_issues[]` clustering is a first-pass heuristic (shared
+//   significant subject words within the same company), not the semantic
+//   clustering the spec describes reusing from an MCP `find_duplicates`
+//   tool - that tool does not exist anywhere in this codebase.
+// - `component` is the ticket's persisted `category` (the broad bucket -
+//   "Integration", "Content / RYA", "Platform / Access", etc.). The more
+//   granular subtype label ("Booking engine broken", "PMS sync failure")
+//   is board-only state kept in a local JSON file, not the database, so
+//   it is not used here. `vendor` has no data source at all and is always
+//   null.
+// - SLA figures use wall-clock hours against SLA_HOURS_BY_PRIORITY, not
+//   the dashboard's shift-time-aware SLA clock (which excludes the
+//   assigned agent's off-hours/weekends) - a materially different, looser
+//   definition. Flagged via `meta.sla_definition` on every response.
+const CHURN_POLICY_SUBJECT_PATTERNS = [
+  /acceso\s+quick\s?text/i,
+  /quinta\s+access/i,
+  /forgot\s+your\s+password/i,
+  /reactivar\s+usuario/i,
+  /no\s+puedo\s+acceder/i
+];
+function isChurnPolicyTicket(ticket) {
+  return CHURN_POLICY_SUBJECT_PATTERNS.some(re => re.test(String(ticket.subject || '')));
+}
+
+const CHURN_SIGNALS_SELECT = {
+  externalId: true,
+  displayNumber: true,
+  subject: true,
+  status: true,
+  priority: true,
+  category: true,
+  companyName: true,
+  jiraTicketKey: true,
+  duplicateOfExternalId: true,
+  createdAt: true,
+  resolvedAt: true
+};
+
+// Replays *_changed events for one field to answer "what was this field's
+// value as of a given moment" - the ticket's CURRENT column only tells you
+// the LATEST value, which leaks present-day knowledge into a backtest
+// reconstructing what the model could have known at an earlier date
+// (support-api.md §5). Used for status, priority, and category alike -
+// point-in-time correctness for status alone is not enough when priority/
+// category (used for open_critical, SLA targets, component tagging, and
+// policy-ticket detection) are read from the same present-day columns.
+//
+// If a ticket has zero events for this field, its current value is assumed
+// to have held since creation - true unless a status/priority/category
+// write ever succeeded while its paired (fire-and-forget) audit-event
+// insert failed, a gap this app's event logging does not fully close.
+function buildFieldHistory(ticket, eventsByTicket, eventKey, currentValue) {
+  const events = (eventsByTicket.get(ticket.externalId)?.[eventKey] || [])
+    .slice()
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt) || a.id - b.id);
+  const history = [];
+  if (events.length) {
+    history.push({ atMs: new Date(ticket.createdAt).getTime(), value: events[0].oldValue });
+    for (const ev of events) {
+      history.push({ atMs: new Date(ev.createdAt).getTime(), value: ev.newValue });
+    }
+  } else {
+    history.push({ atMs: new Date(ticket.createdAt).getTime(), value: currentValue });
+  }
+  return history;
+}
+function valueAsOf(history, asOfMs) {
+  let value = history[0].value;
+  for (const entry of history) {
+    if (entry.atMs > asOfMs) break;
+    value = entry.value;
+  }
+  return value;
+}
+// The event timestamp of the resolution that was CURRENT as of asOfMs - not
+// necessarily the ticket's present resolvedAt, which reflects the latest of
+// possibly several resolve/reopen cycles.
+function resolvedAtAsOf(statusHistory, asOfMs) {
+  let resolvedAtMs = null;
+  for (const entry of statusHistory) {
+    if (entry.atMs > asOfMs) break;
+    resolvedAtMs = normalizeDbStatusForBoard(entry.value) === 'res' ? entry.atMs : null;
+  }
+  return resolvedAtMs;
+}
+
+function normalizeSubjectWords(subject) {
+  const STOPWORDS = new Set(['the', 'a', 'an', 'and', 'or', 'of', 'to', 'for', 'on', 'in', 'is', 'are', 'with', 're', 'fwd', 'issue', 'problem', 'ticket', 'help', 'support', 'please', 'hello', 'hi']);
+  return String(subject || '')
+    .toLowerCase()
+    .replace(/^(re|fwd|fw)\s*:\s*/gi, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOPWORDS.has(w));
+}
+// First-pass "same underlying issue" heuristic, scoped to one company: two
+// tickets cluster together when at least half of their significant subject
+// words overlap. Real semantic clustering is future work - see the
+// deviation note at the top of this section.
+function clusterRecurringIssues(tickets) {
+  const clusters = [];
+  for (const ticket of tickets) {
+    const words = new Set(normalizeSubjectWords(ticket.subject));
+    if (!words.size) continue;
+    let best = null;
+    let bestScore = 0;
+    for (const cluster of clusters) {
+      const overlap = [...words].filter(w => cluster.words.has(w)).length;
+      const score = overlap / Math.max(words.size, cluster.words.size);
+      if (score > bestScore) { bestScore = score; best = cluster; }
+    }
+    if (best && bestScore >= 0.5) {
+      best.tickets.push(ticket);
+      words.forEach(w => best.words.add(w));
+    } else {
+      clusters.push({ tickets: [ticket], words });
+    }
+  }
+  return clusters.filter(c => c.tickets.length >= 2);
+}
+function clusterIdFor(words, usedIds) {
+  const slug = words.slice(0, 3).join('-').slice(0, 60) || 'issue';
+  let id = slug;
+  let n = 2;
+  while (usedIds.has(id)) { id = `${slug}-${n++}`; }
+  usedIds.add(id);
+  return id;
+}
+
+function churnTicketRef(t) {
+  return t.jiraTicketKey || (t.displayNumber ? `#${String(t.displayNumber).padStart(4, '0')}` : t.externalId);
+}
+
+// Core per-company aggregation. `tickets` must already be scoped to this
+// company, non-Spam, and cover everything needed for the requested windows
+// plus the full backlog of still-open tickets regardless of age.
+function computeCompanySignals(companyName, tickets, eventsByTicket, asOfMs, windows) {
+  const nonDuplicate = tickets.filter(t => !t.duplicateOfExternalId);
+  if (!nonDuplicate.length) {
+    return { quinta_property_id: null, company_name: companyName, data_available: false, reason: 'NO_TICKETS_EVER' };
+  }
+
+  const withHistory = nonDuplicate.map(t => {
+    const events = eventsByTicket.get(t.externalId) || {};
+    const statusHistory = buildFieldHistory(t, eventsByTicket, 'ticket_status_changed', t.status);
+    const priorityHistory = buildFieldHistory(t, eventsByTicket, 'ticket_priority_changed', t.priority);
+    const categoryHistory = buildFieldHistory(t, eventsByTicket, 'ticket_category_changed', t.category);
+    const statusNow = valueAsOf(statusHistory, asOfMs);
+    const stageNow = normalizeDbStatusForBoard(statusNow);
+    const resolvedAtMs = resolvedAtAsOf(statusHistory, asOfMs);
+    const priorityAsOf = valueAsOf(priorityHistory, asOfMs);
+    const categoryAsOf = valueAsOf(categoryHistory, asOfMs);
+    return {
+      t, statusHistory, stageAsOf: stageNow, resolvedAtMsAsOf: resolvedAtMs,
+      priorityAsOf, categoryAsOf, createdAtMs: new Date(t.createdAt).getTime()
+    };
+  }).filter(x => x.createdAtMs <= asOfMs); // did not exist yet as of asOf
+
+  const openAsOf = withHistory.filter(x => x.stageAsOf !== 'res');
+  // This app has four flat priorities (High/Medium/Normal/Low), not the
+  // three-tier critical/high/medium the spec's example implies. High maps to
+  // "critical" and Medium to "high" here - the closest honest fit, not an
+  // attempt to invent a tier this app doesn't track.
+  const openCritical = openAsOf.filter(x => x.priorityAsOf === 'High');
+  const oldestOpenDays = openAsOf.length
+    ? Math.max(...openAsOf.map(x => (asOfMs - x.createdAtMs) / 86400000))
+    : 0;
+
+  const maxWindow = Math.max(...windows, 0);
+  const dayMs = 86400000;
+  const windowCounts = {};
+  for (const w of windows) {
+    windowCounts[`tickets_${w}d`] = withHistory.filter(x => x.createdAtMs > asOfMs - w * dayMs).length;
+  }
+  const primaryWindow = windows[0] || 30;
+  const prevWindowCount = withHistory.filter(x =>
+    x.createdAtMs > asOfMs - 2 * primaryWindow * dayMs && x.createdAtMs <= asOfMs - primaryWindow * dayMs
+  ).length;
+
+  function avgResolutionHours(sinceMs, untilMs) {
+    const resolved = withHistory.filter(x => x.resolvedAtMsAsOf && x.resolvedAtMsAsOf > sinceMs && x.resolvedAtMsAsOf <= untilMs);
+    if (!resolved.length) return null;
+    const hours = resolved.map(x => (x.resolvedAtMsAsOf - x.createdAtMs) / 3600000);
+    return Math.round((hours.reduce((a, b) => a + b, 0) / hours.length) * 10) / 10;
+  }
+  const avgResolutionHours30d = avgResolutionHours(asOfMs - primaryWindow * dayMs, asOfMs);
+  const avgResolutionHoursPrev30d = avgResolutionHours(asOfMs - 2 * primaryWindow * dayMs, asOfMs - primaryWindow * dayMs);
+
+  // Reopens: a ticket_status_changed event moving OUT of Resolved, replayed
+  // only up to asOfMs so a backtest can't see a reopen that hadn't happened
+  // yet at that point in time.
+  let reopens90d = 0;
+  let resolutions90d = 0;
+  for (const x of withHistory) {
+    for (const entry of x.statusHistory) {
+      if (entry.atMs > asOfMs || entry.atMs <= asOfMs - 90 * dayMs) continue;
+      if (normalizeDbStatusForBoard(entry.value) === 'res') resolutions90d++;
+    }
+    for (let i = 1; i < x.statusHistory.length; i++) {
+      const prev = x.statusHistory[i - 1];
+      const cur = x.statusHistory[i];
+      if (cur.atMs > asOfMs || cur.atMs <= asOfMs - 90 * dayMs) continue;
+      if (normalizeDbStatusForBoard(prev.value) === 'res' && normalizeDbStatusForBoard(cur.value) !== 'res') reopens90d++;
+    }
+  }
+  const reopenRate90d = resolutions90d ? Math.round((reopens90d / resolutions90d) * 100) / 100 : 0;
+
+  const window90 = withHistory.filter(x => x.createdAtMs > asOfMs - 90 * dayMs);
+  const escalations90d = window90.filter(x => x.categoryAsOf === 'IT Escalation').length;
+  const policyTickets90d = window90.filter(x => isChurnPolicyTicket(x.t)).length;
+
+  // SLA: wall-clock hours vs SLA_HOURS_BY_PRIORITY - see the deviation note
+  // at the top of this section for how this differs from the dashboard's
+  // own shift-time-aware SLA clock.
+  const resolvedInWindow90 = window90.filter(x => x.resolvedAtMsAsOf);
+  let slaBreaches90d = 0;
+  for (const x of resolvedInWindow90) {
+    const targetHours = slaTargetHoursFor(x.priorityAsOf);
+    const hoursToResolve = (x.resolvedAtMsAsOf - x.createdAtMs) / 3600000;
+    if (hoursToResolve > targetHours) slaBreaches90d++;
+  }
+  const slaBreachRate90d = resolvedInWindow90.length ? Math.round((slaBreaches90d / resolvedInWindow90.length) * 100) / 100 : 0;
+
+  const byExternalId = new Map(withHistory.map(x => [x.t.externalId, x]));
+  const recurringClusters = clusterRecurringIssues(window90.map(x => x.t));
+  const usedClusterIds = new Set();
+  const recurringIssues = recurringClusters.map(cluster => {
+    const clusterTickets = cluster.tickets;
+    const clusterEntries = clusterTickets.map(t => byExternalId.get(t.externalId));
+    const dates = clusterTickets.map(t => new Date(t.createdAt).getTime());
+    const hasHigh = clusterEntries.some(x => x.priorityAsOf === 'High');
+    const componentCounts = {};
+    clusterEntries.forEach(x => { const c = x.categoryAsOf || 'Other'; componentCounts[c] = (componentCounts[c] || 0) + 1; });
+    const component = Object.entries(componentCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    const stillOpen = clusterEntries.some(x => x.stageAsOf !== 'res');
+    return {
+      cluster_id: clusterIdFor([...cluster.words], usedClusterIds),
+      label: clusterTickets[0].subject || '(no subject)',
+      occurrences_90d: clusterTickets.length,
+      first_seen: new Date(Math.min(...dates)).toISOString().slice(0, 10),
+      last_seen: new Date(Math.max(...dates)).toISOString().slice(0, 10),
+      severity: hasHigh ? 'high' : 'medium',
+      // Heuristic: Integration/IT Escalation categories are the
+      // booking-engine/PMS/payment/channel-facing ones - not a real
+      // revenue-impact assessment, which this app has no data for.
+      revenue_impacting: component === 'Integration' || component === 'IT Escalation',
+      component,
+      vendor: null,
+      currently_open: stillOpen,
+      ticket_refs: clusterTickets.map(churnTicketRef)
+    };
+  }).sort((a, b) => b.occurrences_90d - a.occurrences_90d);
+
+  const criticalOpen = openCritical
+    .sort((a, b) => a.createdAtMs - b.createdAtMs)
+    .slice(0, 25)
+    .map(x => {
+      const targetHours = slaTargetHoursFor(x.priorityAsOf);
+      const ageHours = (asOfMs - x.createdAtMs) / 3600000;
+      return {
+        ticket_ref: churnTicketRef(x.t),
+        opened_at: new Date(x.createdAtMs).toISOString(),
+        age_days: Math.round((ageHours / 24) * 10) / 10,
+        severity: 'critical',
+        revenue_impacting: x.categoryAsOf === 'Integration' || x.categoryAsOf === 'IT Escalation',
+        component: x.categoryAsOf || null,
+        sla_breached: ageHours > targetHours
+      };
+    });
+
+  return {
+    quinta_property_id: null,
+    company_name: companyName,
+    data_available: true,
+    summary: {
+      open_tickets: openAsOf.length,
+      open_critical: openCritical.length,
+      // See the mapping note above openCritical: High -> "critical", Medium
+      // -> "high" - this app has no distinct critical tier to report instead.
+      open_high: openAsOf.filter(x => x.priorityAsOf === 'Medium').length,
+      oldest_unresolved_days: Math.round(oldestOpenDays * 10) / 10,
+      ...windowCounts,
+      tickets_prev_30d: prevWindowCount,
+      avg_resolution_hours_30d: avgResolutionHours30d,
+      avg_resolution_hours_prev_30d: avgResolutionHoursPrev30d,
+      reopen_rate_90d: reopenRate90d,
+      escalations_90d: escalations90d,
+      policy_tickets_90d: policyTickets90d
+    },
+    recurring_issues: recurringIssues,
+    critical_open: criticalOpen,
+    sla: { breaches_90d: slaBreaches90d, breach_rate_90d: slaBreachRate90d }
+  };
+}
+
+// Only a token whose ApiToken.scope is exactly this value may pass - a
+// normal (scope: null) token, valid everywhere requireApiToken is used, is
+// deliberately refused here too. This is what makes a service-account token
+// handed to an external automation genuinely narrow: it authenticates
+// against this one endpoint and nothing else the token mechanism protects.
+function requireScopedApiToken(scope) {
+  return async (req, res, next) => {
+    try {
+      const token = await loadBearerApiToken(req);
+      if (!token) return res.status(401).json({ error: { code: 'missing_token', message: 'Missing or invalid bearer token.', request_id: req.churnRequestId } });
+      if (token.scope !== scope) return res.status(403).json({ error: { code: 'forbidden', message: 'Token is not scoped for this endpoint.', request_id: req.churnRequestId } });
+      req.apiUser = { id: token.user.id, username: token.user.username, role: token.user.role, displayName: token.user.displayName };
+      return next();
+    } catch (error) {
+      console.error(`Scoped API token auth failed [${req.churnRequestId}]:`, error.message || error);
+      return res.status(500).json({ error: { code: 'auth_failed', message: 'Unexpected server error.', request_id: req.churnRequestId } });
+    }
+  };
+}
+const requireChurnApiAccess = requireScopedApiToken('churn_signals');
+const churnSignalsLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+app.use('/api/churn-signals', (req, res, next) => { req.churnRequestId = crypto.randomUUID(); res.set('X-Request-Id', req.churnRequestId); next(); });
+
+async function runChurnSignalsQuery(req, res) {
+  const requestId = req.churnRequestId;
+  try {
+    const body = req.method === 'POST' ? (req.body || {}) : {};
+    const singleCompany = req.params.companyName ? decodeURIComponent(req.params.companyName) : null;
+    let companyNames = singleCompany ? [singleCompany] : body.company_names;
+    if (companyNames !== undefined && (!Array.isArray(companyNames) || companyNames.some(c => typeof c !== 'string'))) {
+      return res.status(400).json({ error: { code: 'invalid_request', message: 'company_names must be an array of strings.', request_id: requestId } });
+    }
+    if (companyNames && companyNames.length > 1000) {
+      return res.status(400).json({ error: { code: 'invalid_request', message: 'company_names exceeds the 1000-item cap.', request_id: requestId } });
+    }
+    const windows = Array.isArray(body.windows) && body.windows.every(w => Number.isFinite(w) && w > 0) ? body.windows : [30, 60, 90];
+
+    let asOfMs;
+    if (body.as_of) {
+      const parsed = new Date(`${body.as_of}T23:59:59.999Z`);
+      if (Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({ error: { code: 'invalid_request', message: 'as_of must be a valid YYYY-MM-DD date.', request_id: requestId } });
+      }
+      asOfMs = parsed.getTime();
+    } else {
+      asOfMs = Date.now();
+    }
+    const asOfDate = new Date(asOfMs).toISOString().slice(0, 10);
+    const maxWindowDays = Math.max(...windows, 90) * 2;
+
+    if (!companyNames) {
+      const distinct = await prisma.ticket.findMany({
+        where: { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }], companyName: { not: null } },
+        select: { companyName: true },
+        distinct: ['companyName']
+      });
+      companyNames = distinct.map(d => d.companyName).filter(Boolean);
+      if (companyNames.length > 1000) companyNames = companyNames.slice(0, 1000);
+    }
+
+    const CHURN_EVENT_TYPES = ['ticket_status_changed', 'ticket_priority_changed', 'ticket_category_changed'];
+
+    async function computeOneCompany(companyName) {
+      try {
+        const tickets = await prisma.ticket.findMany({
+          where: {
+            companyName,
+            NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }],
+            createdAt: { lte: new Date(asOfMs) },
+            // Bounds the query while still catching every ticket that could
+            // have been open AT as_of: created within the window (for
+            // volume/trend stats), never resolved (obviously still
+            // relevant), or resolved but only AFTER as_of - `status`/
+            // `resolvedAt` here are the ticket's CURRENT values, so a ticket
+            // resolved after as_of can still have been open at that earlier
+            // point; the event replay below determines its actual
+            // point-in-time state. A ticket resolved BEFORE as_of with an
+            // old createdAt correctly falls outside every branch - it was
+            // already resolved and irrelevant to backlog/open stats at
+            // as_of, and too old to count toward window volume.
+            OR: [
+              { createdAt: { gt: new Date(asOfMs - maxWindowDays * 86400000) } },
+              { resolvedAt: null },
+              { resolvedAt: { gt: new Date(asOfMs) } }
+            ]
+          },
+          select: CHURN_SIGNALS_SELECT,
+          orderBy: [{ id: 'asc' }]
+        });
+        const externalIds = tickets.map(t => t.externalId).filter(Boolean);
+        const events = externalIds.length
+          ? await prisma.ticketEvent.findMany({
+              where: { eventType: { in: CHURN_EVENT_TYPES }, ticket: { externalId: { in: externalIds } } },
+              select: { id: true, eventType: true, createdAt: true, oldValue: true, newValue: true, ticket: { select: { externalId: true } } },
+              orderBy: [{ createdAt: 'asc' }, { id: 'asc' }]
+            })
+          : [];
+        // Map<externalId, Map<eventType, event[]>> - buildFieldHistory reads
+        // eventsByTicket.get(id)?.[eventType], one replay per tracked field.
+        const eventsByTicket = new Map();
+        for (const ev of events) {
+          const key = ev.ticket.externalId;
+          if (!eventsByTicket.has(key)) eventsByTicket.set(key, {});
+          const byType = eventsByTicket.get(key);
+          if (!byType[ev.eventType]) byType[ev.eventType] = [];
+          byType[ev.eventType].push(ev);
+        }
+        return { ok: true, result: computeCompanySignals(companyName, tickets, eventsByTicket, asOfMs, windows) };
+      } catch (error) {
+        console.error(`Churn signals failed for company "${companyName}" [${requestId}]:`, error.message || error);
+        return { ok: false, result: { quinta_property_id: null, company_name: companyName, data_available: false, reason: 'SOURCE_ERROR' } };
+      }
+    }
+
+    // Bounded concurrency: enough to matter for a large portfolio request
+    // (spec asks for <30s end to end) without opening hundreds of
+    // simultaneous connections against the Postgres pool.
+    const CONCURRENCY = 10;
+    const results = new Array(companyNames.length);
+    let anyFailure = false;
+    let cursor = 0;
+    async function worker() {
+      while (cursor < companyNames.length) {
+        const i = cursor++;
+        const { ok, result } = await computeOneCompany(companyNames[i]);
+        if (!ok) anyFailure = true;
+        results[i] = result;
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, companyNames.length) }, worker));
+
+    const responseBody = {
+      as_of: asOfDate,
+      generated_at: new Date().toISOString(),
+      results,
+      meta: {
+        requested: companyNames.length,
+        returned: results.length,
+        identity_note: 'quinta_property_id is not available in this app yet; results are keyed by company_name (exact match) instead.',
+        sla_definition: 'wall_clock_hours_vs_priority_target - not the dashboard\'s shift-time-aware SLA clock',
+        point_in_time_reconstruction: 'event_replay'
+      }
+    };
+    return res.status(anyFailure ? 207 : 200).json(responseBody);
+  } catch (error) {
+    console.error(`Churn signals request failed [${requestId}]:`, error.message || error);
+    return res.status(500).json({ error: { code: 'internal_error', message: 'Unexpected server error.', request_id: requestId } });
+  }
+}
+
+// Rate limit BEFORE auth: a missing/invalid/wrong-scope token would
+// otherwise never reach the limiter, leaving token-guessing traffic
+// unthrottled (each attempt still costs a DB round trip in
+// loadBearerApiToken). Impractical to actually brute-force given the
+// token's entropy, but this is free defense-in-depth.
+app.post('/api/churn-signals/bulk', churnSignalsLimiter, requireChurnApiAccess, runChurnSignalsQuery);
+app.get('/api/churn-signals/:companyName', churnSignalsLimiter, requireChurnApiAccess, runChurnSignalsQuery);
 
 const server = app.listen(PORT, () => {
   console.log(`Support Kanban secure web app on http://localhost:${PORT}`);

@@ -50,6 +50,12 @@ model ApiToken {
   createdAt  DateTime  @default(now())
   lastUsedAt DateTime?
   revokedAt  DateTime?
+  // NULL = full access equal to the underlying user's role (every token
+  // issued before this column existed, and every one the UI/OAuth flow
+  // issues today). A non-null scope (e.g. 'churn_signals') narrows a token
+  // to exactly one endpoint - see requireApiToken/requireScopedApiToken in
+  // server.js for the enforcement.
+  scope      String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
