@@ -1,5 +1,6 @@
 require('dotenv').config();
 const prisma = require('./prismaClient');
+const { Prisma } = require('@prisma/client');
 const express = require('express');
 const helmet = require('helmet');
 const session = require('express-session');
@@ -1164,7 +1165,7 @@ async function findTicketRecordByKanbanId(kanbanTicketId) {
     }
   });
 }
-// Server-owned board fields (ticketJira, ticketDuplicateOf) are written here
+// Server-owned board fields (ticketJira, ticketDuplicateOf, ticketVelmaBug) are written here
 // rather than by whatever board snapshot happens to arrive next. Every link,
 // unlink and duplicate marking goes through an endpoint that calls this, so
 // this is the only writer - see the note on safeWriteState for why a client
@@ -1175,7 +1176,9 @@ function writeServerOwnedFieldIntoState(field, externalId, nextValue) {
   try {
     const state = safeReadState();
     const map = (state[field] && typeof state[field] === 'object') ? state[field] : {};
-    if (String(map[id] || '') === String(nextValue || '')) return null;
+    // By content, not String(): a Velma link is an object, and every object
+    // stringifies to the same "[object Object]".
+    if (JSON.stringify(map[id] || null) === JSON.stringify(nextValue || null)) return null;
     if (nextValue) map[id] = nextValue; else delete map[id];
     state[field] = map;
     fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
@@ -1592,6 +1595,8 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     these are counted and reported separately rather than
 //                     folded into compliance.
 //   jira_hold       - linked to a Jira issue, so the clock is off entirely.
+//   velma_hold      - linked to a row of the Velma bug sheet. Same reasoning
+//                     and same treatment as jira_hold.
 //   contact_hold    - open and in Waiting on Contact, so the clock is frozen
 //                     until the client answers. The board moves slaResetAt
 //                     forward by the length of the wait when the ticket
@@ -1629,6 +1634,7 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   // Jira-linked ticket has no SLA position at all, so there is nothing for
   // either branch below to say about it.
   if (String(ticket?.jiraTicketKey || '').trim()) return { ...base, state: 'jira_hold', wallMs };
+  if (String(ticket?.velmaBugId || '').trim()) return { ...base, state: 'velma_hold', wallMs };
   if (!resolved && normalizeDbStatusForBoard(ticket?.status) === 'wct') return { ...base, state: 'contact_hold', wallMs };
   if (!agent) return { ...base, wallMs };
 
@@ -1937,6 +1943,20 @@ async function safeWriteState(state, actor = null) {
   };
   keepServerOwned('ticketJira');
   keepServerOwned('ticketDuplicateOf');
+  keepServerOwned('ticketVelmaBug');
+
+  // The point each ticket's SLA clock counts from only ever moves forward: a
+  // client reply, the end of a hold, or a reset all push it later, and nothing
+  // pulls it back. So the later of the two wins, per ticket. Taking the
+  // payload whole let any tab saving an older snapshot undo a reset it had not
+  // heard about yet - and the ticket went back to overdue.
+  const currentSlaReset = (currentState.ticketSlaResetAt && typeof currentState.ticketSlaResetAt === 'object') ? currentState.ticketSlaResetAt : {};
+  const mergedSlaReset = { ...currentSlaReset };
+  Object.entries((nextState.ticketSlaResetAt && typeof nextState.ticketSlaResetAt === 'object') ? nextState.ticketSlaResetAt : {})
+    .forEach(([ticketId, at]) => {
+      if (Number(at || 0) > Number(mergedSlaReset[ticketId] || 0)) mergedSlaReset[ticketId] = Number(at);
+    });
+  nextState.ticketSlaResetAt = mergedSlaReset;
 
   nextState.ticketHubspotId = mergeTicketMap('ticketHubspotId');
   nextState.manualCSOverride = mergeTicketMap('manualCSOverride');
@@ -1978,7 +1998,7 @@ async function safeWriteState(state, actor = null) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf', 'ticketVelmaBug', 'ticketSlaResetAt'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -2077,6 +2097,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketJira = (state.ticketJira && typeof state.ticketJira === 'object') ? state.ticketJira : {};
   state.ticketHubspotId = (state.ticketHubspotId && typeof state.ticketHubspotId === 'object') ? state.ticketHubspotId : {};
   state.ticketDuplicateOf = (state.ticketDuplicateOf && typeof state.ticketDuplicateOf === 'object') ? state.ticketDuplicateOf : {};
+  state.ticketVelmaBug = (state.ticketVelmaBug && typeof state.ticketVelmaBug === 'object') ? state.ticketVelmaBug : {};
   state.ticketArchived = (state.ticketArchived && typeof state.ticketArchived === 'object') ? state.ticketArchived : {};
   state.manualCSOverride = (state.manualCSOverride && typeof state.manualCSOverride === 'object') ? state.manualCSOverride : {};
   state.ticketCreatedBy = (state.ticketCreatedBy && typeof state.ticketCreatedBy === 'object') ? state.ticketCreatedBy : {};
@@ -2146,6 +2167,9 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.createdAt) state.ticketCreatedAt[externalId] = ticket.createdAt.toISOString();
     if (ticket.jiraTicketKey) state.ticketJira[externalId] = ticket.jiraTicketKey;
     if (ticket.duplicateOfExternalId) state.ticketDuplicateOf[externalId] = ticket.duplicateOfExternalId;
+    if (ticket.velmaBugId && !state.ticketVelmaBug[externalId]) {
+      state.ticketVelmaBug[externalId] = { id: ticket.velmaBugId, ...((ticket.velmaBugRow && typeof ticket.velmaBugRow === 'object') ? ticket.velmaBugRow : {}) };
+    }
     if (ticket.hubspotTicketId) state.ticketHubspotId[externalId] = ticket.hubspotTicketId;
     if (ticket.displayNumber) state.ticketNumbers[externalId] = ticket.displayNumber;
     if (Array.isArray(ticket.comments) && ticket.comments.length) {
@@ -2548,6 +2572,10 @@ function mapMessage(msg) {
     subject: msg.subject || '',
     summary: msg.bodyPreview || '',
     sender: msg.from?.emailAddress?.address?.toLowerCase() || '',
+    // The sender's display name, so the board can tell a client signing their
+    // own name from a client naming one of our agents (see
+    // supportAgentNamedInEmail in index.html).
+    senderName: msg.from?.emailAddress?.name || '',
     recipients: [...new Set(recipients)],
     conversationId: msg.conversationId || '',
     internetMessageId: msg.internetMessageId || '',
@@ -3855,6 +3883,31 @@ app.get('/healthz', async (req, res) => {
   }
 });
 
+// The support roster's display names, so the board can recognise an agent
+// named in an email ("Hi Zied, ...") and give them the ticket. Keyed by roster
+// code, matched from the account's username or its email's local part - the
+// same two places the rest of the app reads an agent code from. Names only:
+// nothing here says anything about roles or permissions.
+app.get('/api/support-agents/names', requireAuth, async (req, res) => {
+  try {
+    const users = await prisma.user.findMany({
+      where: { isActive: true },
+      select: { username: true, displayName: true, email: true }
+    });
+    const agents = {};
+    users.forEach((user) => {
+      const candidates = [user.username, String(user.email || '').split('@')[0]]
+        .map(v => String(v || '').trim().toUpperCase());
+      const code = candidates.find(c => SUPPORT_AGENT_CODES.has(c));
+      const displayName = String(user.displayName || '').trim();
+      if (code && displayName && !agents[code]) agents[code] = displayName;
+    });
+    return res.json({ agents });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
 app.get('/auth/me', requireAuth, (req, res) => {
   res.json({ user: { id: req.session.userId, username: req.session.username, role: req.session.role, avatarUrl: avatarUrlForUserId(req.session.userId) } });
 });
@@ -4075,6 +4128,217 @@ app.delete('/api/jira/link/:kanbanTicketId', requireAuth, async (req, res) => {
       metadata: { source: 'manual' }
     });
     return res.json({ ok: true, linkedAt });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+// ---------------------------------------------------------------------------
+// Velma bugs
+//
+// Bugs on the Velma side are tracked in a Google Sheet rather than in Jira. A
+// ticket waiting on one of them is in the same position as one waiting on a
+// Jira issue: the fix is not support's to make, so linking it puts the SLA on
+// hold (velma_hold in ticketSlaSnapshot, and getSLAStatus on the board).
+//
+// The agent types the bug's ID; the server finds that row in the sheet and
+// keeps a copy of it on the ticket, so the card can show what the bug is
+// without anyone opening the sheet.
+//
+// The sheet is private, so it is read as a Google service account: create a
+// key for one, share the sheet with its email (Viewer is enough), and set
+// GOOGLE_SERVICE_ACCOUNT_JSON to the key file's contents (raw or base64).
+// ---------------------------------------------------------------------------
+const VELMA_BUG_SHEET_ID = String(process.env.VELMA_BUG_SHEET_ID || '1do2eeXmIog5af-HX_VtrVHpLGyY5GxMkn2JX96pL3NI').trim();
+const VELMA_BUG_SHEET_GID = String(process.env.VELMA_BUG_SHEET_GID || '601357266').trim();
+// Header of the column holding the bug ID. Optional: without it the column is
+// guessed from the headers, and failing that any cell in the row may match.
+const VELMA_BUG_ID_COLUMN = String(process.env.VELMA_BUG_ID_COLUMN || '').trim();
+const VELMA_SHEET_CACHE_MS = 60 * 1000;
+
+function googleServiceAccount() {
+  const raw = String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '').trim();
+  if (!raw) return null;
+  try {
+    const json = raw.startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8');
+    const key = JSON.parse(json);
+    if (!key.client_email || !key.private_key) return null;
+    return { email: key.client_email, privateKey: String(key.private_key).replace(/\\n/g, '\n') };
+  } catch (_) {
+    return null;
+  }
+}
+
+let googleTokenCache = { token: '', expiresAt: 0 };
+async function googleAccessToken() {
+  if (googleTokenCache.token && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
+  const account = googleServiceAccount();
+  if (!account) throw new Error('velma_sheet_not_configured: set GOOGLE_SERVICE_ACCOUNT_JSON on the server');
+  const nowSec = Math.floor(Date.now() / 1000);
+  const encode = obj => Buffer.from(JSON.stringify(obj)).toString('base64url');
+  const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({
+    iss: account.email,
+    scope: 'https://www.googleapis.com/auth/spreadsheets.readonly',
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: nowSec,
+    exp: nowSec + 3600
+  })}`;
+  const signature = crypto.createSign('RSA-SHA256').update(unsigned).sign(account.privateKey).toString('base64url');
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: `${unsigned}.${signature}` })
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok || !out.access_token) throw new Error(`google_auth_failed: ${out.error_description || out.error || res.status}`);
+  googleTokenCache = { token: out.access_token, expiresAt: Date.now() + Number(out.expires_in || 3600) * 1000 };
+  return googleTokenCache.token;
+}
+
+async function googleSheetsGet(pathAndQuery) {
+  const token = await googleAccessToken();
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(VELMA_BUG_SHEET_ID)}${pathAndQuery}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const out = await res.json().catch(() => ({}));
+  // 403/404 here almost always means the sheet was not shared with the
+  // service account, so say that rather than Google's generic message.
+  if (res.status === 403 || res.status === 404) {
+    throw new Error(`velma_sheet_not_shared: share the sheet with ${googleServiceAccount()?.email || 'the service account'}`);
+  }
+  if (!res.ok) throw new Error(`velma_sheet_read_failed: ${out?.error?.message || res.status}`);
+  return out;
+}
+
+// The whole tab, cached briefly: a link is a handful of lookups a minute at
+// most, and re-reading the sheet for each one buys nothing.
+let velmaSheetCache = { at: 0, rows: null, title: '' };
+async function readVelmaBugSheet() {
+  if (velmaSheetCache.rows && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
+  const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)');
+  const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === VELMA_BUG_SHEET_GID);
+  if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${VELMA_BUG_SHEET_GID}`);
+  const quoted = `'${String(tab.title).replace(/'/g, "''")}'`;
+  const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`);
+  velmaSheetCache = { at: Date.now(), rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
+  return velmaSheetCache;
+}
+
+const normalizeVelmaBugId = value => String(value || '').trim().replace(/^#/, '').toUpperCase();
+function velmaColumnLetter(index) {
+  let n = index + 1;
+  let out = '';
+  while (n > 0) { out = String.fromCharCode(65 + ((n - 1) % 26)) + out; n = Math.floor((n - 1) / 26); }
+  return out;
+}
+
+/* Find one bug's row in the sheet's values.
+
+   The sheet's layout is not under our control, so nothing here assumes it.
+   The header row is the first of the top few rows that names an ID column
+   (VELMA_BUG_ID_COLUMN if set, otherwise a header like "ID", "Bug ID" or
+   "Ticket ID"). The bug is the first row below it with the ID in that column.
+   If no ID column can be found, the first row with any cell equal to the ID
+   is taken instead - an exact whole-cell match, so "12" does not find "123". */
+function findVelmaBugRow(rows, bugId) {
+  const wanted = normalizeVelmaBugId(bugId);
+  if (!wanted || !Array.isArray(rows)) return null;
+  const headerName = v => String(v || '').trim().toLowerCase().replace(/[^a-z0-9#]+/g, ' ').trim();
+  const isIdHeader = (h) => {
+    if (VELMA_BUG_ID_COLUMN) return h === headerName(VELMA_BUG_ID_COLUMN);
+    return /^(velma )?(bug |ticket |issue )?(id|n|no|number|#)$/.test(h);
+  };
+  let headerIndex = -1;
+  let idColumn = -1;
+  for (let r = 0; r < Math.min(rows.length, 10) && idColumn < 0; r++) {
+    const col = (rows[r] || []).map(headerName).findIndex(isIdHeader);
+    if (col >= 0) { headerIndex = r; idColumn = col; }
+  }
+  const headers = headerIndex >= 0 ? rows[headerIndex] : [];
+  for (let r = headerIndex + 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const hit = idColumn >= 0
+      ? normalizeVelmaBugId(row[idColumn]) === wanted
+      : row.some(cell => normalizeVelmaBugId(cell) === wanted);
+    if (!hit) continue;
+    const fields = {};
+    row.forEach((cell, i) => {
+      const value = String(cell ?? '').trim();
+      if (!value) return;
+      const label = String(headers[i] || '').trim() || `Column ${velmaColumnLetter(i)}`;
+      fields[label] = value.slice(0, 2000);
+    });
+    const rowNumber = r + 1;
+    const lastColumn = velmaColumnLetter(Math.max(row.length, headers.length, 1) - 1);
+    return {
+      row: rowNumber,
+      fields,
+      url: `https://docs.google.com/spreadsheets/d/${VELMA_BUG_SHEET_ID}/edit#gid=${VELMA_BUG_SHEET_GID}&range=A${rowNumber}:${lastColumn}${rowNumber}`
+    };
+  }
+  return null;
+}
+
+async function setTicketVelmaBug({ kanbanTicketId, link, userId = null }) {
+  const externalId = String(kanbanTicketId || '').trim();
+  const ticket = await findTicketRecordByKanbanId(externalId);
+  // State first, even when the ticket has no database row yet - same reason
+  // as setTicketJiraLink.
+  const stateChange = writeServerOwnedFieldIntoState('ticketVelmaBug', externalId, link || null);
+  broadcastServerOwnedFieldChange(stateChange);
+  if (!ticket) return { ticket: null, updated: !!stateChange };
+  const nextId = link ? link.id : null;
+  const { id: _id, ...rowSnapshot } = link || {};
+  const updated = await prisma.ticket.update({
+    where: { id: ticket.id },
+    data: { velmaBugId: nextId, velmaBugRow: link ? rowSnapshot : Prisma.DbNull }
+  });
+  if (String(ticket.velmaBugId || '') !== String(nextId || '')) {
+    await createTicketAuditEvent({
+      ticketId: ticket.id,
+      userId,
+      eventType: nextId ? 'ticket_velma_bug_linked' : 'ticket_velma_bug_unlinked',
+      oldValue: ticket.velmaBugId || null,
+      newValue: nextId,
+      metadata: link ? { row: link.row } : undefined
+    });
+  }
+  return { ticket: updated, updated: true };
+}
+
+app.post('/api/velma-bug/link', requireAuth, async (req, res) => {
+  try {
+    const kanbanTicketId = String(req.body?.kanbanTicketId || '').trim();
+    const bugId = normalizeVelmaBugId(req.body?.bugId);
+    if (!kanbanTicketId || !bugId) return res.status(400).json({ error: 'missing_ticket_or_bug_id' });
+    let sheet;
+    try {
+      sheet = await readVelmaBugSheet();
+    } catch (error) {
+      return res.status(502).json({ error: String(error.message || error) });
+    }
+    const found = findVelmaBugRow(sheet.rows, bugId);
+    if (!found) return res.status(404).json({ error: `No row with ID ${bugId} in the Velma bug sheet (${sheet.title}).` });
+    const link = {
+      id: bugId,
+      ...found,
+      linkedAt: Date.now(),
+      linkedBy: String(req.session.username || '').toUpperCase() || null
+    };
+    await setTicketVelmaBug({ kanbanTicketId, link, userId: req.session.userId || null });
+    return res.json({ ok: true, link });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+app.delete('/api/velma-bug/link/:kanbanTicketId', requireAuth, async (req, res) => {
+  try {
+    const kanbanTicketId = String(req.params.kanbanTicketId || '').trim();
+    if (!kanbanTicketId) return res.status(400).json({ error: 'missing_kanban_ticket_id' });
+    // When the link was made, so the board can resume the SLA clock where the
+    // hold stopped it - the same as a Jira unlink.
+    const current = safeReadState().ticketVelmaBug?.[kanbanTicketId] || null;
+    await setTicketVelmaBug({ kanbanTicketId, link: null, userId: req.session.userId || null });
+    return res.json({ ok: true, linkedAt: Number(current?.linkedAt || 0) || null });
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
   }
@@ -4375,6 +4639,7 @@ const KPI_TICKET_SELECT = {
   companyName: true,
   senderEmail: true,
   jiraTicketKey: true,
+  velmaBugId: true,
   duplicateOfExternalId: true,
   createdAt: true,
   updatedAt: true,
@@ -4557,9 +4822,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
        the headline card disagree with the table under it. */
     const BACKLOG_KEY_BY_STATE = {
       overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
-      no_clock: 'noClock', jira_hold: 'jiraHold', contact_hold: 'contactHold'
+      no_clock: 'noClock', jira_hold: 'jiraHold', velma_hold: 'velmaHold', contact_hold: 'contactHold'
     };
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, contactHold: 0 };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
@@ -4694,6 +4959,8 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // Reported so they are visibly parked rather than just missing from
         // the other three figures.
         jiraHold: backlog.jiraHold,
+        // Same, for tickets waiting on a Velma bug.
+        velmaHold: backlog.velmaHold,
         // Open tickets whose clock is frozen while they wait on the client.
         contactHold: backlog.contactHold,
         oldestOpenHours: hoursFromMs(oldestOpenMs),
@@ -7905,6 +8172,8 @@ const LIVE_SYNC_FIELDS = [
   // A reply restarts the SLA clock, and every open board has to agree about
   // when - otherwise one tab shows a badge as breached and another does not.
   'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt',
+  // A Velma bug link puts the SLA on hold, so every board has to show it.
+  'ticketVelmaBug',
   // A CS send-back lands in the support agent's My Alerts, so it has to reach
   // their open board now rather than on their next reload.
   'ticketSendBackAlerts',
@@ -12101,8 +12370,45 @@ async function runChurnSignalsQuery(req, res) {
 app.post('/api/churn-signals/bulk', churnSignalsLimiter, requireChurnApiAccess, runChurnSignalsQuery);
 app.get('/api/churn-signals/:companyName', churnSignalsLimiter, requireChurnApiAccess, runChurnSignalsQuery);
 
+/* One-off: restart the SLA clock of every ticket sitting in Waiting on Contact.
+
+   The clock is frozen in that column now, but these tickets went in with time
+   already on it - some of it from before the hold existed - and would come
+   out overdue the moment the client answered. Moving their restart point to
+   now gives each one a full SLA from here. Only that column: every other
+   ticket keeps its clock as it is.
+
+   Runs once per board: the marker file sits next to the board state, so a
+   restart does not reset them again. The state-file write is synchronous, so
+   no board save can land in between the read and the write. The database
+   copy (what the KPI dashboard reads) follows. */
+const SLA_WCT_RESET_MARKER = path.join(path.dirname(DATA_PATH), 'sla-reset-waiting-on-contact.json');
+async function resetWaitingOnContactSlaOnce() {
+  if (fs.existsSync(SLA_WCT_RESET_MARKER)) return;
+  const now = Date.now();
+  const state = safeReadState();
+  const stages = (state.ticketState && typeof state.ticketState === 'object') ? state.ticketState : {};
+  const ids = Object.keys(stages).filter(id => stages[id] === 'wct');
+  if (ids.length) {
+    state.ticketSlaResetAt = (state.ticketSlaResetAt && typeof state.ticketSlaResetAt === 'object') ? state.ticketSlaResetAt : {};
+    ids.forEach((id) => { state.ticketSlaResetAt[id] = now; });
+    fs.writeFileSync(DATA_PATH, JSON.stringify(state, null, 2), 'utf8');
+  }
+  // Recorded before the database is touched: the board state is what the
+  // badges and every later save come from, so that is the part that must not
+  // run twice.
+  fs.writeFileSync(SLA_WCT_RESET_MARKER, JSON.stringify({ at: new Date(now).toISOString(), tickets: ids }, null, 2), 'utf8');
+  if (ids.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: ids } }, data: { slaResetAt: new Date(now) } });
+  }
+  console.log(`SLA reset for ${ids.length} ticket(s) in Waiting on Contact.`);
+}
+
 const server = app.listen(PORT, () => {
   console.log(`Support Kanban secure web app on http://localhost:${PORT}`);
+  resetWaitingOnContactSlaOnce().catch((error) => {
+    console.error('Waiting on Contact SLA reset failed:', error?.message || error);
+  });
   if (SESSION_SECRET === 'change-this-session-secret') {
     console.log('WARNING: Set SESSION_SECRET before production use.');
   }

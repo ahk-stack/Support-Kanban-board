@@ -1903,6 +1903,36 @@ header {
   display: block;
 }
 
+/* Velma bug link in the card footer: dashed while unlinked (an action), solid
+   once linked (a fact you can click to change) - the Jira controls' language. */
+.velma-link-btn,
+.velma-badge-card {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 3px 8px;
+  color: var(--violet-600);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.velma-link-btn {
+  background: var(--slate-50);
+  border: 1px dashed var(--slate-300);
+}
+
+.velma-badge-card {
+  background: var(--purple-soft);
+  border: 1px solid var(--violet-600);
+}
+
+.velma-link-btn:hover {
+  background: var(--purple-soft);
+  border-color: var(--violet-600);
+}
+
 /* Sits beside the linked chip in the card footer. The chip goes to Jira, so
    changing a link needs its own control in the same row - the slot the Link
    button occupies while the ticket is still unlinked. Dashed like that button,
@@ -6599,6 +6629,28 @@ th {
     </div>
   </div>
 </div>
+<div class="modal-bg" id="velma-modal">
+  <div class="modal" style="max-width:420px;">
+    <div class="modal-head"><h2 id="velma-modal-title">Link a Velma bug</h2><button class="modal-close-x" data-close="velma-modal"></button></div>
+    <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;">
+      <div style="font-size:14px;color:var(--slate-500);line-height:1.4;" id="velma-ticket-title"></div>
+      <!-- The bug this ticket is linked to right now, as the sheet row read
+           when it was linked. Hidden while there is no link. -->
+      <div id="velma-current" style="display:none;font-size:13px;line-height:1.45;color:var(--slate-700);background:var(--purple-soft);border:1px solid var(--violet-600);border-radius:10px;padding:10px;"></div>
+      <div class="form-field">
+        <label id="velma-input-label">Velma bug ticket ID</label>
+        <input id="velma-input" class="form-input" type="text" placeholder="The ID from the Velma bug sheet" style="font-size:16.5px;font-weight:700;letter-spacing:.5px;"/>
+        <div style="font-size:12px;color:var(--slate-400);margin-top:3px;">The row with this ID is looked up in the Velma bug sheet and linked to the ticket. The SLA goes on hold while it is linked.</div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-out" id="velma-unlink" style="color:var(--red-600);border-color:var(--red-300);display:none;">Remove link</button>
+      <button class="btn-out" id="velma-open-link" style="display:none;">Open in sheet</button>
+      <button class="btn-out" data-close="velma-modal">Cancel</button>
+      <button class="btn-primary" id="velma-save" style="background:var(--violet-600);">Link</button>
+    </div>
+  </div>
+</div>
 <div class="modal-bg" id="jira-settings-modal">
   <div class="modal" style="max-width:520px;">
     <div class="modal-head"><h2>Jira Settings</h2><button class="modal-close-x" data-close="jira-settings-modal"></button></div>
@@ -6772,6 +6824,52 @@ function supportAgentsTaggedInEmail(emailObj){
   });
   return tagged;
 }
+/* A support agent named in the email itself - "Hi Zied, ..." - by the name on
+   their account.
+
+   Names come from each agent's display name (GET /api/support-agents/names),
+   so a new colleague or a changed name needs no code change. Both the full
+   name and the first name count, matched as whole words and ignoring case
+   and accents, across the subject and the preview of the message. When more
+   than one agent is named, the one named first wins: that is who the mail is
+   addressed to, the others are usually "as X told me".
+
+   Two guards, because a wrong guess is worse than the rotation:
+   - a first name two agents share proves nothing, so only the full name
+     counts for them;
+   - the sender's own name is never taken as a mention - a client called
+     Zied signing "Zied" is not asking for our Zied. */
+let supportAgentDisplayNames={}; // roster code -> display name
+async function loadSupportAgentNames(){
+  try{
+    const res=await fetch('/api/support-agents/names',{credentials:'include'});
+    if(!res.ok)return;
+    const out=await res.json();
+    if(out?.agents&&typeof out.agents==='object')supportAgentDisplayNames=out.agents;
+  }catch(_){}
+}
+function foldForNameMatch(v){return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();}
+function supportAgentNamedInEmail(emailObj){
+  const text=' '+foldForNameMatch(`${emailObj?.subject||''} ${emailObj?.summary||''}`)+' ';
+  if(!text.trim())return'';
+  const senderWords=new Set(foldForNameMatch(`${emailObj?.senderName||''} ${String(emailObj?.sender||'').split('@')[0]}`).split(' ').filter(Boolean));
+  const people=SUPPORT_AGENTS.map(code=>{
+    const words=foldForNameMatch(supportAgentDisplayNames[code]).split(' ').filter(w=>w.length>=3&&w!==code.toLowerCase());
+    return{code,full:words.length>1?words.join(' '):'',first:words[0]||''};
+  }).filter(p=>p.first);
+  const firstCount={};
+  people.forEach(p=>{firstCount[p.first]=(firstCount[p.first]||0)+1;});
+  let best='',bestAt=Infinity;
+  people.forEach(p=>{
+    const names=[p.full];
+    if(firstCount[p.first]===1&&!senderWords.has(p.first))names.push(p.first);
+    names.filter(Boolean).forEach(n=>{
+      const at=text.indexOf(' '+n+' ');
+      if(at>=0&&at<bestAt){bestAt=at;best=p.code;}
+    });
+  });
+  return best;
+}
 /* Where a ticket goes when the mail names nobody who can take it.
 
    Spread evenly across the support team - every agent on the roster except
@@ -6801,10 +6899,12 @@ function fallbackSupportOwner(){
   // and re-stamped on every render.
   return normalizeSupportAgent(FALLBACK_SUPPORT_OWNER)||leastLoadedSupportAgent();
 }
-// Who a ticket lands on when nobody has chosen yet: the agent the mail names,
-// and failing that the next agent in the rotation above.
+// Who a ticket lands on when nobody has chosen yet: the agent the email
+// names in its text, then the agent it is addressed to (To/Cc), and failing
+// both the next agent in the rotation above. The text comes first because it
+// is what the client actually wrote - a CC is often just habit.
 function defaultSupportAgentForTicket(emailObj){
-  return supportAgentsTaggedInEmail(emailObj)[0]||fallbackSupportOwner();
+  return supportAgentNamedInEmail(emailObj)||supportAgentsTaggedInEmail(emailObj)[0]||fallbackSupportOwner();
 }
 function normalizeEmailList(values){return (Array.isArray(values)?values:[]).map(v=>String(v||'').trim().toLowerCase()).filter(Boolean);}
 function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(NO_REPLY_SUBJECTS.some(p=>tl.includes(p)))return true;if(/\b(newsletter|webinar|digest|event reminder)\b/.test(tl))return true;if(/(microsoft teams meeting|join microsoft teams meeting|meeting invitation|accepted:|declined:|tentative:)/.test(tl))return true;return false;}
@@ -6963,6 +7063,11 @@ let ticketCreatedBy={}; // ticketId -> creator's agent code, set once at manual-
 let ticketNumbers={};
 let ticketNumberCounter=0;
 let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
+/* ticketId -> the Velma bug sheet row it is linked to:
+   {id, row, url, fields:{header:value}, linkedAt, linkedBy}. Server-owned like
+   ticketJira - only /api/velma-bug/link writes it - and, like a Jira link, it
+   puts the SLA on hold (getSLAStatus). */
+let ticketVelmaBug={};
 // ticketId -> the ticket id this one duplicates. The same problem reaches the
 // helpdesk twice often enough (a resend, a reply Outlook threads under a fresh
 // conversation, a client writing from two addresses) that clearing the copy by
@@ -7545,6 +7650,22 @@ async function apiUnmarkTicketDuplicate(ticketId){
   const out=await res.json().catch(()=>({}));
   return{ok:res.ok,...out};
 }
+async function apiLinkVelmaBug(kanbanTicketId,bugId){
+  const res=await fetch('/api/velma-bug/link',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({kanbanTicketId,bugId})});
+  const out=await res.json().catch(()=>({}));
+  return{ok:res.ok,...out};
+}
+async function apiUnlinkVelmaBug(kanbanTicketId){
+  const res=await fetch(`/api/velma-bug/link/${encodeURIComponent(kanbanTicketId)}`,{method:'DELETE',credentials:'include'});
+  const out=await res.json().catch(()=>({}));
+  // The hold is over: resume the clock where the link stopped it, exactly as
+  // apiUnlinkJiraTicket does - and not while a Jira link or Waiting on Contact
+  // still holds it, since those settle the clock themselves. Callers save.
+  if(res.ok&&Number(out?.linkedAt)>0&&!canonicalJiraKey(ticketJira[kanbanTicketId])&&normalizeTicketStage(ticketState[kanbanTicketId]||'new')!=='wct'){
+    resumeSlaAfterHold(kanbanTicketId,Number(out.linkedAt),Date.now());
+  }
+  return{ok:res.ok,...out};
+}
 async function apiGetJiraIssues(keys){
   const uniq=[...new Set((Array.isArray(keys)?keys:[]).map(k=>String(k||'').trim().toUpperCase()).filter(Boolean))];
   if(!uniq.length)return{connected:jiraConnection.connected,issues:[]};
@@ -7814,6 +7935,7 @@ function mergeDatabaseTickets(dbTickets){
     // treating a missing column as "not a duplicate" would erase the marking
     // in exactly that window.
     if(row.duplicateOfExternalId)ticketDuplicateOf[id]=String(row.duplicateOfExternalId);
+    if(row.velmaBugId&&!ticketVelmaBug[id])ticketVelmaBug[id]={id:String(row.velmaBugId),...(row.velmaBugRow&&typeof row.velmaBugRow==='object'?row.velmaBugRow:{})};
     if(row.hubspotTicketId)ticketHubspotId[id]=row.hubspotTicketId;
     if(Array.isArray(row.comments)){
       ticketComments[id]=row.comments.map(c=>({author:c?.user?.displayName||c?.user?.username||'SYSTEM',text:c?.comment||'',comment:c?.comment||'',tags:Array.isArray(c?.tags)?c.tags:[],ts:c?.createdAt||Date.now(),createdAt:c?.createdAt||new Date().toISOString(),isInternal:c?.isInternal!==false}));
@@ -7847,7 +7969,7 @@ function liveSyncTargets(){
   return {ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
     manualSupportOverride,manualCSOverride,ticketPriority,ticketCategory,ticketSubtype,
     ticketJira,ticketDuplicateOf,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
-    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt};
+    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt,ticketVelmaBug};
 }
 function setLiveIndicator(state,detail){
   const el=document.getElementById('live-indicator');
@@ -8058,6 +8180,11 @@ async function loadState(){
   if(s.ticketDuplicateOf&&typeof s.ticketDuplicateOf==='object'){
     Object.keys(ticketDuplicateOf).forEach(k=>{delete ticketDuplicateOf[k];});
     Object.entries(s.ticketDuplicateOf).forEach(([k,v])=>{const master=String(v||'').trim();if(master)ticketDuplicateOf[k]=master;});
+  }
+  // Server-owned too: an unlinked bug has to be able to disappear.
+  if(s.ticketVelmaBug&&typeof s.ticketVelmaBug==='object'){
+    Object.keys(ticketVelmaBug).forEach(k=>{delete ticketVelmaBug[k];});
+    Object.entries(s.ticketVelmaBug).forEach(([k,v])=>{if(v&&v.id)ticketVelmaBug[k]=v;});
   }
   if(s.ticketHubspotId)Object.assign(ticketHubspotId,s.ticketHubspotId);
   // Snoozes are shared board state, not a personal view: if one agent parks a
@@ -8383,6 +8510,10 @@ function getSLAStatus(id){
      ticketSlaSnapshot, which is what the dashboard is computed from. */
   const jiraHoldKey=canonicalJiraKey(ticketJira[id]);
   if(jiraHoldKey)return{text:`SLA on hold - ${jiraHoldKey}`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,jiraHold:jiraHoldKey};
+  // Waiting on a Velma bug: the same hold, for the same reason. Mirrors
+  // velma_hold in ticketSlaSnapshot.
+  const velmaHoldId=ticketVelmaBug[id]?.id;
+  if(velmaHoldId)return{text:`SLA on hold - Velma bug ${velmaHoldId}`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,velmaHold:velmaHoldId};
   /* Waiting on the client, so the clock is frozen: the ball is in their court
      and the time they take to answer is not ours to be late with. It resumes
      from where it stopped when the ticket leaves the column - see
@@ -8423,6 +8554,11 @@ function slaTooltip(status){
     return['SLA is not counting: this ticket is linked to '+status.jiraHold+'.',
       'Wall clock: '+(status.wallText||''),
       'Unlinking the Jira issue resumes the clock where it stopped.'].join('\n');
+  }
+  if(status.velmaHold){
+    return['SLA is not counting: this ticket is linked to Velma bug '+status.velmaHold+'.',
+      'Wall clock: '+(status.wallText||''),
+      'Unlinking the bug resumes the clock where it stopped.'].join('\n');
   }
   if(status.contactHold){
     return['SLA is on hold: this ticket is waiting on the contact. The timer is stopped.',
@@ -9026,6 +9162,74 @@ document.getElementById('jira-unlink').addEventListener('click',async()=>{
   showToast('Jira link removed');
 });
 document.getElementById('jira-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('jira-save').click();});
+
+/* Velma bug link. Same shape as the Jira modal: the agent gives the bug's ID,
+   the server finds that row in the Velma bug sheet and links it, and the SLA
+   goes on hold until the link comes off. */
+let velmaTicketId=null;
+function velmaFieldsHtml(link,limit){
+  const entries=Object.entries(link?.fields||{}).filter(([,v])=>String(v||'').trim());
+  return entries.slice(0,limit).map(([k,v])=>`<div style="margin-top:2px;"><span style="color:var(--slate-500);">${esc(k)}:</span> ${esc(String(v).slice(0,160))}</div>`).join('');
+}
+function openVelmaModal(id){
+  velmaTicketId=id;
+  const ticket=allTickets.find(t=>t.id===id);
+  const link=ticketVelmaBug[id]||null;
+  document.getElementById('velma-ticket-title').textContent=ticket?.email?.subject||'';
+  document.getElementById('velma-modal-title').textContent=link?'Change Velma bug link':'Link a Velma bug';
+  const currentEl=document.getElementById('velma-current');
+  currentEl.style.display=link?'':'none';
+  currentEl.innerHTML=link
+    ?`<div>Linked to Velma bug <strong style="font-size:15px;">${esc(link.id)}</strong>${link.row?` <span style="color:var(--slate-500);">(sheet row ${esc(link.row)})</span>`:''}</div>${velmaFieldsHtml(link,8)}`
+    :'';
+  const input=document.getElementById('velma-input');
+  input.value=link?link.id:'';
+  document.getElementById('velma-input-label').textContent=link?'Link it to this bug ID instead':'Velma bug ticket ID';
+  document.getElementById('velma-save').textContent=link?'Update link':'Link';
+  document.getElementById('velma-unlink').style.display=link?'':'none';
+  const openBtn=document.getElementById('velma-open-link');
+  openBtn.style.display=link?.url?'':'none';
+  openBtn.onclick=()=>{if(link?.url)window.open(link.url,'_blank');};
+  document.getElementById('velma-modal').classList.add('open');
+  setTimeout(()=>{input.focus();if(link)input.select();},100);
+}
+document.getElementById('velma-save').addEventListener('click',async()=>{
+  if(!velmaTicketId)return;
+  const bugId=String(document.getElementById('velma-input').value||'').trim().replace(/^#/,'');
+  if(!bugId){showToast('Enter the bug\'s ID from the Velma bug sheet.');return;}
+  const linkedId=velmaTicketId;
+  if(String(ticketVelmaBug[linkedId]?.id||'').toUpperCase()===bugId.toUpperCase()){
+    document.getElementById('velma-modal').classList.remove('open');
+    showToast('Already linked to Velma bug '+bugId);
+    return;
+  }
+  const saveBtn=document.getElementById('velma-save');
+  saveBtn.disabled=true;
+  const out=await apiLinkVelmaBug(linkedId,bugId).finally(()=>{saveBtn.disabled=false;});
+  if(!out?.ok||!out.link){
+    showToast(`Velma bug link failed: ${out?.error||'unknown error'}`);
+    return;
+  }
+  ticketVelmaBug[linkedId]=out.link;
+  saveState('velma_bug_linked');
+  document.getElementById('velma-modal').classList.remove('open');
+  renderBoard();
+  showToast(`Linked to Velma bug ${out.link.id} - SLA on hold`,'ok');
+});
+document.getElementById('velma-unlink').addEventListener('click',async()=>{
+  if(!velmaTicketId)return;
+  const unlinkedId=velmaTicketId;
+  const out=await apiUnlinkVelmaBug(unlinkedId);
+  if(!out?.ok){
+    showToast(`Velma bug unlink failed: ${out?.error||'unknown error'}`);
+    return;
+  }
+  delete ticketVelmaBug[unlinkedId];
+  saveState('velma_bug_unlinked');renderBoard();
+  document.getElementById('velma-modal').classList.remove('open');
+  showToast('Velma bug link removed');
+});
+document.getElementById('velma-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('velma-save').click();});
 document.getElementById('jira-settings-btn').addEventListener('click',e=>{e.stopPropagation();document.getElementById('account-panel').classList.remove('open');openJiraSettingsModal();});
 
 // --- Templates: shared, team-wide reusable message templates -----------
@@ -13493,6 +13697,14 @@ function makeCard(ticket,isNew=false){
   const jiraEditBtn=jiraKey
     ?`<button class="jira-edit-btn" data-jira-edit="${id}" title="Link this ticket to a different Jira issue" aria-label="Change Jira link">Change</button>`
     :'';
+  // Velma bug: a chip in the footer opens the modal (link or change), and once
+  // linked the row's first few columns show above the footer, like the Jira
+  // panel, so the card says what the bug is without opening the sheet.
+  const velmaLink=ticketVelmaBug[id]||null;
+  const velmaBtn=velmaLink
+    ?`<button class="velma-badge-card" data-velma-open="${id}" title="Velma bug ${esc(velmaLink.id)} - click to change or remove">Velma ${esc(velmaLink.id)}</button>`
+    :`<button class="velma-link-btn" data-velma-open="${id}" title="Link to a Velma bug" aria-label="Link to a Velma bug">Velma</button>`;
+  const velmaDetailsHtml=velmaLink?`<div style="margin-top:6px;padding:7px 8px;border:1px solid var(--violet-600);border-radius:10px;background:var(--purple-soft);font-size:12px;line-height:1.35;color:var(--slate-700);"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><strong style="color:var(--violet-600);">Velma bug ${esc(velmaLink.id)}</strong>${velmaLink.url?`<a href="${esc(velmaLink.url)}" target="_blank" rel="noopener" style="color:var(--violet-600);">Open row</a>`:''}</div>${velmaFieldsHtml(velmaLink,4)}</div>`:'';
   const jiraLinkedQt=(jiraInfo?.linkedIssues||[]).filter(x=>String(x.key||'').startsWith('QT-'));
   const jiraLinkedHtml=jiraLinkedQt.length?jiraLinkedQt.slice(0,2).map(x=>`<span style="display:inline-flex;align-items:center;gap:4px;border:1px solid var(--indigo-200);border-radius:999px;padding:1px 7px;background:var(--indigo-50);color:var(--indigo-800);">${esc(x.key)} <span style="color:var(--slate-500);">${esc(x.status||'')}</span></span>`).join(' '):'<span style="color:var(--slate-400);">No QT linked</span>';
   const jiraCommentHtml=jiraInfo?.comments?.length?jiraInfo.comments.slice(-2).reverse().map(c=>`<div style="margin-top:3px;"><strong>${esc(c.author||'Unknown')}:</strong> ${esc(c.body||'').slice(0,140)}</div>`).join(''):'<div style="color:var(--slate-400);margin-top:3px;">No Jira comments</div>';
@@ -13565,13 +13777,14 @@ function makeCard(ticket,isNew=false){
     </div>
     <div class="card-summary">${esc(trView?trView.summary:(email.summary||'No preview.'))}</div>
     <div class="card-controls"><select class="cat-select" data-cat="${id}">${catOpts}</select>${subControlHtml}</div>
-    ${trBannerHtml}${snoozeRowHtml}${proposedHtml}${dupBadgeHtml}${slaBadgeHtml}${hsHtml}${jiraDetailsHtml}${resolvedHtml}
+    ${trBannerHtml}${snoozeRowHtml}${proposedHtml}${dupBadgeHtml}${slaBadgeHtml}${hsHtml}${jiraDetailsHtml}${velmaDetailsHtml}${resolvedHtml}
     <div class="card-footer">
       ${senderHtml}
       <div class="card-actions">
         <span class="card-date">${fmtDate(email.receivedDateTime)}</span>
         ${jiraBtn}
         ${jiraEditBtn}
+        ${velmaBtn}
         ${hsTicketBtn}
         ${trControlsHtml}
         <button class="open-email-btn" data-oe="${id}"> Open</button>
@@ -13708,6 +13921,7 @@ function makeCard(ticket,isNew=false){
     });
   }
   div.querySelector('[data-jira-edit]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openJiraModal(id);});
+  div.querySelector('[data-velma-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openVelmaModal(id);});
   div.querySelector('[data-jira-open]').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(jiraKey&&JIRA_URL){window.open(`${JIRA_URL}${encodeURIComponent(jiraKey)}`,'_blank');return;}openJiraModal(id);});
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
   div.querySelector('[data-hs-retry]')?.addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const rs=await syncTicketToHubspot(ticket);if(rs?.ok&&ticketHubspotId[id]){window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(ticketHubspotId[id])}`,'_blank');showToast('Ticket synced to HubSpot','ok');}else{const reason=rs?.reason||'unknown';if(reason==='missing_company_mapping')showToast('Cannot sync yet: this ticket has no mapped HubSpot company.');else if(reason==='missing_client_email')showToast('Cannot sync yet: no client email found for this ticket.');else if(reason==='api_error')showToast(`HubSpot sync failed: ${rs?.error||'api error'}`);else if(reason==='network_error')showToast(`HubSpot sync network error: ${rs?.error||'unknown'}`);else showToast('Unable to sync this ticket yet.');}renderBoard();});
@@ -17700,6 +17914,9 @@ async function poll(){if(!hasCowork){startCountdown();return;}const res=await fe
 
 (async()=>{
   await buildAgentUI();
+  // Before anything can assign a ticket: an assignment is made once and kept,
+  // so a mail polled before the names arrive would lose its named agent.
+  await loadSupportAgentNames();
   await refreshJiraStatus();
   // Fire-and-forget: the language list only gates the picker's contents, and
   // the board must not wait on it. Until it lands, a translate button falls

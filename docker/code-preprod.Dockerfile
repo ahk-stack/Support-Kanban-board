@@ -55,8 +55,10 @@ COPY --from=deps /app/node_modules ./node_modules
 
 # Application code (explicit — keeps the image lean and predictable). Every
 # module server.js requires has to be listed here; a missing one is a crash loop
-# on boot, not a build failure.
-COPY package.json package-lock.json prisma.config.ts prismaClient.js seed-admin.js server.js ./
+# on boot, not a build failure. Operational one-shot scripts (seed-*.js) count
+# too: nothing requires them at boot, but they are run with `kubectl exec`
+# against a live pod, so they are useless unless they ship in the image.
+COPY package.json package-lock.json prisma.config.ts prismaClient.js seed-admin.js seed-churn-service-account.js server.js ./
 COPY translate-local.js translate-local-worker.js ./
 COPY prisma ./prisma
 COPY public ./public

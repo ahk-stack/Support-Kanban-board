@@ -114,6 +114,11 @@ model Ticket {
   emailMessageId          String?
   hubspotTicketId         String?
   jiraTicketKey           String?
+  // A row of the Velma bug spreadsheet this ticket is waiting on. Like a Jira
+  // link it puts the SLA on hold. velmaBugRow is the row as it read when the
+  // link was made: { row, url, fields: { header: value } }.
+  velmaBugId              String?
+  velmaBugRow             Json?
   body                    String?
   emailRaw                Json?
   // The message body as Outlook returned it, captured the first time the

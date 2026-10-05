@@ -718,6 +718,34 @@ A ticket sitting in **Waiting on Contact** that gets a genuine client reply
 moves itself to **Waiting on Us** and starts counting again - that stage move
 already existed; what is new is that the clock restarts with it.
 
+## One-time SLA reset for Waiting on Contact
+
+On its first start after this deploy, the server restarts the SLA clock of every
+ticket that is in **Waiting on Contact** at that moment, so none of them comes
+out of the column already overdue. Nothing else is touched. It writes
+`data/sla-reset-waiting-on-contact.json` (when, and which tickets) and does not
+run again while that file exists - delete it to run the reset once more.
+
+## Velma bug links
+
+A ticket can be linked to a row of the Velma bug Google Sheet: the agent enters
+the bug's ID, the server finds that row and stores a copy on the ticket. While
+linked, the SLA is on hold, the same as a Jira link.
+
+**This needs `prisma migrate deploy`** (`Ticket.velmaBugId`, `Ticket.velmaBugRow`)
+for the same reason as `slaResetAt` above.
+
+The sheet is private, so the server reads it as a Google service account:
+
+1. In Google Cloud, enable the **Google Sheets API**, create a service account
+   and download a JSON key for it.
+2. Share the sheet with the service account's email (Viewer is enough).
+3. Set `GOOGLE_SERVICE_ACCOUNT_JSON` to the key file's contents, raw or base64.
+
+Optional: `VELMA_BUG_SHEET_ID` and `VELMA_BUG_SHEET_GID` (default to the current
+sheet and tab), and `VELMA_BUG_ID_COLUMN` - the header of the ID column, if the
+automatic guess (a header such as `ID`, `Bug ID`, `Ticket ID`) picks the wrong one.
+
 ## Important security note
 
 
