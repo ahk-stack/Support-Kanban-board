@@ -735,16 +735,91 @@ linked, the SLA is on hold, the same as a Jira link.
 **This needs `prisma migrate deploy`** (`Ticket.velmaBugId`, `Ticket.velmaBugRow`)
 for the same reason as `slaResetAt` above.
 
-The sheet is private, so the server reads it as a Google service account:
+The sheet is private, so the server needs a Google identity that can read it.
+Either of these works; with both, the service account is tried first.
+
+**Option A - sign in with Google from the board (no admin needed per person).**
+Set this up once, then any agent who can already open the sheet connects their
+account from **Account > Google account** (or from the Velma modal when it says
+nothing can read the sheet). Their refresh token is stored encrypted in
+`OAuthToken` (`google:<userId>`) and the board keeps reading as them after they
+close the tab. If several people connect, the most recent one is tried first and
+an account without access to the sheet is skipped for the next.
+
+1. In Google Cloud, enable the **Google Sheets API**.
+2. Configure the OAuth consent screen (Internal, for the quinta.im workspace) with
+   the scopes `openid`, `email` and `.../auth/spreadsheets.readonly`.
+3. Create an **OAuth client ID** of type *Web application* with the authorised
+   redirect URI `https://<board host>/auth/google/callback` - one per environment
+   (pre-prod and prod each need their own URI listed).
+4. Paste the client ID and secret into the board: **Account > Google account**
+   (admins only) shows these steps with the exact origin and redirect URI to copy,
+   and a form to save the two values - stored in `OAuthToken`
+   (`google-oauth-client`), the secret encrypted. No env change or redeploy.
+   Alternatively set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`,
+   which take precedence and lock the board form. The redirect URI is derived
+   from `APP_BASE_URL`; set `GOOGLE_OAUTH_REDIRECT_URI` only if it has to differ.
+
+"Sign in with Google" then opens Google in a new tab; when it finishes, the tab
+tells the board (over a BroadcastChannel, since Cross-Origin-Opener-Policy cuts
+`window.opener`) and closes itself.
+
+The stored tokens are encrypted with `CLAUDE_CREDENTIAL_SECRET` (falling back to
+`SESSION_SECRET`), the same key as the Claude connector - changing it disconnects
+everyone, who then simply sign in again.
+
+**Option B - a service account (nobody has to stay signed in).**
 
 1. In Google Cloud, enable the **Google Sheets API**, create a service account
    and download a JSON key for it.
 2. Share the sheet with the service account's email (Viewer is enough).
 3. Set `GOOGLE_SERVICE_ACCOUNT_JSON` to the key file's contents, raw or base64.
 
+**Status and the SLA.** The bug's **Status** column is read with the row (the
+value the dropdown shows). While it is anything other than DONE the ticket's SLA
+is on hold. Every few minutes (`VELMA_SYNC_MS`, default 3 minutes) the server
+re-reads the sheet for every linked ticket: when a bug turns DONE the hold ends
+and the SLA resumes from where the link stopped it (the restart point moves
+forward by the length of the hold, so the wait is not counted against support);
+if DONE is taken off again a new hold starts. A Jira link or Waiting on Contact
+still holds the ticket on its own. **Account > Google account > Check linked bugs
+now** runs the same check immediately.
+
 Optional: `VELMA_BUG_SHEET_ID` and `VELMA_BUG_SHEET_GID` (default to the current
-sheet and tab), and `VELMA_BUG_ID_COLUMN` - the header of the ID column, if the
-automatic guess (a header such as `ID`, `Bug ID`, `Ticket ID`) picks the wrong one.
+sheet and tab); `VELMA_BUG_ID_COLUMN` - the header of the ID column, if the
+automatic guess (a header such as `ID`, `Bug ID`, `Ticket ID`) picks the wrong one;
+`VELMA_BUG_STATUS_COLUMN` - the header of the status dropdown, if it is not called
+`Status`; `VELMA_DONE_STATUSES` - comma-separated values that count as done
+(default `DONE`; case, spaces and emoji are ignored).
+
+## Ticket distribution
+
+A ticket whose mail names a support agent, or is addressed to one, goes to that
+agent. Every other ticket goes to a support agent other than SGU, at random,
+weighted by how far each agent is below their share for the ticket's priority:
+on average **8 open High, 10 Medium and 10 Low** each (`SUPPORT_PRIORITY_TARGETS`
+in index.html). These are targets, not caps - once everyone is at or past theirs,
+the ticket goes to whoever holds the fewest of that priority. The roll is seeded
+by the ticket id, so two open boards make the same choice.
+
+**Leave.** A support agent can be marked off from **Account > Availability**
+(or by clicking their name in the header's team load): admins for anyone, every
+agent for themselves, with an optional return date (the day they are back - the
+leave ends at the start of that day by itself). While off they are greyed out and
+cannot be picked in the assign menu, the bulk-assign bar or the new-ticket form;
+the automatic distribution skips them at every step (named in the mail, tagged,
+the weighted roll); the SGU redistribution gives them nothing; and the Claude
+connector's `update_ticket` refuses them (`409 agent_on_leave`). Tickets they
+already hold stay with them. Stored in Postgres (`OAuthToken`, provider
+`agent-leave:<CODE>`), so a redeploy does not forget it; no migration needed.
+
+**One-off on first start of this build:** SGU's tickets in **New** are handed to
+the other six support agents, at random within the same numbers used as hard caps
+(8 High / 10 Medium / 10 Low open each); anything that would push everyone past
+their cap stays with SGU. It runs once per database - recorded as a `SyncLog`
+row with `syncType = 'sgu_new_redistribution_v1'`, whose `metadata` lists every
+ticket moved and where to - so it also runs once on prod when this build ships
+there, unless that row is inserted first.
 
 ## Important security note
 

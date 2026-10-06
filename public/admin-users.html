@@ -60,6 +60,32 @@
     .message { min-height: 24px; margin-top: 14px; font-size: 0.95rem; }
     @media (max-width: 1040px) { .panel-grid { grid-template-columns: 1fr; } .users-list { max-height: none; } }
     @media (max-width: 700px) { .search-row { grid-template-columns: 1fr; } .form-row { grid-template-columns: 1fr; } }
+  
+    /* Board palette: the same violet-black chrome and accent gradient as the
+       main board, so moving between pages does not change products. */
+    :root { --q-ink: #0d0f20; --q-ink-soft: #1a1d38; --q-primary: #5b4cf5; --q-grad: linear-gradient(135deg, #6d5efc 0%, #a855f7 62%, #ec4899 130%); --q-ring: 0 0 0 3px rgba(91, 76, 245, .22); }
+    body { -webkit-font-smoothing: antialiased; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--q-primary) !important; box-shadow: var(--q-ring) !important; }
+    input[type="checkbox"] { accent-color: var(--q-primary); }
+    :root { color: #13152c; }
+    body { background: radial-gradient(1000px 480px at -10% -8%, rgba(124, 92, 255, .12), transparent 60%), radial-gradient(800px 420px at 110% 110%, rgba(236, 72, 153, .08), transparent 60%), #f3f4fb; }
+    a { color: var(--q-primary); }
+    .title { font-family: Caladea, Georgia, serif; font-weight: 700; letter-spacing: -.01em; }
+    .subtitle { color: #5a6082; }
+    .panel { border-radius: 20px; border-color: #e3e5f2; box-shadow: 0 2px 6px rgba(25, 22, 70, .04), 0 18px 44px rgba(25, 22, 70, .08); }
+    .btn { border-radius: 11px; font-weight: 650; padding: 11px 16px; }
+    .btn-primary { background: var(--q-grad); box-shadow: 0 8px 22px rgba(109, 94, 252, .30), inset 0 1px 0 rgba(255, 255, 255, .2); }
+    .btn-primary:hover { filter: brightness(1.07); }
+    .btn-secondary { border-color: #cdd1e6; color: #353a5c; }
+    .top a.btn-secondary { min-width: 0; padding: 11px 18px; border-radius: 11px; font-weight: 650; color: #353a5c; }
+    .search-row input, .form-group input, .form-group select { border-radius: 11px; border-color: #cdd1e6; background: #fff; }
+    .users-list { border-radius: 18px; background: #f8f9fe; }
+    .card { border-radius: 16px; border-color: #e3e5f2; }
+    .card:hover { box-shadow: 0 12px 28px rgba(109, 94, 252, .12); }
+    .card.selected { border-color: rgba(91, 76, 245, .5); box-shadow: 0 0 0 3px rgba(91, 76, 245, .15), 0 12px 28px rgba(109, 94, 252, .14); }
+    .card .avatar { background: var(--q-grad); color: #fff; }
+    .card .meta .role { background: #efedff; color: #4636d9; }
+    .card .status { background: #efedff; color: #4636d9; }
   </style>
 </head>
 <body>

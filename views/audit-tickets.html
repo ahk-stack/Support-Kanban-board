@@ -229,6 +229,33 @@
       background: #fffbeb;
       font-size: 12.5px;
     }
+  
+    /* Board palette: the same violet-black chrome and accent gradient as the
+       main board, so moving between pages does not change products. */
+    :root { --q-ink: #0d0f20; --q-ink-soft: #1a1d38; --q-primary: #5b4cf5; --q-grad: linear-gradient(135deg, #6d5efc 0%, #a855f7 62%, #ec4899 130%); --q-ring: 0 0 0 3px rgba(91, 76, 245, .22); }
+    body { -webkit-font-smoothing: antialiased; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--q-primary) !important; box-shadow: var(--q-ring) !important; }
+    input[type="checkbox"] { accent-color: var(--q-primary); }
+    header {
+      background:
+        radial-gradient(600px 160px at 0% 0%, rgba(124, 92, 255, .38), transparent 70%),
+        radial-gradient(520px 160px at 100% 0%, rgba(236, 72, 153, .20), transparent 70%),
+        linear-gradient(180deg, var(--q-ink-soft), var(--q-ink)) !important;
+      position: relative;
+      box-shadow: 0 10px 30px rgba(13, 15, 32, .28);
+    }
+    header::after {
+      content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(167, 139, 250, .7) 22%, rgba(236, 72, 153, .55) 60%, rgba(34, 211, 238, .45) 85%, transparent);
+    }
+    body { min-height: 100vh; background: radial-gradient(1000px 480px at -10% -8%, rgba(124, 92, 255, .10), transparent 60%), #f3f4fb; background-attachment: fixed; color: #13152c; }
+    header h1, header strong { font-family: Caladea, Georgia, serif; font-weight: 700; }
+    header a { border-color: rgba(255, 255, 255, .14); background: rgba(255, 255, 255, .06); font-weight: 600; font-size: 13.5px; }
+    header a:hover { background: rgba(255, 255, 255, .12); }
+    .card { border-radius: 18px; border-color: #e3e5f2; box-shadow: 0 2px 6px rgba(25, 22, 70, .04), 0 14px 34px rgba(25, 22, 70, .08); }
+    button { background: var(--q-grad) !important; border: 0 !important; color: #fff !important; border-radius: 10px !important; box-shadow: 0 6px 18px rgba(109, 94, 252, .28); }
+    select, input[type="search"] { border-radius: 10px; border-color: #cdd1e6; }
+    th { font-size: 11px; letter-spacing: .08em; color: #5a6082; }
   </style>
 </head>
 <body>

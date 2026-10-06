@@ -755,7 +755,8 @@ function normalizeDbStatusForBoard(status) {
 function startOfLocalDay(date = new Date()) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
-/* The seven ranges the dashboard offers, and the only seven it accepts.
+/* The ranges the dashboard offers, and the only ones it accepts: seven
+   calendar periods, and Since launch for the whole life of the board.
 
    Each is a calendar period, not a rolling count of days: "this week" is the
    week you are in, "last month" is the month before this one. A period that
@@ -770,14 +771,38 @@ function startOfLocalDay(date = new Date()) {
 
    Weeks start Monday: `(day + 6) % 7` turns JS's Sunday-is-0 into a
    Monday-is-0 offset. */
-const KPI_RANGE_KEYS = ['today', 'this_week', 'last_week', 'this_month', 'last_month', 'this_quarter', 'last_quarter'];
+const KPI_RANGE_KEYS = ['today', 'this_week', 'last_week', 'this_month', 'last_month', 'this_quarter', 'last_quarter', 'since_launch'];
 // Aliases kept so an older client, or a session that stored one of the ranges
 // this list replaced, still resolves to a real period instead of silently
 // reading as Today.
 const KPI_RANGE_ALIASES = {
   day: 'today', week: 'this_week', month: 'this_month', quarter: 'this_quarter',
-  last_30_days: 'this_month', this_year: 'this_quarter'
+  last_30_days: 'this_month', this_year: 'this_quarter', all_time: 'since_launch'
 };
+
+/* When the board went live, for the "Since launch" range and the all-time
+   total admins see on the KPI dashboard. KANBAN_LIVE_SINCE (an ISO date) pins
+   it; otherwise it is the first ticket the database holds, which on a board
+   that started empty is the same moment. Looked up once and refreshed hourly -
+   kpiDateBounds is synchronous and called on every KPI request. */
+const KANBAN_LIVE_SINCE = (() => {
+  const raw = String(process.env.KANBAN_LIVE_SINCE || '').trim();
+  const at = raw ? new Date(raw) : null;
+  return at && !Number.isNaN(at.getTime()) ? at : null;
+})();
+let kpiLaunchAt = KANBAN_LIVE_SINCE;
+async function refreshKpiLaunchAt() {
+  if (KANBAN_LIVE_SINCE) return KANBAN_LIVE_SINCE;
+  try {
+    const first = await prisma.ticket.findFirst({ orderBy: { createdAt: 'asc' }, select: { createdAt: true } });
+    if (first?.createdAt) kpiLaunchAt = new Date(first.createdAt);
+  } catch (error) {
+    console.warn('Launch date lookup failed:', error?.message || error);
+  }
+  return kpiLaunchAt;
+}
+setTimeout(() => { void refreshKpiLaunchAt(); }, 0);
+setInterval(() => { void refreshKpiLaunchAt(); }, 60 * 60 * 1000).unref?.();
 function normalizeKpiRange(range) {
   const key = String(range || 'today').trim().toLowerCase();
   if (KPI_RANGE_KEYS.includes(key)) return key;
@@ -814,6 +839,12 @@ function kpiDateBounds(range) {
       end: endOfPeriod(thisQuarterStart),
       label: 'Last quarter'
     };
+  }
+  // From the start of the day the board went live. Before the launch date is
+  // known (the first seconds after a restart) it starts at the epoch, which
+  // for a board with nothing older is the same answer.
+  if (key === 'since_launch') {
+    return { key, start: kpiLaunchAt ? startOfLocalDay(kpiLaunchAt) : new Date(0), end: now, label: 'Since launch' };
   }
   return { key: 'today', start: dayStart, end: now, label: 'Today' };
 }
@@ -1473,6 +1504,91 @@ function shiftSnapshotFor(code) {
 shiftStore = loadShiftStore();
 setInterval(sweepIdleShifts, SHIFT_SWEEP_MS).unref?.();
 
+/* Leave: a support agent who is off (holiday, sick, off for the day).
+
+   While off, an agent cannot be given tickets - not by the board's automatic
+   distribution, not from the assign menu, not by the SGU redistribution and
+   not through the Claude connector. Tickets they already hold stay with them.
+
+   Set by an admin for anyone, or by the agent for themselves, with an optional
+   return date: the day they are back, so the leave ends at the start of that
+   day and nobody has to remember to switch them on again. No return date means
+   off until someone turns it off.
+
+   Kept in Postgres (OAuthToken, provider "agent-leave:<CODE>", the same
+   key-value use the Jira settings make of it) rather than in data/shifts.json:
+   leave runs for days or weeks, and must not be forgotten by a redeploy that
+   starts on an empty volume. Held in memory as well, because every board reads
+   it on each shift poll. */
+const AGENT_LEAVE_PREFIX = 'agent-leave:';
+const AGENT_LEAVE_MAX_MS = 366 * 24 * 60 * 60 * 1000;
+let agentLeave = {};
+const isLeaveActive = (leave, now = Date.now()) => !!leave && (!leave.until || Number(leave.until) > now);
+function activeAgentLeave(now = Date.now()) {
+  return Object.fromEntries(Object.entries(agentLeave).filter(([, leave]) => isLeaveActive(leave, now)));
+}
+const isAgentOnLeave = (code, now = Date.now()) => isLeaveActive(agentLeave[String(code || '').trim().toUpperCase()], now);
+async function loadAgentLeave() {
+  try {
+    const rows = await prisma.oAuthToken.findMany({ where: { provider: { startsWith: AGENT_LEAVE_PREFIX } } });
+    const next = {};
+    const now = Date.now();
+    for (const row of rows) {
+      const code = row.provider.slice(AGENT_LEAVE_PREFIX.length);
+      const meta = (row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)) ? row.metadata : null;
+      if (!meta || !SUPPORT_AGENT_CODES.has(code)) continue;
+      // A leave that has run out is removed rather than kept around, so the
+      // table only ever holds who is off now or later.
+      if (!isLeaveActive(meta, now)) { await prisma.oAuthToken.delete({ where: { provider: row.provider } }).catch(() => null); continue; }
+      next[code] = meta;
+    }
+    agentLeave = next;
+  } catch (error) {
+    console.warn('Agent leave load failed:', error?.message || error);
+  }
+  return agentLeave;
+}
+async function setAgentLeave(code, leave) {
+  const provider = `${AGENT_LEAVE_PREFIX}${code}`;
+  if (leave) {
+    await prisma.oAuthToken.upsert({
+      where: { provider },
+      create: { provider, metadata: leave },
+      update: { metadata: leave }
+    });
+    agentLeave[code] = leave;
+  } else {
+    await prisma.oAuthToken.delete({ where: { provider } }).catch(() => null);
+    delete agentLeave[code];
+  }
+  // Every open board greys the agent out (or back in) straight away, rather
+  // than on its next shift poll.
+  sseBroadcast('agent_leave', { leave: activeAgentLeave() });
+}
+void loadAgentLeave();
+// A leave whose return date has passed simply stops counting; this tidies the
+// rows and tells open boards, so the agent turns back on without a reload.
+setInterval(async () => {
+  const expired = Object.keys(agentLeave).filter(code => !isLeaveActive(agentLeave[code]));
+  for (const code of expired) await setAgentLeave(code, null).catch(() => null);
+}, 60 * 1000).unref?.();
+
+// The roster code this login is, from its username or its email's local part
+// - the two places the rest of the app reads an agent code from. Unlike
+// shiftAgentFromRequest this never takes a code the browser sends: it decides
+// whose leave a non-admin may change, so it has to come from the account.
+async function ownSupportAgentCode(req) {
+  const fromSession = String(req.session?.username || '').trim().toUpperCase();
+  if (SUPPORT_AGENT_CODES.has(fromSession)) return fromSession;
+  try {
+    const user = await prisma.user.findUnique({ where: { id: Number(req.session?.userId) }, select: { email: true } });
+    const local = String(user?.email || '').split('@')[0].trim().toUpperCase();
+    return SUPPORT_AGENT_CODES.has(local) ? local : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SLA, measured in shift time
 //
@@ -1634,7 +1750,9 @@ function ticketSlaSnapshot(ticket, now = Date.now()) {
   // Jira-linked ticket has no SLA position at all, so there is nothing for
   // either branch below to say about it.
   if (String(ticket?.jiraTicketKey || '').trim()) return { ...base, state: 'jira_hold', wallMs };
-  if (String(ticket?.velmaBugId || '').trim()) return { ...base, state: 'velma_hold', wallMs };
+  // Until the sheet marks the bug DONE; from then the clock runs again, from
+  // the restart point the Velma sync moved forward by the length of the hold.
+  if (String(ticket?.velmaBugId || '').trim() && !ticket?.velmaBugRow?.done) return { ...base, state: 'velma_hold', wallMs };
   if (!resolved && normalizeDbStatusForBoard(ticket?.status) === 'wct') return { ...base, state: 'contact_hold', wallMs };
   if (!agent) return { ...base, wallMs };
 
@@ -3859,7 +3977,65 @@ app.get('/api/shift/state', requireAuth, (req, res) => {
   const me = shiftAgentFromRequest(req, req.query?.agent);
   const agents = {};
   Object.keys(shiftStore.agents).forEach((code) => { agents[code] = shiftSnapshotFor(code); });
-  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now() });
+  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now(), leave: activeAgentLeave() });
+});
+
+// Who is off, and whose leave this login may change.
+app.get('/api/agents/leave', requireAuth, async (req, res) => {
+  res.json({
+    leave: activeAgentLeave(),
+    canManageAll: isAdminRole(req.session.role),
+    me: await ownSupportAgentCode(req)
+  });
+});
+
+/* Put an agent on leave, or change their return date.
+
+   Body: { until: <ms timestamp> | null, note?: string }. until is the moment
+   they are back - the board sends the start of the chosen day - and null
+   means off until someone turns it off. Admins may set anyone; anybody else
+   only themselves. */
+app.put('/api/agents/:code/leave', requireAuth, async (req, res) => {
+  try {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    if (!SUPPORT_AGENT_CODES.has(code)) return res.status(400).json({ error: 'not_a_support_agent' });
+    const own = await ownSupportAgentCode(req);
+    if (!isAdminRole(req.session.role) && own !== code) return res.status(403).json({ error: 'only_admins_can_set_others' });
+    const now = Date.now();
+    const rawUntil = req.body?.until;
+    let until = null;
+    if (rawUntil !== null && rawUntil !== undefined && rawUntil !== '') {
+      until = Number(rawUntil);
+      if (!Number.isFinite(until) || until <= now) return res.status(400).json({ error: 'return_date_must_be_in_the_future' });
+      if (until - now > AGENT_LEAVE_MAX_MS) return res.status(400).json({ error: 'return_date_too_far' });
+    }
+    const previous = agentLeave[code] && isLeaveActive(agentLeave[code], now) ? agentLeave[code] : null;
+    const leave = {
+      // Changing the return date of a leave already running keeps its start.
+      since: previous?.since || now,
+      until,
+      note: String(req.body?.note || '').trim().slice(0, 200) || null,
+      setBy: String(req.session.username || '').toUpperCase() || null,
+      setAt: now
+    };
+    await setAgentLeave(code, leave);
+    return res.json({ ok: true, code, leave, all: activeAgentLeave() });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.delete('/api/agents/:code/leave', requireAuth, async (req, res) => {
+  try {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    if (!SUPPORT_AGENT_CODES.has(code)) return res.status(400).json({ error: 'not_a_support_agent' });
+    const own = await ownSupportAgentCode(req);
+    if (!isAdminRole(req.session.role) && own !== code) return res.status(403).json({ error: 'only_admins_can_set_others' });
+    await setAgentLeave(code, null);
+    return res.json({ ok: true, code, all: activeAgentLeave() });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
 });
 
 app.post('/auth/logout', (req, res) => {
@@ -4144,16 +4320,41 @@ app.delete('/api/jira/link/:kanbanTicketId', requireAuth, async (req, res) => {
 // keeps a copy of it on the ticket, so the card can show what the bug is
 // without anyone opening the sheet.
 //
-// The sheet is private, so it is read as a Google service account: create a
-// key for one, share the sheet with its email (Viewer is enough), and set
-// GOOGLE_SERVICE_ACCOUNT_JSON to the key file's contents (raw or base64).
+// The sheet is private, so the server needs a Google identity that can read
+// it. Two ways to give it one, and the first that works is used:
+//
+//   1. A service account: create a key, share the sheet with its email
+//      (Viewer is enough), set GOOGLE_SERVICE_ACCOUNT_JSON to the key file's
+//      contents (raw or base64). Nobody has to stay signed in.
+//   2. A person's Google account, connected from the board (Account > Google
+//      account). Needs GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET for
+//      a Web OAuth client whose redirect URI is <board>/auth/google/callback.
+//      Whoever already has access to the sheet signs in once; their refresh
+//      token is stored encrypted and reads are made as them.
+//
+// The second exists because a service account needs someone with Google Cloud
+// admin rights to create, while an agent who can already open the sheet can
+// connect their own account in two clicks.
 // ---------------------------------------------------------------------------
 const VELMA_BUG_SHEET_ID = String(process.env.VELMA_BUG_SHEET_ID || '1do2eeXmIog5af-HX_VtrVHpLGyY5GxMkn2JX96pL3NI').trim();
 const VELMA_BUG_SHEET_GID = String(process.env.VELMA_BUG_SHEET_GID || '601357266').trim();
 // Header of the column holding the bug ID. Optional: without it the column is
 // guessed from the headers, and failing that any cell in the row may match.
 const VELMA_BUG_ID_COLUMN = String(process.env.VELMA_BUG_ID_COLUMN || '').trim();
+// Header of the bug's status dropdown. Optional, guessed like the ID column.
+const VELMA_BUG_STATUS_COLUMN = String(process.env.VELMA_BUG_STATUS_COLUMN || '').trim();
+// Status values that mean the bug is fixed and the ticket is support's again.
+const VELMA_DONE_STATUSES = String(process.env.VELMA_DONE_STATUSES || 'DONE')
+  .split(',')
+  .map(v => v.trim().toUpperCase())
+  .filter(Boolean);
 const VELMA_SHEET_CACHE_MS = 60 * 1000;
+const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
+const GOOGLE_OAUTH_CLIENT_ID = String(process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
+const GOOGLE_OAUTH_CLIENT_SECRET = String(process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
+const GOOGLE_OAUTH_REDIRECT_URI = String(process.env.GOOGLE_OAUTH_REDIRECT_URI || '').trim();
+const GOOGLE_PROVIDER_PREFIX = 'google:';
+const googleProviderKey = userId => `${GOOGLE_PROVIDER_PREFIX}${Number(userId)}`;
 
 function googleServiceAccount() {
   const raw = String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '').trim();
@@ -4169,15 +4370,13 @@ function googleServiceAccount() {
 }
 
 let googleTokenCache = { token: '', expiresAt: 0 };
-async function googleAccessToken() {
+async function googleServiceAccountToken(account) {
   if (googleTokenCache.token && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
-  const account = googleServiceAccount();
-  if (!account) throw new Error('velma_sheet_not_configured: set GOOGLE_SERVICE_ACCOUNT_JSON on the server');
   const nowSec = Math.floor(Date.now() / 1000);
   const encode = obj => Buffer.from(JSON.stringify(obj)).toString('base64url');
   const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({
     iss: account.email,
-    scope: 'https://www.googleapis.com/auth/spreadsheets.readonly',
+    scope: GOOGLE_SHEETS_SCOPE,
     aud: 'https://oauth2.googleapis.com/token',
     iat: nowSec,
     exp: nowSec + 3600
@@ -4194,31 +4393,159 @@ async function googleAccessToken() {
   return googleTokenCache.token;
 }
 
-async function googleSheetsGet(pathAndQuery) {
-  const token = await googleAccessToken();
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(VELMA_BUG_SHEET_ID)}${pathAndQuery}`, {
-    headers: { Authorization: `Bearer ${token}` }
+// ---- Google accounts connected from the board ------------------------------
+
+// Every connected account, newest first. The sheet is the same for everyone,
+// so any account that can read it will do; the most recently connected one is
+// tried first because it is the one most likely to still be valid.
+async function listGoogleConnections() {
+  try {
+    const rows = await prisma.oAuthToken.findMany({
+      where: { provider: { startsWith: GOOGLE_PROVIDER_PREFIX } },
+      orderBy: { updatedAt: 'desc' }
+    });
+    return rows
+      .map(row => ({
+        provider: row.provider,
+        userId: Number(row.provider.slice(GOOGLE_PROVIDER_PREFIX.length)) || null,
+        refreshToken: decryptClaudeCredential(row.refreshToken || ''),
+        accessToken: decryptClaudeCredential(row.accessToken || ''),
+        expiresAt: row.expiresAt ? new Date(row.expiresAt).getTime() : 0,
+        metadata: (row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)) ? row.metadata : {}
+      }))
+      .filter(row => row.refreshToken);
+  } catch (_) {
+    return [];
+  }
+}
+
+async function saveGoogleConnection(userId, { accessToken, refreshToken, expiresAt, metadata }) {
+  await setStoredOAuthTokens(googleProviderKey(userId), {
+    accessToken: encryptClaudeCredential(accessToken || ''),
+    refreshToken: encryptClaudeCredential(refreshToken || ''),
+    expiresAt,
+    metadata
+  });
+}
+
+/* The Google OAuth client the sign-in uses.
+
+   Set either in the environment (GOOGLE_OAUTH_CLIENT_ID / _SECRET, which win)
+   or by an admin from the board itself (Account > Google account), stored in
+   OAuthToken as "google-oauth-client" with the secret encrypted. The second
+   exists so that turning Google sign-in on is pasting two values into the
+   board, not a server config change and a redeploy. */
+const GOOGLE_OAUTH_CLIENT_PROVIDER = 'google-oauth-client';
+let googleOAuthClientCache = { at: 0, value: null };
+async function googleOAuthClient() {
+  if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) {
+    return { clientId: GOOGLE_OAUTH_CLIENT_ID, clientSecret: GOOGLE_OAUTH_CLIENT_SECRET, source: 'env' };
+  }
+  if (googleOAuthClientCache.at && Date.now() - googleOAuthClientCache.at < 60 * 1000) return googleOAuthClientCache.value;
+  const row = await getStoredOAuthTokens(GOOGLE_OAUTH_CLIENT_PROVIDER);
+  const clientId = String(row?.metadata?.clientId || '').trim();
+  const clientSecret = decryptClaudeCredential(row?.accessToken || '');
+  const value = clientId && clientSecret ? { clientId, clientSecret, source: 'board', savedBy: row?.metadata?.savedBy || null } : null;
+  googleOAuthClientCache = { at: Date.now(), value };
+  return value;
+}
+
+// A fresh access token for one connection, refreshing it when it is about to
+// expire. A refresh Google refuses (the person revoked access, or the token
+// went unused for six months) removes the connection, so the board stops
+// reporting an account as connected when it cannot read anything.
+async function googleConnectionToken(connection) {
+  if (connection.accessToken && connection.expiresAt > Date.now() + 60000) return connection.accessToken;
+  const client = await googleOAuthClient();
+  if (!client) throw new Error('google_auth_failed: Google sign-in is not set up');
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: connection.refreshToken,
+      client_id: client.clientId,
+      client_secret: client.clientSecret
+    })
   });
   const out = await res.json().catch(() => ({}));
-  // 403/404 here almost always means the sheet was not shared with the
-  // service account, so say that rather than Google's generic message.
-  if (res.status === 403 || res.status === 404) {
-    throw new Error(`velma_sheet_not_shared: share the sheet with ${googleServiceAccount()?.email || 'the service account'}`);
+  if (!res.ok || !out.access_token) {
+    if (out.error === 'invalid_grant') {
+      await prisma.oAuthToken.delete({ where: { provider: connection.provider } }).catch(() => null);
+    }
+    throw new Error(`google_refresh_failed: ${out.error_description || out.error || res.status}`);
   }
-  if (!res.ok) throw new Error(`velma_sheet_read_failed: ${out?.error?.message || res.status}`);
+  const expiresAt = Date.now() + Number(out.expires_in || 3600) * 1000;
+  await saveGoogleConnection(connection.userId, {
+    accessToken: out.access_token,
+    refreshToken: connection.refreshToken,
+    expiresAt,
+    metadata: connection.metadata
+  });
+  return out.access_token;
+}
+
+// The credentials to try for a sheet read, in order. preferUserId puts the
+// caller's own account first, so the person linking a bug reads with the
+// account they just connected.
+async function googleSheetCredentials(preferUserId = null) {
+  const out = [];
+  const account = googleServiceAccount();
+  if (account) out.push({ kind: 'service_account', label: account.email, token: () => googleServiceAccountToken(account) });
+  if (await googleOAuthClient()) {
+    const connections = await listGoogleConnections();
+    connections.sort((x, y) => (y.userId === preferUserId) - (x.userId === preferUserId));
+    connections.forEach(connection => out.push({
+      kind: 'google_user',
+      label: String(connection.metadata.email || `user ${connection.userId}`),
+      token: () => googleConnectionToken(connection)
+    }));
+  }
   return out;
 }
 
+async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
+  const credentials = await googleSheetCredentials(preferUserId);
+  if (!credentials.length) {
+    throw new Error('velma_sheet_not_configured: connect a Google account that can open the Velma bug sheet (Account > Google account), or set GOOGLE_SERVICE_ACCOUNT_JSON on the server');
+  }
+  // Each credential in turn: a person who connected but was never given
+  // access to the sheet must not stop the next one from being tried.
+  const denied = [];
+  let lastError = null;
+  for (const credential of credentials) {
+    let token;
+    try {
+      token = await credential.token();
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(VELMA_BUG_SHEET_ID)}${pathAndQuery}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const out = await res.json().catch(() => ({}));
+    if (res.ok) return out;
+    // 403/404 almost always means this identity cannot see the sheet.
+    if (res.status === 403 || res.status === 404) { denied.push(credential.label); continue; }
+    lastError = new Error(`velma_sheet_read_failed: ${out?.error?.message || res.status}`);
+  }
+  if (denied.length) throw new Error(`velma_sheet_not_shared: ${denied.join(', ')} cannot open the Velma bug sheet - share it with that account (Viewer is enough)`);
+  throw lastError || new Error('velma_sheet_read_failed');
+}
+
 // The whole tab, cached briefly: a link is a handful of lookups a minute at
-// most, and re-reading the sheet for each one buys nothing.
+// most, and re-reading the sheet for each one buys nothing. Read as displayed
+// values (the API default), which is what a dropdown cell shows - "DONE", not
+// an internal option id.
 let velmaSheetCache = { at: 0, rows: null, title: '' };
-async function readVelmaBugSheet() {
-  if (velmaSheetCache.rows && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
-  const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)');
+async function readVelmaBugSheet({ preferUserId = null, fresh = false } = {}) {
+  if (!fresh && velmaSheetCache.rows && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
+  const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)', { preferUserId });
   const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === VELMA_BUG_SHEET_GID);
   if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${VELMA_BUG_SHEET_GID}`);
   const quoted = `'${String(tab.title).replace(/'/g, "''")}'`;
-  const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`);
+  const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`, { preferUserId });
   velmaSheetCache = { at: Date.now(), rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
   return velmaSheetCache;
 }
@@ -4230,6 +4557,12 @@ function velmaColumnLetter(index) {
   while (n > 0) { out = String.fromCharCode(65 + ((n - 1) % 26)) + out; n = Math.floor((n - 1) / 26); }
   return out;
 }
+const velmaHeaderName = v => String(v || '').trim().toLowerCase().replace(/[^a-z0-9#]+/g, ' ').trim();
+// "DONE", "Done", "done ✅" and " DONE " are the same answer; a dropdown is
+// typed by whoever set up the sheet, and an emoji or stray space must not keep
+// a fixed bug's ticket on hold.
+const velmaStatusKey = v => String(v || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+const isVelmaStatusDone = status => !!status && VELMA_DONE_STATUSES.some(done => velmaStatusKey(status) === velmaStatusKey(done));
 
 /* Find one bug's row in the sheet's values.
 
@@ -4238,22 +4571,30 @@ function velmaColumnLetter(index) {
    (VELMA_BUG_ID_COLUMN if set, otherwise a header like "ID", "Bug ID" or
    "Ticket ID"). The bug is the first row below it with the ID in that column.
    If no ID column can be found, the first row with any cell equal to the ID
-   is taken instead - an exact whole-cell match, so "12" does not find "123". */
+   is taken instead - an exact whole-cell match, so "12" does not find "123".
+
+   The status is the cell under a "Status" header (or VELMA_BUG_STATUS_COLUMN)
+   in that row. A sheet with no such column simply has no status, and its
+   links behave as before: on hold until removed. */
 function findVelmaBugRow(rows, bugId) {
   const wanted = normalizeVelmaBugId(bugId);
   if (!wanted || !Array.isArray(rows)) return null;
-  const headerName = v => String(v || '').trim().toLowerCase().replace(/[^a-z0-9#]+/g, ' ').trim();
   const isIdHeader = (h) => {
-    if (VELMA_BUG_ID_COLUMN) return h === headerName(VELMA_BUG_ID_COLUMN);
+    if (VELMA_BUG_ID_COLUMN) return h === velmaHeaderName(VELMA_BUG_ID_COLUMN);
     return /^(velma )?(bug |ticket |issue )?(id|n|no|number|#)$/.test(h);
+  };
+  const isStatusHeader = (h) => {
+    if (VELMA_BUG_STATUS_COLUMN) return h === velmaHeaderName(VELMA_BUG_STATUS_COLUMN);
+    return /^(bug |ticket |dev |fix )?(status|state)$/.test(h);
   };
   let headerIndex = -1;
   let idColumn = -1;
   for (let r = 0; r < Math.min(rows.length, 10) && idColumn < 0; r++) {
-    const col = (rows[r] || []).map(headerName).findIndex(isIdHeader);
+    const col = (rows[r] || []).map(velmaHeaderName).findIndex(isIdHeader);
     if (col >= 0) { headerIndex = r; idColumn = col; }
   }
   const headers = headerIndex >= 0 ? rows[headerIndex] : [];
+  const statusColumn = headers.map(velmaHeaderName).findIndex(isStatusHeader);
   for (let r = headerIndex + 1; r < rows.length; r++) {
     const row = rows[r] || [];
     const hit = idColumn >= 0
@@ -4269,13 +4610,86 @@ function findVelmaBugRow(rows, bugId) {
     });
     const rowNumber = r + 1;
     const lastColumn = velmaColumnLetter(Math.max(row.length, headers.length, 1) - 1);
+    const status = statusColumn >= 0 ? String(row[statusColumn] ?? '').trim().slice(0, 120) : '';
     return {
       row: rowNumber,
       fields,
+      status: status || null,
       url: `https://docs.google.com/spreadsheets/d/${VELMA_BUG_SHEET_ID}/edit#gid=${VELMA_BUG_SHEET_GID}&range=A${rowNumber}:${lastColumn}${rowNumber}`
     };
   }
   return null;
+}
+
+/* A link's hold, from its status.
+
+   A Velma bug holds the ticket's SLA while engineering owns the fix. Once the
+   sheet says DONE the ticket is support's again, so the hold ends and the clock
+   resumes from where the link stopped it - not from zero, and not as if it had
+   run all along. If the bug is re-opened (DONE taken off again) the hold comes
+   back from that moment.
+
+     done          - the hold is over (status is one of VELMA_DONE_STATUSES)
+     holdStartedAt - when the current hold began; the clock resumes by the
+                     length of the hold measured from here
+     doneAt        - when DONE was first seen, for the card and the audit */
+function velmaLinkWithStatus(previous, found, now = Date.now()) {
+  const done = isVelmaStatusDone(found.status);
+  const wasDone = !!previous?.done;
+  const wasHeldSince = Number(previous?.holdStartedAt || previous?.linkedAt || 0) || null;
+  return {
+    ...(previous || {}),
+    ...found,
+    done,
+    doneAt: done ? (wasDone ? (Number(previous.doneAt) || now) : now) : null,
+    holdStartedAt: done ? null : (previous && !wasDone && wasHeldSince ? wasHeldSince : now),
+    statusCheckedAt: now
+  };
+}
+// The ticket ids whose link this changes from held to released.
+const velmaHoldEnded = (previous, next) => !!previous && !previous.done && !!next?.done;
+
+// Move one ticket's SLA restart point forward by the length of a hold that has
+// just ended, the server's copy of resumeSlaAfterHold in index.html. Skipped
+// while a Jira link or Waiting on Contact still holds the ticket - those settle
+// the clock themselves when they end, and resuming here as well would count
+// the overlap twice. Returns the new restart point, or null for no change.
+function slaResumePointAfterHold(state, externalId, since, now) {
+  since = Number(since || 0);
+  if (!since || since >= now) return null;
+  if (String(state.ticketJira?.[externalId] || '').trim()) return null;
+  if (String(state.ticketState?.[externalId] || '') === 'wct') return null;
+  const created = new Date(state.ticketCreatedAt?.[externalId] || 0).getTime() || 0;
+  const base = Math.max(created, Number(state.ticketSlaResetAt?.[externalId] || 0));
+  if (!base || base >= since) return null;
+  return base + (now - since);
+}
+
+// Write several server-owned values into the board state in one synchronous
+// read-modify-write, so no board save can land in between, and push them to
+// every open board. Each entry is { field, id, value }; null removes.
+function writeServerFieldsIntoState(entries) {
+  const changes = [];
+  try {
+    const state = safeReadState();
+    for (const { field, id, value } of entries) {
+      const key = String(id || '').trim();
+      if (!key) continue;
+      const map = (state[field] && typeof state[field] === 'object') ? state[field] : {};
+      if (JSON.stringify(map[key] ?? null) === JSON.stringify(value ?? null)) continue;
+      if (value === null || value === undefined) delete map[key]; else map[key] = value;
+      state[field] = map;
+      changes.push({ id: key, field, value: value ?? null });
+    }
+    if (changes.length) {
+      fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
+      fs.writeFileSync(DATA_PATH, JSON.stringify(state, null, 2), 'utf8');
+      sseBroadcast('board_patch', { actor: null, origin: null, changes, added: [], removed: [] });
+    }
+  } catch (error) {
+    console.warn('Board state write failed:', error.message || error);
+  }
+  return changes;
 }
 
 async function setTicketVelmaBug({ kanbanTicketId, link, userId = null }) {
@@ -4299,7 +4713,7 @@ async function setTicketVelmaBug({ kanbanTicketId, link, userId = null }) {
       eventType: nextId ? 'ticket_velma_bug_linked' : 'ticket_velma_bug_unlinked',
       oldValue: ticket.velmaBugId || null,
       newValue: nextId,
-      metadata: link ? { row: link.row } : undefined
+      metadata: link ? { row: link.row, status: link.status || null } : undefined
     });
   }
   return { ticket: updated, updated: true };
@@ -4312,16 +4726,21 @@ app.post('/api/velma-bug/link', requireAuth, async (req, res) => {
     if (!kanbanTicketId || !bugId) return res.status(400).json({ error: 'missing_ticket_or_bug_id' });
     let sheet;
     try {
-      sheet = await readVelmaBugSheet();
+      sheet = await readVelmaBugSheet({ preferUserId: Number(req.session.userId) || null, fresh: true });
     } catch (error) {
       return res.status(502).json({ error: String(error.message || error) });
     }
     const found = findVelmaBugRow(sheet.rows, bugId);
     if (!found) return res.status(404).json({ error: `No row with ID ${bugId} in the Velma bug sheet (${sheet.title}).` });
+    // Re-linking a ticket that is already on hold keeps the hold's start, so
+    // the time it has already spent waiting is not counted as ours when it
+    // ends. A ticket linked to a bug that is already DONE never goes on hold.
+    const previous = safeReadState().ticketVelmaBug?.[kanbanTicketId] || null;
+    const now = Date.now();
     const link = {
       id: bugId,
-      ...found,
-      linkedAt: Date.now(),
+      ...velmaLinkWithStatus(previous && !previous.done ? { holdStartedAt: previous.holdStartedAt || previous.linkedAt } : null, found, now),
+      linkedAt: now,
       linkedBy: String(req.session.username || '').toUpperCase() || null
     };
     await setTicketVelmaBug({ kanbanTicketId, link, userId: req.session.userId || null });
@@ -4334,14 +4753,323 @@ app.delete('/api/velma-bug/link/:kanbanTicketId', requireAuth, async (req, res) 
   try {
     const kanbanTicketId = String(req.params.kanbanTicketId || '').trim();
     if (!kanbanTicketId) return res.status(400).json({ error: 'missing_kanban_ticket_id' });
-    // When the link was made, so the board can resume the SLA clock where the
-    // hold stopped it - the same as a Jira unlink.
+    // When the current hold began, so the board can resume the SLA clock where
+    // the hold stopped it - the same as a Jira unlink. Nothing when the bug is
+    // already DONE: that hold has ended and its time was given back then, so
+    // returning it again would resume the clock twice.
     const current = safeReadState().ticketVelmaBug?.[kanbanTicketId] || null;
     await setTicketVelmaBug({ kanbanTicketId, link: null, userId: req.session.userId || null });
-    return res.json({ ok: true, linkedAt: Number(current?.linkedAt || 0) || null });
+    const heldSince = current && !current.done ? Number(current.holdStartedAt || current.linkedAt || 0) : 0;
+    return res.json({ ok: true, linkedAt: heldSince || null });
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
   }
+});
+
+/* Keeping linked bugs in step with the sheet.
+
+   Every few minutes the sheet is read once and each linked ticket's row is
+   refreshed: its fields, and above all its status. A bug turning DONE ends
+   that ticket's hold and resumes its SLA; one turning back from DONE starts a
+   new hold. Nobody has to open the ticket for either to happen - the agent
+   finds the clock running again on their board.
+
+   Skipped quietly when there is no Google credential or nothing is linked. A
+   failed read is logged once per distinct error rather than every cycle. */
+const VELMA_SYNC_MS = Math.max(60 * 1000, Number(process.env.VELMA_SYNC_MS || 3 * 60 * 1000));
+let velmaSyncRunning = false;
+let velmaSyncLastError = '';
+let velmaSyncLastRunAt = 0;
+async function syncVelmaBugStatuses() {
+  if (velmaSyncRunning) return { skipped: 'running' };
+  velmaSyncRunning = true;
+  try {
+    const links = safeReadState().ticketVelmaBug || {};
+    const ids = Object.keys(links).filter(id => links[id]?.id);
+    if (!ids.length) return { checked: 0 };
+    if (!(await googleSheetCredentials()).length) return { skipped: 'not_configured' };
+    const sheet = await readVelmaBugSheet({ fresh: true });
+    velmaSyncLastError = '';
+    velmaSyncLastRunAt = Date.now();
+    const now = Date.now();
+    const entries = [];
+    const released = [];
+    const reheld = [];
+    // Read again right before the write: the sheet call above takes a second,
+    // and a link made or removed meanwhile must not be overwritten.
+    const state = safeReadState();
+    const currentLinks = state.ticketVelmaBug || {};
+    for (const id of ids) {
+      const previous = currentLinks[id];
+      if (!previous?.id) continue;
+      const found = findVelmaBugRow(sheet.rows, previous.id);
+      // A row deleted from the sheet keeps the last copy; the agent still
+      // sees what it was and can remove the link.
+      if (!found) continue;
+      const next = velmaLinkWithStatus(previous, found, now);
+      const compare = ({ statusCheckedAt, ...rest }) => JSON.stringify(rest);
+      if (compare(next) === compare(previous)) continue;
+      entries.push({ field: 'ticketVelmaBug', id, value: next });
+      if (velmaHoldEnded(previous, next)) {
+        const resumeAt = slaResumePointAfterHold(state, id, previous.holdStartedAt || previous.linkedAt, now);
+        if (resumeAt) entries.push({ field: 'ticketSlaResetAt', id, value: resumeAt });
+        released.push({ id, bugId: next.id, status: next.status, resumeAt });
+      } else if (previous.done && !next.done) {
+        reheld.push({ id, bugId: next.id, status: next.status });
+      }
+    }
+    if (!entries.length) return { checked: ids.length, changed: 0 };
+    writeServerFieldsIntoState(entries);
+    // The database copy - what the KPI dashboard and ticketSlaSnapshot read.
+    for (const entry of entries) {
+      const ticket = await findTicketRecordByKanbanId(entry.id).catch(() => null);
+      if (!ticket) continue;
+      if (entry.field === 'ticketVelmaBug') {
+        const { id: _id, ...rowSnapshot } = entry.value;
+        await prisma.ticket.update({ where: { id: ticket.id }, data: { velmaBugRow: rowSnapshot } }).catch(() => null);
+      } else if (entry.field === 'ticketSlaResetAt') {
+        await prisma.ticket.update({ where: { id: ticket.id }, data: { slaResetAt: new Date(entry.value) } }).catch(() => null);
+      }
+    }
+    for (const change of [...released.map(c => ({ ...c, kind: 'done' })), ...reheld.map(c => ({ ...c, kind: 'reopened' }))]) {
+      const ticket = await findTicketRecordByKanbanId(change.id).catch(() => null);
+      if (!ticket) continue;
+      await createTicketAuditEvent({
+        ticketId: ticket.id,
+        userId: null,
+        eventType: change.kind === 'done' ? 'ticket_velma_bug_done' : 'ticket_velma_bug_reopened',
+        oldValue: change.bugId,
+        newValue: change.status || null,
+        metadata: change.resumeAt ? { slaResetAt: new Date(change.resumeAt).toISOString() } : undefined
+      }).catch(() => null);
+    }
+    if (released.length || reheld.length) {
+      console.log(`Velma sync: ${released.length} bug(s) done, ${reheld.length} re-opened, ${entries.length} field(s) updated.`);
+    }
+    return { checked: ids.length, changed: entries.length, released: released.length, reheld: reheld.length };
+  } catch (error) {
+    const message = String(error?.message || error);
+    if (message !== velmaSyncLastError) console.warn('Velma bug sync failed:', message);
+    velmaSyncLastError = message;
+    return { error: message };
+  } finally {
+    velmaSyncRunning = false;
+  }
+}
+setInterval(() => { void syncVelmaBugStatuses(); }, VELMA_SYNC_MS).unref?.();
+
+// The same check on demand, for the board's "Check now" and for tests.
+app.post('/api/velma-bug/sync', requireAuth, async (req, res) => {
+  const out = await syncVelmaBugStatuses();
+  res.status(out?.error ? 502 : 200).json({ ok: !out?.error, ...out });
+});
+
+/* ---- Google sign-in, for reading the sheet ---------------------------------
+
+   An ordinary OAuth web flow. The state value is kept in the session and the
+   redirect URI with it, so the callback sends Google exactly the URI the start
+   used even behind a proxy that rewrites the host. Only the Sheets read-only
+   scope and the email are asked for: the board reads one sheet, and the email
+   is what the Account menu shows so people know whose access is being used. */
+function googleRedirectUri(req) {
+  return GOOGLE_OAUTH_REDIRECT_URI || `${publicBaseUrlForRequest(req)}/auth/google/callback`;
+}
+
+/* The end of a sign-in started in a new tab (the board opens
+   /auth/google/start?tab=1). It cannot hand the result back through
+   window.opener: helmet's Cross-Origin-Opener-Policy cuts that link the moment
+   the tab visits accounts.google.com. A BroadcastChannel (and a localStorage
+   write, for browsers without one) reaches the board tab instead, since both
+   are on this origin; the tab then closes itself, or says it can be closed. */
+const GOOGLE_RESULT_TEXT = {
+  connected: 'Google account connected - the board can read the Velma bug sheet.',
+  connected_unverified: 'Google account connected. The sheet could not be checked yet.',
+  no_sheet_access: 'Connected, but this Google account cannot open the Velma bug sheet. Ask for it to be shared with you.',
+  sheets_scope_missing: 'Google sign-in needs the "See your Google Sheets" permission. Tick it on the consent screen and try again.',
+  no_refresh_token: 'Google did not grant offline access. Remove the board under myaccount.google.com > Security > Third-party access, then sign in again.',
+  access_denied: 'Google sign-in was cancelled.',
+  not_configured: 'Google sign-in is not set up on this board yet. An admin can set it up under Account > Google account.',
+  invalid_state: 'This sign-in expired. Start it again from the board.'
+};
+function finishGoogleSignIn(req, res, pending, outcome, detail = '') {
+  if (!pending?.tab) return res.redirect(`/?google=${encodeURIComponent(outcome)}`);
+  const ok = outcome === 'connected';
+  const text = GOOGLE_RESULT_TEXT[outcome] || `Google sign-in failed: ${detail || outcome}`;
+  const payload = JSON.stringify({ type: 'google-signin', outcome, detail: String(detail || '').slice(0, 300), at: Date.now() }).replace(/</g, '\\u003c');
+  res.set('Cache-Control', 'no-store');
+  return res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Google sign-in</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Inter,'Segoe UI',Arial,sans-serif;background:linear-gradient(180deg,#1a1d38,#0d0f20);color:#fff}
+.box{max-width:420px;margin:24px;padding:26px 26px 22px;border-radius:18px;background:#fff;color:#13152c;box-shadow:0 30px 80px rgba(0,0,0,.45);text-align:center}
+.mark{width:44px;height:44px;margin:0 auto 12px;border-radius:50%;display:grid;place-items:center;font-size:22px;color:#fff;background:${ok ? '#10b981' : '#f59e0b'}}
+h1{font-size:18px;margin:0 0 8px}p{margin:0;color:#565c80;font-size:14px;line-height:1.55}</style></head>
+<body><div class="box"><div class="mark">${ok ? '&#10003;' : '!'}</div><h1>${ok ? 'You are connected' : 'Not connected'}</h1><p>${escapeHtml(text)}</p><p style="margin-top:12px;font-size:12.5px;" id="closing">This tab will close by itself - you can also close it and go back to the board.</p></div>
+<script>(function(){var m=${payload};try{var c=new BroadcastChannel('kanban-google-signin');c.postMessage(m);c.close();}catch(e){}try{localStorage.setItem('kanban-google-signin',JSON.stringify(m));}catch(e){}setTimeout(function(){window.close();},${ok ? 1200 : 4000});})();</script>
+</body></html>`);
+}
+
+app.get('/auth/google/start', requireAuth, async (req, res) => {
+  const tab = String(req.query.tab || '') === '1';
+  const client = await googleOAuthClient();
+  if (!client) return finishGoogleSignIn(req, res, { tab }, 'not_configured');
+  const state = crypto.randomBytes(16).toString('hex');
+  const redirectUri = googleRedirectUri(req);
+  req.session.googleOAuth = { state, redirectUri, tab };
+  const params = new URLSearchParams({
+    client_id: client.clientId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: `openid email ${GOOGLE_SHEETS_SCOPE}`,
+    // offline + consent: the refresh token is what lets the board keep
+    // reading the sheet after this browser tab is gone, and Google only
+    // returns one on a consent screen.
+    access_type: 'offline',
+    prompt: 'consent',
+    include_granted_scopes: 'true',
+    state
+  });
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+});
+
+app.get('/auth/google/callback', requireAuth, async (req, res) => {
+  const pending = req.session.googleOAuth || null;
+  delete req.session.googleOAuth;
+  try {
+    if (req.query.error) return finishGoogleSignIn(req, res, pending, String(req.query.error));
+    const { code, state } = req.query;
+    if (!code || !state || !pending || state !== pending.state) return finishGoogleSignIn(req, res, pending, 'invalid_state');
+    const client = await googleOAuthClient();
+    if (!client) return finishGoogleSignIn(req, res, pending, 'not_configured');
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: String(code),
+        client_id: client.clientId,
+        client_secret: client.clientSecret,
+        redirect_uri: pending.redirectUri
+      })
+    });
+    const tokenJson = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !tokenJson.access_token) {
+      return finishGoogleSignIn(req, res, pending, 'token_exchange_failed', tokenJson.error_description || tokenJson.error || String(tokenRes.status));
+    }
+    const granted = String(tokenJson.scope || '').split(/\s+/);
+    if (!granted.includes(GOOGLE_SHEETS_SCOPE)) return finishGoogleSignIn(req, res, pending, 'sheets_scope_missing');
+    // The id_token came straight from Google's token endpoint over TLS, so its
+    // payload can be read without verifying the signature.
+    let email = '';
+    try {
+      const payload = JSON.parse(Buffer.from(String(tokenJson.id_token || '').split('.')[1] || '', 'base64url').toString('utf8'));
+      email = String(payload.email || '').toLowerCase();
+    } catch (_) {}
+    const existing = await getStoredOAuthTokens(googleProviderKey(req.session.userId));
+    // Google omits the refresh token when this account already granted one to
+    // this client; keep the stored one rather than losing offline access.
+    const refreshToken = tokenJson.refresh_token || decryptClaudeCredential(existing?.refreshToken || '');
+    if (!refreshToken) return finishGoogleSignIn(req, res, pending, 'no_refresh_token');
+    await saveGoogleConnection(req.session.userId, {
+      accessToken: tokenJson.access_token,
+      refreshToken,
+      expiresAt: Date.now() + Number(tokenJson.expires_in || 3600) * 1000,
+      metadata: { email, username: String(req.session.username || ''), connectedAt: new Date().toISOString() }
+    });
+    velmaSheetCache = { at: 0, rows: null, title: '' };
+    // Read the sheet straight away, so the person who just connected learns
+    // now - not at their next link - whether this account can actually open it.
+    let result = 'connected';
+    try {
+      await readVelmaBugSheet({ preferUserId: Number(req.session.userId) || null, fresh: true });
+    } catch (error) {
+      result = /not_shared/.test(String(error.message)) ? 'no_sheet_access' : 'connected_unverified';
+    }
+    void syncVelmaBugStatuses();
+    return finishGoogleSignIn(req, res, pending, result);
+  } catch (error) {
+    return finishGoogleSignIn(req, res, pending, 'failed', String(error.message || error));
+  }
+});
+
+app.get('/auth/google/status', requireAuth, async (req, res) => {
+  const mine = await getStoredOAuthTokens(googleProviderKey(req.session.userId));
+  const connections = await listGoogleConnections();
+  const account = googleServiceAccount();
+  const meta = (mine?.metadata && typeof mine.metadata === 'object') ? mine.metadata : {};
+  res.json({
+    configured: !!(await googleOAuthClient()),
+    // Admins get the setup form when it is not configured, and need the exact
+    // redirect URI to paste into Google Cloud.
+    canConfigure: isAdminRole(req.session.role),
+    clientSource: (await googleOAuthClient())?.source || null,
+    redirectUri: googleRedirectUri(req),
+    serviceAccount: account ? account.email : null,
+    connected: !!mine?.refreshToken,
+    email: meta.email || null,
+    connectedAt: meta.connectedAt || null,
+    // Who else has connected, so a person can tell the board can already read
+    // the sheet without connecting themselves.
+    others: connections.filter(c => c.userId !== Number(req.session.userId)).map(c => c.metadata.email || null).filter(Boolean),
+    lastSyncAt: velmaSyncLastRunAt || null,
+    lastSyncError: velmaSyncLastError || null
+  });
+});
+
+app.post('/auth/google/disconnect', requireAuth, async (req, res) => {
+  const key = googleProviderKey(req.session.userId);
+  const stored = await getStoredOAuthTokens(key);
+  const refreshToken = decryptClaudeCredential(stored?.refreshToken || '');
+  await prisma.oAuthToken.delete({ where: { provider: key } }).catch(() => null);
+  // Revoke at Google as well, so the grant does not linger on their account
+  // page. Best effort: the local copy is already gone either way.
+  if (refreshToken) {
+    fetch('https://oauth2.googleapis.com/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: refreshToken })
+    }).catch(() => null);
+  }
+  velmaSheetCache = { at: 0, rows: null, title: '' };
+  res.json({ ok: true });
+});
+
+// Turning Google sign-in on from the board: an admin pastes the OAuth client
+// they created in Google Cloud. The secret is never sent back - only whether
+// one is stored. An environment-configured client cannot be changed here.
+app.get('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  const client = await googleOAuthClient();
+  res.json({
+    source: client?.source || null,
+    clientId: client?.clientId || null,
+    hasSecret: !!client?.clientSecret,
+    redirectUri: googleRedirectUri(req),
+    javascriptOrigin: publicBaseUrlForRequest(req)
+  });
+});
+app.put('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  try {
+    if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) return res.status(409).json({ error: 'set_in_environment' });
+    const clientId = String(req.body?.clientId || '').trim();
+    let clientSecret = String(req.body?.clientSecret || '').trim();
+    if (!/^[\w.-]+\.apps\.googleusercontent\.com$/.test(clientId)) return res.status(400).json({ error: 'client_id_should_end_with_apps.googleusercontent.com' });
+    // A blank secret on an update keeps the one already stored, so changing
+    // only the ID does not mean finding the secret again.
+    if (!clientSecret) clientSecret = (await googleOAuthClient())?.clientSecret || '';
+    if (!clientSecret) return res.status(400).json({ error: 'client_secret_required' });
+    await setStoredOAuthTokens(GOOGLE_OAUTH_CLIENT_PROVIDER, {
+      accessToken: encryptClaudeCredential(clientSecret),
+      metadata: { clientId, savedBy: String(req.session.username || '').toUpperCase() || null, savedAt: new Date().toISOString() }
+    });
+    googleOAuthClientCache = { at: 0, value: null };
+    return res.json({ ok: true, clientId, hasSecret: true, source: 'board' });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+app.delete('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) return res.status(409).json({ error: 'set_in_environment' });
+  await prisma.oAuthToken.delete({ where: { provider: GOOGLE_OAUTH_CLIENT_PROVIDER } }).catch(() => null);
+  googleOAuthClientCache = { at: 0, value: null };
+  res.json({ ok: true });
 });
 app.get('/api/jira/issues', requireAuth, async (req, res) => {
   try {
@@ -4640,6 +5368,8 @@ const KPI_TICKET_SELECT = {
   senderEmail: true,
   jiraTicketKey: true,
   velmaBugId: true,
+  // The bug's copied row, for its status: a DONE bug no longer holds the SLA.
+  velmaBugRow: true,
   duplicateOfExternalId: true,
   createdAt: true,
   updatedAt: true,
@@ -4778,10 +5508,17 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       }
     };
 
+    // The open columns are a snapshot of the board right now - a ticket that
+    // has sat in Waiting on Us for a month is still there today, whatever the
+    // range. Resolved is the exception: counted from every ticket ever, it was
+    // the all-time total (441 on any range, Today included), which is not a
+    // figure anybody can use. It is the work resolved inside the selected
+    // range, the same set as the throughput card and the drilldown below.
     for (const ticket of workTickets) {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
-      if (statusKey in statusCounts) statusCounts[statusKey]++;
+      if (statusKey !== 'res' && statusKey in statusCounts) statusCounts[statusKey]++;
     }
+    statusCounts.res = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length;
 
     for (const ticket of scopedTickets) {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
@@ -4927,9 +5664,30 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       ...tickets.flatMap(t => [t.assignedAgent, t.csAgent]).filter(Boolean).map(v => String(v).trim().toUpperCase())
     ])).sort((a, b) => a.localeCompare(b));
 
+    // The whole life of the board, for admins: how many tickets it has taken
+    // in since it went live. Independent of the range and the team/agent
+    // filters on purpose - it answers "how many tickets in total", which no
+    // single range does. Spam is left out, as everywhere on this dashboard;
+    // duplicates are counted separately so both figures are there to read.
+    let allTime = null;
+    if (myTeam === 'admin') {
+      const since = kpiLaunchAt || await refreshKpiLaunchAt();
+      const sinceWhere = since ? { createdAt: { gte: startOfLocalDay(since) } } : {};
+      const notSpam = { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }] };
+      const [created, resolved, duplicates, spam] = await Promise.all([
+        prisma.ticket.count({ where: { AND: [notSpam, sinceWhere, { duplicateOfExternalId: null }] } }),
+        // Same test as normalizeDbStatusForBoard: Resolved or Closed, any case.
+        prisma.ticket.count({ where: { AND: [notSpam, sinceWhere, { duplicateOfExternalId: null }, { OR: [{ status: { equals: 'Resolved', mode: 'insensitive' } }, { status: { equals: 'Closed', mode: 'insensitive' } }] }] } }),
+        prisma.ticket.count({ where: { AND: [notSpam, sinceWhere, { NOT: [{ duplicateOfExternalId: null }] }] } }),
+        prisma.ticket.count({ where: { AND: [sinceWhere, { category: { equals: 'Spam', mode: 'insensitive' } }] } })
+      ]);
+      allTime = { since: since ? since.toISOString() : null, created, resolved, open: created - resolved, duplicates, spam };
+    }
+
     return res.json({
       ok: true,
       generatedAt: new Date().toISOString(),
+      allTime,
       // bounds.key, not the raw query value: if the client sent a range this
       // build no longer offers, the heading has to name the period the figures
       // were actually computed over.
@@ -5035,7 +5793,8 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
     let rows;
 
     if (KPI_STATUS_CATEGORIES.has(category)) {
-      rows = workTickets
+      // Resolved is range-bound, like its card; the open columns are now.
+      rows = (category === 'res' ? scopedTickets : workTickets)
         .filter(t => normalizeDbStatusForBoard(t.status) === category)
         .map(t => kpiDrilldownRow(t));
     } else if (category === 'ticketsWithCs') {
@@ -7259,6 +8018,11 @@ async function mcpUpdateTicket(apiUser, id, fields) {
     if (status !== 'Resolved') data.resolvedTeamsNotifiedAt = null;
   }
   if (fields?.assignedAgent !== undefined) data.assignedAgent = fields.assignedAgent ? String(fields.assignedAgent).trim().toUpperCase() : null;
+  // Nobody is handed a ticket while they are off - the same rule the board's
+  // assign menu and distribution follow.
+  if (data.assignedAgent && data.assignedAgent !== existingTicket.assignedAgent && isAgentOnLeave(data.assignedAgent)) {
+    throw Object.assign(new Error(`agent_on_leave: ${data.assignedAgent} is off${agentLeave[data.assignedAgent]?.until ? ` until ${new Date(agentLeave[data.assignedAgent].until).toISOString().slice(0, 10)}` : ''}`), { status: 409 });
+  }
   if (fields?.csAgent !== undefined) data.csAgent = fields.csAgent ? String(fields.csAgent).trim().toUpperCase() : null;
   if (fields?.priority !== undefined) data.priority = String(fields.priority || 'Normal').trim();
   if (!Object.keys(data).length) throw Object.assign(new Error('no_fields'), { status: 400 });
@@ -12404,10 +13168,139 @@ async function resetWaitingOnContactSlaOnce() {
   console.log(`SLA reset for ${ids.length} ticket(s) in Waiting on Contact.`);
 }
 
+/* One-off: hand SGU's tickets in New to the rest of the support team.
+
+   Until the distribution changed, every ticket that named nobody could land
+   on SGU, and SGU was left holding a New column the rest of the team should
+   have been sharing. This moves those tickets - only SGU's, only in New - to
+   the other support agents, at random, weighted towards whoever has the most
+   room under the per-priority targets the board now spreads by (8 High, 10
+   Medium, 10 Low open each, the same numbers as SUPPORT_PRIORITY_TARGETS in
+   index.html). Here the targets are hard caps: a ticket that would push every
+   agent past theirs stays with SGU rather than overloading someone.
+
+   Runs once per database, recorded as a SyncLog row - not a marker file next
+   to the board state, because a container started on a fresh volume would
+   find no file and shuffle the queue again. If the database cannot be asked
+   whether it already ran, it does not run. The board state is written with a
+   fresh assignment clock, so a tab still holding the old assignment loses the
+   per-ticket merge instead of putting the ticket back on SGU. */
+const SGU_NEW_REDISTRIBUTION_SYNC_TYPE = 'sgu_new_redistribution_v1';
+const REDISTRIBUTION_FROM = 'SGU';
+const REDISTRIBUTION_TO = [...SUPPORT_AGENT_CODES].filter(code => code !== REDISTRIBUTION_FROM);
+const REDISTRIBUTION_CAPS = { High: 8, Medium: 10, Low: 10 };
+const redistributionPriority = (value) => {
+  const p = String(value || '').trim().toLowerCase();
+  if (p === 'high' || p === 'urgent') return 'High';
+  if (p === 'low') return 'Low';
+  return 'Medium';
+};
+// Pure planning step, kept apart from the writes so it can be checked on its
+// own. random is injectable for the same reason.
+function planSguNewRedistribution(state, random = Math.random, onLeave = new Set()) {
+  const stage = id => String(state.ticketState?.[id] || 'new').trim().toLowerCase();
+  const isLive = id => state.ticketCategory?.[id] !== 'Spam'
+    && !state.ticketArchived?.[id]
+    && !state.ticketDuplicateOf?.[id];
+  const priorityOf = id => redistributionPriority(state.ticketPriority?.[id]);
+  const assignees = state.ticketAssignee || {};
+  const load = Object.fromEntries(REDISTRIBUTION_TO.map(a => [a, { High: 0, Medium: 0, Low: 0 }]));
+  Object.keys(assignees).forEach((id) => {
+    const agent = String(assignees[id] || '').toUpperCase();
+    if (!load[agent] || !isLive(id) || stage(id) === 'res') return;
+    load[agent][priorityOf(id)]++;
+  });
+  const candidates = Object.keys(assignees)
+    .filter(id => String(assignees[id] || '').toUpperCase() === REDISTRIBUTION_FROM && stage(id) === 'new' && isLive(id));
+  // Shuffled, so when the room runs out it is not always the same end of the
+  // queue that stays behind.
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+  const moves = [];
+  const kept = [];
+  for (const id of candidates) {
+    const priority = priorityOf(id);
+    const cap = REDISTRIBUTION_CAPS[priority];
+    const room = REDISTRIBUTION_TO
+      .filter(agent => !onLeave.has(agent))
+      .map(agent => ({ agent, room: Math.max(0, cap - load[agent][priority]) }))
+      .filter(x => x.room > 0);
+    if (!room.length) { kept.push(id); continue; }
+    let roll = random() * room.reduce((sum, x) => sum + x.room, 0);
+    const pick = room.find(x => (roll -= x.room) < 0) || room[room.length - 1];
+    load[pick.agent][priority]++;
+    moves.push({ id, to: pick.agent, priority });
+  }
+  return { moves, kept, load };
+}
+
+async function redistributeSguNewTicketsOnce() {
+  let done;
+  try {
+    done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SGU_NEW_REDISTRIBUTION_SYNC_TYPE, status: 'success' } });
+  } catch (error) {
+    console.warn('SGU redistribution skipped - could not check whether it already ran:', error?.message || error);
+    return;
+  }
+  if (done) return;
+  // The database's view of who holds what wins over a stale state file.
+  const state = await hydrateStateFromDatabase(safeReadState());
+  // Who is off has to be known before anything is handed out.
+  await loadAgentLeave();
+  const { moves, kept, load } = planSguNewRedistribution(state, Math.random, new Set(Object.keys(activeAgentLeave())));
+  const now = Date.now();
+  if (moves.length) {
+    const entries = [];
+    moves.forEach(({ id, to }) => {
+      entries.push({ field: 'ticketAssignee', id, value: to });
+      entries.push({ field: 'ticketAssigneeTouchedAt', id, value: now });
+      entries.push({ field: 'ticketAssignmentMode', id, value: 'support' });
+      entries.push({ field: 'ticketAssigneeBy', id, value: { by: null, source: 'redistribution/sgu-new', at: now } });
+    });
+    writeServerFieldsIntoState(entries);
+  }
+  // Recorded straight after the board state, before the database copy: the
+  // board is what every later save comes from, so that part must not repeat.
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SGU_NEW_REDISTRIBUTION_SYNC_TYPE,
+      status: 'success',
+      message: `Moved ${moves.length} of SGU's New ticket(s); ${kept.length} stayed with SGU (every agent at their cap).`,
+      metadata: { at: new Date(now).toISOString(), moves, kept, loadAfter: load }
+    }
+  }).catch((error) => console.error('SGU redistribution marker write failed:', error?.message || error));
+  for (const { id, to } of moves) {
+    try {
+      const ticket = await findTicketRecordByKanbanId(id);
+      if (!ticket) continue;
+      const updated = await prisma.ticket.update({ where: { id: ticket.id }, data: { assignedAgent: to } });
+      // The assignment event is also the assignment's clock for
+      // hydrateStateFromDatabase, so the new owner wins on the next load too.
+      await auditTicketChanges({
+        ticketId: ticket.id,
+        before: ticket,
+        after: updated,
+        fields: ['assignedAgent'],
+        fieldMetadata: { assignedAgent: { actor: null, source: 'redistribution/sgu-new' } }
+      });
+    } catch (error) {
+      console.warn(`SGU redistribution: database update failed for ${id}:`, error?.message || error);
+    }
+  }
+  const byAgent = moves.reduce((acc, m) => { acc[m.to] = (acc[m.to] || 0) + 1; return acc; }, {});
+  console.log(`SGU redistribution: moved ${moves.length} New ticket(s) ${JSON.stringify(byAgent)}, ${kept.length} kept with SGU.`);
+}
+
 const server = app.listen(PORT, () => {
   console.log(`Support Kanban secure web app on http://localhost:${PORT}`);
   resetWaitingOnContactSlaOnce().catch((error) => {
     console.error('Waiting on Contact SLA reset failed:', error?.message || error);
+  });
+  redistributeSguNewTicketsOnce().catch((error) => {
+    console.error('SGU redistribution failed:', error?.message || error);
   });
   if (SESSION_SECRET === 'change-this-session-secret') {
     console.log('WARNING: Set SESSION_SECRET before production use.');
