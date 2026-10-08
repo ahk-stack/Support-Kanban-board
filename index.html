@@ -4777,7 +4777,8 @@ th {
    the same reason the agent menu lives there. */
 .snooze-menu {
   position: fixed; z-index: 4000;
-  min-width: 216px;
+  min-width: 236px;
+  max-height: calc(100vh - 16px); overflow-y: auto;
   background: var(--surface, #fff);
   border: 1px solid var(--border-strong, #cbd5e1);
   border-radius: 12px;
@@ -4801,6 +4802,13 @@ th {
 .snooze-opt span { font-weight: 500; font-size: 12px; color: var(--muted, #64748b); }
 .snooze-opt:hover { background: var(--surface-muted, #f1f5f9); }
 .snooze-opt.snooze-clear { color: var(--red-600, #dc2626); }
+.snooze-custom {
+  display: flex; gap: 6px; align-items: center;
+  padding: 8px; margin-top: 4px;
+  border-top: 1px solid var(--border, #e2e8f0);
+}
+.snooze-custom input { flex: 1; min-width: 0; font-size: 13px; }
+.snooze-custom .btn-out { font-size: 12px; padding: 4px 10px; }
 .snooze-menu-foot {
   padding: 8px; margin-top: 4px;
   border-top: 1px solid var(--border, #e2e8f0);
@@ -8612,9 +8620,15 @@ th {
         <label>Client email <span style="color:var(--slate-400);font-weight:400;">(optional  enables HubSpot enrichment)</span></label>
         <input id="ct-email" class="form-input" type="email" placeholder="client@hotel.com"/>
       </div>
-      <div class="form-field">
-        <label>Assign to</label>
-        <select id="ct-agent" class="form-input"></select>
+      <div class="form-row">
+        <div class="form-field">
+          <label>Support agent</label>
+          <select id="ct-agent" class="form-input"></select>
+        </div>
+        <div class="form-field">
+          <label>CS owner</label>
+          <select id="ct-cs" class="form-input"></select>
+        </div>
       </div>
       <div class="form-field">
         <label style="display:flex;align-items:center;justify-content:space-between;">Attachments <span style="color:var(--slate-400);font-weight:400;font-size:13px;">screenshots, logs, PDFs</span></label>
@@ -9159,6 +9173,9 @@ function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId){if(!ticket||!ti
   const fromClient=!isInternalEmailAddress(emailObj.sender);
   const replyAt=Date.parse(emailObj.receivedDateTime||'')||Date.now();
   if(fromClient&&replyAt>Number(ticketSlaResetAt[ticket.id]||0))ticketSlaResetAt[ticket.id]=replyAt;
+  // A client reply wakes a snoozed ticket - but only one that arrived after
+  // the snooze was set. An older message merged by a late poll is not news.
+  if(fromClient&&ticketSnooze[ticket.id]&&replyAt>Number(ticketSnooze[ticket.id].at||0))delete ticketSnooze[ticket.id];
   // The ticket's support agent was assigned by workload balancing, but if a
   // DIFFERENT support agent is the one actually replying to the client in
   // the email loop, the ticket should follow the real handling agent
@@ -9267,7 +9284,7 @@ function isReopenedTicket(id){
   const at=Number(ticketReopenedAt[id]||0);
   return !!at&&normalizeTicketStage(ticketState[id]||'new')!=='res';
 }
-let ticketCreatedBy={}; // ticketId -> creator's agent code, set once at manual-ticket creation - gates who can use the Edit Manual Ticket action
+let ticketCreatedBy={}; // ticketId -> creator's agent code, set once at manual-ticket creation
 let ticketNumbers={};
 let ticketNumberCounter=0;
 let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
@@ -9675,10 +9692,12 @@ function currentUserCanReplyToTicket(ticket){
   if(currentUserIsAdmin())return true;
   return ticketVisibleToCurrentUser(ticket);
 }
+// A manual ticket has no email behind it, so its subject, description and
+// owners are whatever someone typed - and anyone on the team may need to
+// correct them, not only whoever happened to create it.
 function currentUserCanEditManualTicket(ticket){
   if(!ticket?.isManual)return false;
-  if(currentUserIsAdmin())return true;
-  return agentIdentityCode(ticketCreatedBy[ticket.id])===currentUser();
+  return currentUserIsAdmin()||!!currentUser();
 }
 // The agent code the KPI dashboard is pinned to when the signed-in person is
 // not allowed to look wider. The board is NOT a caller - it asks
@@ -10535,6 +10554,18 @@ function fillCreateTicketAgentSelect(){
   }).join('')+'</optgroup>';
   ctAgent.value=(keep&&agents.includes(keep)&&!isAgentOff(keep))?keep:(agents.find(a=>!isAgentOff(a))||'');
 }
+// The CS owner list, same shape as the support one. Starts on the creator when
+// they are CS themselves (what creation used to do silently), else Unassigned.
+function fillCreateTicketCSSelect(){
+  const ctCS=document.getElementById('ct-cs');
+  if(!ctCS)return;
+  ctCS.innerHTML='<option value="">Unassigned</option><optgroup label="CS">'+CS_AGENTS.map(a=>{
+    const off=isAgentOff(a);
+    return `<option value="${esc(a)}"${off?' disabled':''}>${esc(a)}${off?` - ${esc(agentLeaveText(a))}`:''}</option>`;
+  }).join('')+'</optgroup>';
+  const mine=currentUserCSAgent();
+  ctCS.value=(mine&&!isAgentOff(mine))?mine:'';
+}
 const SHIFT_HEARTBEAT_MS=60000;
 
 function isWeekendDay(d){const day=d.getDay();return day===0||day===6;}
@@ -11090,6 +11121,9 @@ function setAdminOnlyNavigationVisible(isAdmin){
   document.getElementById('insights-view-btn')?.classList.toggle('hidden', !isAdmin);
 }
 function syncRoleRestrictedControls(){
+  // The Velma sheet connection is set up once, by an admin, for everyone.
+  const googleBtn=document.getElementById('google-account-btn');
+  if(googleBtn)googleBtn.style.display=currentUserIsAdmin()?'':'none';
   const canViewAll=currentUserCanViewAllTickets();
   document.querySelectorAll('.agent-filter-control').forEach(el=>el.classList.toggle('hidden', !canViewAll));
   /* With the Team filter hidden, the filter is opened right up rather than
@@ -11449,12 +11483,9 @@ function openVelmaModal(id){
   const openBtn=document.getElementById('velma-open-link');
   openBtn.style.display=link?.url?'':'none';
   openBtn.onclick=()=>{if(link?.url)window.open(link.url,'_blank');};
-  // Only take room in the modal when there is something to do about access:
-  // when the sheet can already be read, the agent needs the ID field, not a
-  // reminder of whose account is reading it.
-  const googleEl=document.getElementById('velma-google');
-  googleEl.style.display='none';
-  fetchGoogleAccessStatus().then(st=>{if(velmaTicketId===id&&!googleCanReadSheet(st))renderGoogleAccessBlock(googleEl,{compact:true});});
+  // The sheet connection is the board's, not the agent's: the modal is the ID
+  // field and nothing else. Access problems only surface if a lookup fails.
+  document.getElementById('velma-google').style.display='none';
   document.getElementById('velma-modal').classList.add('open');
   setTimeout(()=>{input.focus();if(link)input.select();},100);
 }
@@ -11475,11 +11506,12 @@ document.getElementById('velma-save').addEventListener('click',async()=>{
     const error=String(out?.error||'unknown error');
     // Access problems are answered in the modal, with the way out next to
     // them; anything else (no such ID, the sheet API down) is a toast.
+    // Agents never sign in to Google here - the board holds one connection
+    // for everyone. If it cannot read the sheet, that is for an admin to fix.
     if(/^velma_sheet_(not_configured|not_shared)|^google_(refresh|auth)_failed/.test(error)){
-      await fetchGoogleAccessStatus();
-      // Not configured at all is what the block itself explains; repeating
-      // the raw message above it said the same thing twice.
-      renderGoogleAccessBlock(document.getElementById('velma-google'),{compact:true,error:/not_configured/.test(error)?'':error.replace(/^[a-z_]+:s*/,'')});
+      showToast(currentUserIsAdmin()
+        ?'The board cannot read the Velma bug sheet - reconnect it in Account > Google account'
+        :'The board cannot read the Velma bug sheet right now - let an admin know','warn');
       return;
     }
     showToast(`Velma bug link failed: ${error}`);
@@ -11550,11 +11582,6 @@ function startGoogleSignIn(){
 function rerenderGoogleBlocks(){
   const body=document.getElementById('google-account-body');
   if(document.getElementById('google-account-modal')?.classList.contains('open'))renderGoogleAccessBlock(body);
-  const velma=document.getElementById('velma-google');
-  if(document.getElementById('velma-modal')?.classList.contains('open')){
-    if(googleCanReadSheet(googleAccessStatus))velma.style.display='none';
-    else renderGoogleAccessBlock(velma,{compact:true});
-  }
 }
 let lastGoogleSignInAt=0;
 async function onGoogleSignInResult(msg){
@@ -11595,7 +11622,7 @@ function googleSetupFormHtml(st){
       <input class="form-input" id="google-client-secret" type="password" placeholder="Client secret" autocomplete="off" spellcheck="false">
       <button class="btn-primary" type="button" data-google-save-client>Save and turn on</button>
     </div>
-    <span class="google-access-hint">Stored encrypted on the board. After this, anyone can click "Sign in with Google" here.</span>
+    <span class="google-access-hint">Stored encrypted on the board. Then sign in once with an account that can open the sheet - every agent uses that connection.</span>
   </div>`;
 }
 document.addEventListener('click',async e=>{
@@ -12387,6 +12414,7 @@ function openCreateModal(){
   populateCreateSubtypeOptions('Other','');
   document.getElementById('ct-jira').value='';
   document.getElementById('ct-email').value='';
+  fillCreateTicketCSSelect();
   atResetStaged();
   atWireCreateZone();
   document.getElementById('create-modal').classList.add('open');
@@ -12423,8 +12451,8 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   if(subtype)ticketSubtype[id]=subtype;
   setTicketAssignee(id,normalizeSupportAgent(document.getElementById('ct-agent').value)||fallbackSupportOwner(id));
   ticketAssignmentMode[id]='support';
-  const creatorCS=currentUserCSAgent();
-  if(creatorCS){ticketCSOwner[id]=creatorCS;manualCSOverride[id]=true;}
+  const chosenCS=normalizeCSAgent(document.getElementById('ct-cs')?.value||'');
+  if(chosenCS){ticketCSOwner[id]=chosenCS;manualCSOverride[id]=true;}
   if(jiraKey)ticketJira[id]=jiraKey;
   allTickets.unshift(ticket);
   saveState();renderBoard();updateJiraBadge();
@@ -12459,7 +12487,7 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
 let editManualTicketId=null;
 function editManualCSOptionsHtml(selected){return ['<option value="">Unassigned</option>'].concat(CS_AGENTS.map(a=>`<option value="${a}"${a===selected?' selected':''}>${a}</option>`)).join('');}
 function openEditManualModal(ticket){
-  if(!currentUserCanEditManualTicket(ticket)){showToast('Only admins and the ticket creator can edit this ticket','warn');return;}
+  if(!currentUserCanEditManualTicket(ticket)){showToast('Sign in to edit this ticket','warn');return;}
   editManualTicketId=ticket.id;
   document.getElementById('emt-subject').value=ticket.email?.subject||'';
   document.getElementById('emt-desc').value=ticket.email?.summary||'';
@@ -12473,7 +12501,7 @@ document.getElementById('emt-submit').addEventListener('click',async()=>{
   if(!id)return;
   const ticket=allTickets.find(t=>t.id===id);
   if(!ticket){showToast('Ticket no longer exists');document.getElementById('edit-manual-modal').classList.remove('open');return;}
-  if(!currentUserCanEditManualTicket(ticket)){showToast('Only admins and the ticket creator can edit this ticket','warn');document.getElementById('edit-manual-modal').classList.remove('open');return;}
+  if(!currentUserCanEditManualTicket(ticket)){showToast('Sign in to edit this ticket','warn');document.getElementById('edit-manual-modal').classList.remove('open');return;}
   const subject=document.getElementById('emt-subject').value.trim();
   if(!subject){document.getElementById('emt-subject').focus();return;}
   const newClientEmail=(document.getElementById('emt-email').value.trim()||'').toLowerCase();
@@ -16694,13 +16722,23 @@ function snoozeOptions(){
   const at=(daysAhead,hour)=>{const d=new Date(now);d.setDate(d.getDate()+daysAhead);d.setHours(hour,0,0,0);return d.getTime();};
   const tomorrow=at(1,9);
   let mondayDays=(8-now.getDay())%7;if(mondayDays===0)mondayDays=7;
-  return [
+  const opts=[
+    {key:'30m',label:'30 minutes',until:now.getTime()+30*60000},
     {key:'1h',label:'1 hour',until:now.getTime()+3600000},
-    {key:'3h',label:'3 hours',until:now.getTime()+3*3600000},
-    {key:'tomorrow',label:'Tomorrow 09:00',until:tomorrow},
-    {key:'monday',label:'Monday 09:00',until:at(mondayDays,9)},
-    {key:'week',label:'Next week',until:now.getTime()+7*86400000}
+    {key:'3h',label:'3 hours',until:now.getTime()+3*3600000}
   ];
+  // Only offered while it is still ahead of us.
+  if(now.getHours()<14)opts.push({key:'afternoon',label:'This afternoon 14:00',until:at(0,14)});
+  if(now.getHours()<17)opts.push({key:'eod',label:'End of day 17:00',until:at(0,17)});
+  opts.push(
+    {key:'tomorrow',label:'Tomorrow 09:00',until:tomorrow},
+    {key:'2d',label:'In 2 days 09:00',until:at(2,9)},
+    {key:'monday',label:'Monday 09:00',until:at(mondayDays,9)},
+    {key:'week',label:'Next week',until:now.getTime()+7*86400000},
+    {key:'2w',label:'In 2 weeks',until:now.getTime()+14*86400000},
+    {key:'month',label:'In 1 month',until:at(30,9)}
+  );
+  return opts;
 }
 function snoozeTicket(id,until,note){
   const ms=Number(until)||0;
@@ -16713,17 +16751,18 @@ function unsnoozeTicket(id){
   delete ticketSnooze[id];
   return true;
 }
-// Two ways a snooze ends by itself: the clock runs out, or the client writes
-// back. Both are swept here, once per render and once a minute, so a woken
-// ticket reappears without anyone reloading.
+// Two ways a snooze ends by itself: the clock runs out (swept here, once per
+// render and once a minute, so a woken ticket reappears without anyone
+// reloading), or the client writes back (mergeEmailIntoExistingTicket).
+// This used to also wake on ticketHasNewReply, but that flag is the unread
+// glow and stays set until someone opens the card - so snoozing any ticket
+// with an unread reply was undone by the very next render.
 function sweepSnoozes(){
   const now=boardNow();
   let changed=false;
   Object.keys(ticketSnooze).forEach(id=>{
     const entry=ticketSnooze[id];
-    if(!entry||!Number(entry.until)){delete ticketSnooze[id];changed=true;return;}
-    if(Number(entry.until)<=now){delete ticketSnooze[id];changed=true;return;}
-    if(ticketHasNewReply[id]){delete ticketSnooze[id];changed=true;}
+    if(!entry||!Number(entry.until)||Number(entry.until)<=now){delete ticketSnooze[id];changed=true;}
   });
   return changed;
 }
@@ -16741,9 +16780,17 @@ function openSnoozeMenu(id,anchor){
   box.id='snooze-menu';
   box.innerHTML=`<div class="snooze-menu-head">Snooze ${esc(ticketDisplayNumber(id))}</div>`
     +snoozeOptions().map(o=>`<button class="snooze-opt" data-snooze-until="${o.until}" data-snooze-id="${esc(id)}">${esc(o.label)}<span>${esc(fmtDate(new Date(o.until).toISOString()))}</span></button>`).join('')
+    +`<div class="snooze-custom"><input type="datetime-local" class="sel-input" id="snooze-custom-at" aria-label="Snooze until a custom date and time"><button class="btn-out" data-snooze-custom="${esc(id)}">Set</button></div>`
     +(entry?`<button class="snooze-opt snooze-clear" data-snooze-clear="${esc(id)}">Wake now</button>`:'')
-    +`<div class="snooze-menu-foot">A reply from the client wakes it early.</div>`;
+    +`<div class="snooze-menu-foot">A new reply from the client wakes it early.</div>`;
   document.body.appendChild(box);
+  const customAt=box.querySelector('#snooze-custom-at');
+  if(customAt){
+    // datetime-local wants local time with no zone: shift by the offset first.
+    const toLocal=ms=>{const d=new Date(ms);return new Date(ms-d.getTimezoneOffset()*60000).toISOString().slice(0,16);};
+    customAt.min=toLocal(boardNow()+60000);
+    customAt.value=toLocal(entry?Number(entry.until):snoozeOptions().find(o=>o.key==='tomorrow').until);
+  }
   const rect=anchor.getBoundingClientRect();
   const top=Math.min(window.innerHeight-box.offsetHeight-12,rect.bottom+6);
   box.style.top=Math.max(8,top)+'px';
@@ -17826,6 +17873,17 @@ document.addEventListener('click',e=>{
     if(snoozeTicket(id,Number(pick.dataset.snoozeUntil))){
       closeSnoozeMenu();saveState('ticket_snoozed');renderBoard();
       showToast('Snoozed until '+fmtDate(new Date(Number(pick.dataset.snoozeUntil)).toISOString()));
+    }
+    return;
+  }
+  const custom=e.target.closest('#snooze-menu [data-snooze-custom]');
+  if(custom){
+    e.preventDefault();e.stopPropagation();
+    const until=new Date(document.getElementById('snooze-custom-at')?.value||'').getTime();
+    if(!Number.isFinite(until)||until<=boardNow()){showToast('Pick a date and time in the future');return;}
+    if(snoozeTicket(custom.dataset.snoozeCustom,until)){
+      closeSnoozeMenu();saveState('ticket_snoozed');renderBoard();
+      showToast('Snoozed until '+fmtDate(new Date(until).toISOString()));
     }
     return;
   }
