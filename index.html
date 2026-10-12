@@ -5403,6 +5403,17 @@ th {
 }
 .pj-badge-claude { background:var(--primary-soft,#eef2ff); color:var(--primary-dark,#4338ca); border-color:var(--indigo-200,#c7d2fe); }
 .pj-badge-board { background:var(--surface-muted,#f1f5f9); color:var(--muted,#64748b); border-color:var(--border,#e2e8f0); }
+.pj-badge-running { background:var(--amber-50,#fffbeb); color:var(--amber-700,#b45309); border-color:var(--amber-200,#fde68a); }
+.pj-badge-queued { background:var(--sky-50,#f0f9ff); color:var(--sky-700,#0369a1); border-color:var(--sky-200,#bae6fd); }
+.pj-handoff { display:flex; flex-direction:column; gap:8px; margin-top:6px; }
+.pj-card.pj-pending .pj-card-head { opacity:.55; filter:grayscale(1); }
+.pj-card.pj-pending:hover .pj-card-head { opacity:.8; }
+.pj-pending-box { display:flex; flex-direction:column; gap:10px; }
+.pj-handoff code { display:block; white-space:pre-wrap; word-break:break-word; padding:8px 10px; border-radius:8px; background:var(--surface-muted,#f1f5f9); border:1px solid var(--border,#e2e8f0); font-size:12.5px; }
+.pj-handoff-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+.pj-badge-failed { background:var(--red-50,#fef2f2); color:var(--red-700,#b91c1c); border-color:var(--red-200,#fecaca); }
+.pj-run-note { font-size:13px; color:var(--muted,#64748b); padding:4px 0; }
+.pj-run-note.pj-run-failed { color:var(--red-700,#b91c1c); }
 .pj-run-panel { border-top:1px solid var(--border,#e2e8f0); }
 .pj-run-meta {
   display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 12px;
@@ -8022,6 +8033,8 @@ th {
   <div class="sep"></div>
   <button class="chip" id="snooze-filter-btn" title="Show only snoozed tickets" style="display:none">Snoozed <span class="jira-ct" id="snooze-count" style="display:none">0</span></button>
   <div class="sep"></div>
+  <button class="chip my-resolved-control" id="my-resolved-filter-btn" title="Every ticket you resolved, including ones CS has confirmed and taken off the board" style="display:none">My resolved <span class="jira-ct" id="my-resolved-count" style="display:none">0</span></button>
+  <div class="sep my-resolved-control" style="display:none"></div>
   <span class="filter-label language-filter-control" style="display:none">Language:</span>
   <select class="filter-sel language-filter-control" id="language-filter" style="display:none"><option value="all">All languages</option></select>
   <div class="sep language-filter-control" style="display:none"></div>
@@ -9519,6 +9532,10 @@ let ticketLanguage={};
 let activeLanguage='all';
 let boardGrouping='none';   // 'none' | 'company'
 let showSnoozed=false;
+// Support's "My resolved" chip: the board narrowed to resolved tickets they
+// hold, including the ones that have aged off it or that CS confirmed into the
+// archive - which are otherwise nowhere a support agent can find them.
+let showMyResolved=false;
 let collapsedLanes=new Set();
 function normalizeAgentCode(value){
   const code=String(value||'').trim().toUpperCase();
@@ -10484,7 +10501,7 @@ function normalizeLegacyAssignmentModes(){
       ticketAssignmentMode[id]='support';
       changed=true;
     }
-    if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]){
+    if(isSupportAssignedTicket(id)&&!ticketCSOwner[id]&&!manualCSOverride[id]){
       const cs=resolveDefaultCSForTicket(id,t.email);
       if(cs){ticketCSOwner[id]=cs;changed=true;}
     }
@@ -11146,6 +11163,9 @@ function syncRoleRestrictedControls(){
   document.querySelectorAll('.board-scope-control').forEach(el=>el.classList.toggle('hidden', !hasScopeToggle));
   document.getElementById('scope-all-btn')?.classList.toggle('active', !supportOnlyMine);
   document.getElementById('scope-mine-btn')?.classList.toggle('active', supportOnlyMine);
+  const hasMyResolved=currentUserHasMyResolved();
+  document.querySelectorAll('.my-resolved-control').forEach(el=>{el.style.display=hasMyResolved?'':'none';});
+  if(!hasMyResolved)showMyResolved=false;
   // Admin-only tools. Hiding the entry point is presentation only - the
   // endpoints behind them are requireAdmin server-side.
   const isAdmin=currentUserIsAdmin();
@@ -11658,7 +11678,8 @@ function renderGoogleAccessBlock(el,{compact=false,error=''}={}){
   }else if(st.connected){
     html=`<div class="google-access-line ok"><span class="google-g" aria-hidden="true"></span><span>Reading the sheet as <strong>${esc(st.email||'your Google account')}</strong></span>${compact?'':'<button class="btn-out" type="button" data-google-disconnect>Disconnect</button>'}</div>`;
   }else if(st.serviceAccount){
-    html=`<div class="google-access-line ok"><span class="google-g" aria-hidden="true"></span><span>Reading the sheet with the board\'s service account <strong>${esc(st.serviceAccount)}</strong></span></div>`;
+    html=`<div class="google-access-line ok"><span class="google-g" aria-hidden="true"></span><span>Reading the sheet with the board\'s service account <strong>${esc(st.serviceAccount)}</strong> - nobody needs to sign in</span>${!compact&&st.canConfigure&&st.serviceAccountSource==='board'?'<button class="btn-out" type="button" data-google-sa-remove>Remove</button>':''}</div>`
+      +(compact?'':`<div class="google-access-hint">If a lookup says the sheet cannot be opened, share the Velma bug sheet with this email as Viewer.</div>`);
   }else if((st.others||[]).length){
     html=`<div class="google-access-line ok"><span class="google-g" aria-hidden="true"></span><span>Reading the sheet as <strong>${esc(st.others[0])}</strong>, who connected their account</span></div>`
       +(compact?'':`<div class="google-access-hint">You can connect your own account too - the board then reads as you when you link a bug.</div>${st.configured?signInBtn:''}`);
@@ -11671,13 +11692,60 @@ function renderGoogleAccessBlock(el,{compact=false,error=''}={}){
   }else{
     html='<div class="google-access-callout warn"><strong>Google sign-in is not turned on yet.</strong><span>An admin turns it on once under Account &gt; Google account. After that, "Sign in with Google" appears here.</span></div>';
   }
+  // No sign-in at all: an admin uploads a service account key once.
+  if(!compact&&st?.canConfigure&&!st.serviceAccount)html=googleServiceAccountFormHtml()+html;
   if(error)html=`<div class="google-access-error">${esc(error)}</div>`+html;
   if(!compact&&st?.lastSyncError)html+=`<div class="google-access-hint">Last check of linked bugs failed: ${esc(st.lastSyncError)}</div>`;
   else if(!compact&&st?.lastSyncAt)html+=`<div class="google-access-hint">Linked bugs last checked ${esc(fmtTime(new Date(st.lastSyncAt).toISOString()))}.</div>`;
   el.innerHTML=html;
   el.style.display=html?'':'none';
 }
+function googleServiceAccountFormHtml(){
+  return `<div class="google-access-callout google-setup">
+    <strong>Read the sheet without anyone signing in (recommended)</strong>
+    <ol class="google-setup-steps">
+      <li>In <a href="https://console.cloud.google.com/iam-admin/serviceaccounts" target="_blank" rel="noopener">Google Cloud &gt; Service accounts</a>, create a service account (no roles needed).</li>
+      <li>Open it &gt; <b>Keys</b> &gt; <b>Add key</b> &gt; <b>JSON</b>, and upload the file here.</li>
+      <li>Share the Velma bug sheet with the service account's email as <b>Viewer</b>.</li>
+    </ol>
+    <div class="google-setup-fields" style="grid-template-columns:1fr auto;">
+      <input class="form-input" id="google-sa-file" type="file" accept=".json,application/json">
+      <button class="btn-primary" type="button" data-google-sa-save>Upload key</button>
+    </div>
+    <span class="google-access-hint">Stored encrypted on the board, and used for every agent's lookups.</span>
+  </div>`;
+}
 document.addEventListener('click',async e=>{
+  const saSave=e.target.closest('[data-google-sa-save]');
+  if(saSave){
+    const file=document.getElementById('google-sa-file')?.files?.[0];
+    if(!file){showToast('Choose the JSON key file first','warn');return;}
+    saSave.disabled=true;
+    const key=await file.text().catch(()=>'');
+    const res=await fetch('/api/google/service-account',{method:'PUT',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({key})}).catch(()=>null);
+    const out=res?await res.json().catch(()=>({})):{};
+    saSave.disabled=false;
+    if(!res||!res.ok){
+      const why={not_a_service_account_key:'That is not a service account key - in Google Cloud, use Service accounts > Keys > Add key > JSON',set_in_environment:'A service account is already set in the server environment',admin_required:'Only admins can set this up'}[out?.error]||out?.error||'could not reach the server';
+      showToast(`Not saved: ${why}`,'warn');
+      return;
+    }
+    await fetchGoogleAccessStatus();
+    renderGoogleAccessBlock(document.getElementById('google-account-body'));
+    if(out.sheetAccess==='ok')showToast('Connected - the board reads the Velma bug sheet with '+out.email,'ok');
+    else if(out.sheetAccess==='not_shared')showToast('Key saved. Now share the Velma bug sheet with '+out.email+' as Viewer','warn');
+    else showToast('Key saved, but the sheet could not be checked yet: '+(out.sheetError||''),'warn');
+    return;
+  }
+  const saRemove=e.target.closest('[data-google-sa-remove]');
+  if(saRemove){
+    saRemove.disabled=true;
+    await fetch('/api/google/service-account',{method:'DELETE',credentials:'include'}).catch(()=>null);
+    await fetchGoogleAccessStatus();
+    renderGoogleAccessBlock(document.getElementById('google-account-body'));
+    showToast('Service account removed');
+    return;
+  }
   if(e.target.closest('[data-google-signin]')){e.preventDefault();startGoogleSignIn();return;}
   if(e.target.closest('[data-google-open-setup]')){
     document.getElementById('velma-modal').classList.remove('open');
@@ -12452,7 +12520,10 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   setTicketAssignee(id,normalizeSupportAgent(document.getElementById('ct-agent').value)||fallbackSupportOwner(id));
   ticketAssignmentMode[id]='support';
   const chosenCS=normalizeCSAgent(document.getElementById('ct-cs')?.value||'');
-  if(chosenCS){ticketCSOwner[id]=chosenCS;manualCSOverride[id]=true;}
+  // Unassigned is a choice too: the override is set either way, or the company
+  // auto-assign would fill in a CS the creator deliberately left empty.
+  ticketCSOwner[id]=chosenCS||null;
+  manualCSOverride[id]=true;
   if(jiraKey)ticketJira[id]=jiraKey;
   allTickets.unshift(ticket);
   saveState();renderBoard();updateJiraBadge();
@@ -13114,7 +13185,7 @@ document.getElementById('insights-view-btn')?.addEventListener('click',()=>{if(v
    still exist for accounts that cannot use the Compliance API.
    =========================================================================== */
 
-let projectsState = { state: 'idle', rows: [], canEdit: false, configured: false, model: '', claude: { connected: false } };
+let projectsState = { state: 'idle', rows: [], canEdit: false, model: '', claude: { connected: false } };
 let projectsQuery = '';
 let projectOpen = null;      // slug of the project whose form is showing
 let projectValues = {};      // slug -> { fieldKey: value }
@@ -13263,9 +13334,9 @@ async function loadProjects(){
     const data=await res.json();
     projectsState=data?.error
       ?{state:'error',rows:[],canEdit:false,configured:false,message:data.message||data.error,claude:{connected:false}}
-      :{state:'done',rows:data.rows||[],canEdit:!!data.canEdit,configured:!!data.configured,model:data.model||'',claude:data.claude||{connected:false}};
+      :{state:'done',rows:data.rows||[],canEdit:!!data.canEdit,model:data.model||'',claude:data.claude||{connected:false}};
   }catch(error){
-    projectsState={state:'error',rows:[],canEdit:false,configured:false,message:String(error?.message||error),claude:{connected:false}};
+    projectsState={state:'error',rows:[],canEdit:false,message:String(error?.message||error),claude:{connected:false}};
   }
   renderProjectsView();
 }
@@ -13274,7 +13345,7 @@ async function loadProjects(){
 // from a Claude account is the catalogue; anything else is a leftover, and the
 // panel no longer offers a way to make one.
 function projectFromClaude(p){
-  return !!p.fromClaude||p.source==='claude';
+  return !!p.fromClaude||p.source==='claude'||!!p.placeholder;
 }
 
 function projectMatches(p){
@@ -13318,11 +13389,19 @@ function projectThreadHtml(slug){
       <div class="pj-md">${mdToHtml(turn.content)}</div>
     </div>`;
   });
-  if(t.running)parts.push(`<div class="pj-result pj-running pj-progress">
+  if(t.running){
+    const p=projectsState.rows.find(x=>x.slug===slug);
+    const working=t.status==='running';
+    const head=working
+      ?`<strong>Claude is working on it</strong>${t.claimedBy?` (${esc(String(t.claimedBy).replace(/^mcp:/,''))})`:''}`
+      :t.status==='queued'?'<strong>Waiting for Claude to pick this up</strong>':'<strong>Sending…</strong>';
+    parts.push(`<div class="pj-result pj-running pj-progress">
     <span class="spinner"></span>
-    <span class="pj-progress-text"><strong>Working…</strong> a long job can take a minute.</span>
+    <span class="pj-progress-text">${head} <span data-pj-elapsed="${esc(slug)}">${esc(projectElapsedText(t.startedAt))}</span> &middot; You can leave this page &mdash; the answer is saved under Results when it lands.</span>
     <span class="pj-progress-bar"></span>
   </div>`);
+    if(t.status==='queued')parts.push(projectHandoffHtml(p,t.handoff));
+  }
   if(t.error)parts.push(`<div class="pj-result pj-error">${esc(t.error)}</div>`);
   // Nothing to follow up on until the project has answered once.
   if(turns.length&&!t.running){
@@ -13337,10 +13416,9 @@ function projectThreadHtml(slug){
   return parts.length?`<div class="pj-thread">${parts.join('')}</div>`:'';
 }
 
-/* The stored results of one project: what the board ran, and what Claude ran
-   on its side and posted over the connector. Newest first, newest expanded.
-   This is the half of the panel that works with no ANTHROPIC_API_KEY - the
-   board renders an answer it did not have to pay for. */
+/* The stored results of one project: runs queued from here, and runs Claude
+   started on its own side and posted over the connector. Newest first, newest
+   expanded. A queued run waits here, with the line that hands it to Claude. */
 function projectRunsHtml(slug){
   const p=projectsState.rows.find(x=>x.slug===slug);
   const state=projectRuns[slug];
@@ -13355,7 +13433,13 @@ function projectRunsHtml(slug){
     // The newest result is the one someone opened the card to read, so it is
     // expanded unless they have since collapsed it themselves.
     const open=projectRunOpen[key]!==undefined?projectRunOpen[key]:idx===0;
-    const badge=run.source==='claude'
+    const badge=run.status==='queued'
+      ?'<span class="pj-badge pj-badge-queued">Waiting for Claude</span>'
+      :run.status==='running'
+      ?'<span class="pj-badge pj-badge-running">Claude working</span>'
+      :run.status==='error'
+      ?'<span class="pj-badge pj-badge-failed">Failed</span>'
+      :run.source==='claude'
       ?'<span class="pj-badge pj-badge-claude">From Claude</span>'
       :'<span class="pj-badge pj-badge-board">Ran here</span>';
     const meta=[
@@ -13374,11 +13458,17 @@ function projectRunsHtml(slug){
       </button>
       ${open?`<div class="pj-run-panel">
         <div class="pj-run-meta">${chips}<span>${meta}</span>
-          <button class="btn-out pj-copy" type="button" data-pj-run-copy="${esc(key)}">Copy</button></div>
-        <div class="pj-md">${mdToHtml(run.output)}</div>
+          ${run.status==='done'?`<button class="btn-out pj-copy" type="button" data-pj-run-copy="${esc(key)}">Copy</button>`:''}</div>
+        ${run.status==='queued'
+          ?`<div class="pj-run-note">No Claude has taken this run yet.</div>${projectHandoffHtml(p,run.handoff)}`
+          :run.status==='running'
+          ?`<div class="pj-run-note"><span class="spinner"></span> ${run.claimedBy?esc(String(run.claimedBy).replace(/^mcp:/,''))+"'s ":''}Claude is working on this one. It updates here by itself.</div>`
+          :run.status==='error'
+          ?`<div class="pj-run-note pj-run-failed">${esc(run.error||'The run failed.')}</div>`
+          :`<div class="pj-md">${mdToHtml(run.output)}</div>`}
       </div>`:''}
     </div>`;
-  }).join(''):`<div class="pj-runs-empty">No results kept yet. Run it here, or run the project in Claude and ask it to post the result to the board &mdash; that route needs no API key on this deployment.</div>`;
+  }).join(''):`<div class="pj-runs-empty">No results yet. Press Run and hand it to Claude, or run the project in Claude and ask it to post the result to the board.</div>`;
   return `<div class="pj-runs">
     <div class="pj-runs-head"><span class="pj-runs-title">Results</span>
       <span class="pj-runs-count">${rows.length?`${rows.length} kept`:''}</span>
@@ -13401,13 +13491,27 @@ async function loadProjectRuns(slug){
     projectRuns[slug]={state:'error',rows:[],message:String(error?.message||error)};
   }
   renderProjectsView();
+  scheduleProjectRunsRefresh(slug);
+}
+// A run started from another tab, or before a reload, has nobody polling it.
+// While the card is open and something in Results says Running, re-read it.
+let projectRunsRefreshTimer={};
+function scheduleProjectRunsRefresh(slug){
+  clearTimeout(projectRunsRefreshTimer[slug]);
+  const running=(projectRuns[slug]?.rows||[]).some(r=>r.status==='running'||r.status==='queued');
+  if(!running||projectThread[slug]?.running)return;
+  projectRunsRefreshTimer[slug]=setTimeout(()=>{
+    if(projectOpen===slug&&!projectThread[slug]?.running)loadProjectRuns(slug);
+  },15000);
 }
 
+// Admin-only on the server side: register_project needs an admin's connector.
+const PROJECT_REGISTER_PROMPT='Register this project on the support board: pass your own project instructions verbatim as instructions, and the information you ask people for as inputs.';
 /* The catalogue is empty. Since the only way to fill it is from Claude's side,
    this screen is the instructions for doing that - including the sentence to
    paste, because that is the part people get wrong. */
 function projectsZeroHtml(){
-  const prompt='Register this project on the support board, then run it and post the result there.';
+  const prompt=PROJECT_REGISTER_PROMPT;
   return `<div class="pj-zero">
     <div class="pj-zero-mark">&#9671;</div>
     <h3>No projects yet</h3>
@@ -13415,7 +13519,8 @@ function projectsZeroHtml(){
     <ol class="pj-zero-steps">
       <li><b>Open the project</b> on claude.ai, with the support connector switched on for that conversation.</li>
       <li><b>Ask it to register itself.</b> It sends its own instructions and the inputs it asks for, and the board turns those into a form.</li>
-      <li><b>Ask it to post results here.</b> They arrive rendered, and that route needs no API key on this deployment.</li>
+      <li><b>Run it from here.</b> Run queues the job; Claude picks it up and the answer lands on the card. No API key anywhere.</li>
+      <li><b>Or add it here first, as a grayed card.</b> <em>Add project</em> takes its name and claude.ai link; the card stays grayed until <em>Push from Claude</em> brings it over.</li>
     </ol>
     <div class="pj-zero-prompt">
       <code id="pj-zero-prompt">${esc(prompt)}</code>
@@ -13432,14 +13537,9 @@ function projectCardHtml(p){
   // reason used to live in a hover title, which answers a mouse resting on it
   // and never answers a press, so it is written into the card body instead.
   // Both cases say what to do next, because neither is fixable from here.
-  const runBlocked=!p.ready
-    ? {
-        text:'<strong>Needs setup.</strong> This project arrived without its instructions, so there is nothing to send as a prompt. In Claude, open the project and ask it to re-register with its own instructions passed as <code>instructions</code>.'
-          +(projectsState.canEdit?' Or paste them here with <strong>Edit</strong>.':'')
-      }
-    : (!projectsState.configured
-      ? { text:'<strong>The board cannot run this itself.</strong> No <code>ANTHROPIC_API_KEY</code> is set on this deployment. Run the project in Claude and ask it to post the result here &mdash; it will appear under Results below.' }
-      : null);
+  const runHow=p.ready
+    ?'<p class="pj-help">Run sends this to Claude: a runner PC picks it up by itself, or you paste one line into a Claude chat that has the support board connector. Claude works with its own tools and the answer comes back here under Results.</p>'
+    :'';
   // Everything on the card is now a span: this is the inside of a button, and
   // a div in there was never valid markup.
   const foot=[
@@ -13449,24 +13549,37 @@ function projectCardHtml(p){
   const runs=p.runCount
     ? `<span class="pj-foot-runs" title="${p.lastRunAt?'Last result '+esc(fmtDate(p.lastRunAt)):''}">${p.runCount} result${p.runCount===1?'':'s'}</span>`
     : '<span class="pj-foot-none">No results yet</span>';
-  return `<div class="pj-card pj-accent-${esc(p.accent||'slate')}${open?' open':''}">
+  const pending=!p.ready;
+  const watching=projectPushWatch?.slug===p.slug;
+  const pendingBody=`<div class="pj-pending-box">
+      <p class="pj-help" style="margin:0;"><strong>Not pushed from Claude yet.</strong> The board has its name but not its instructions or form. Push from Claude opens the project in claude.ai and copies the line to paste there; Claude sends the project over and this card comes alive.</p>
+      <code class="pj-help" style="display:block;white-space:pre-wrap;">${esc(projectPushPrompt(p))}</code>
+      <div class="pj-handoff-actions">
+        <button class="btn-primary" type="button" data-pj-push="${esc(p.slug)}">Push from Claude</button>
+        ${projectsState.canEdit?`<button class="btn-out" type="button" data-pj-edit="${esc(p.slug)}">Edit</button>`:''}
+        ${watching?'<span class="pj-help" style="margin:0;"><span class="spinner"></span> Waiting for Claude to push it…</span>':''}
+      </div>
+      ${projectsState.canEdit?'':'<p class="pj-help" style="margin:0;">Pushing needs an admin&rsquo;s connector in Claude.</p>'}
+    </div>`;
+  return `<div class="pj-card pj-accent-${esc(p.accent||'slate')}${open?' open':''}${pending?' pj-pending':''}">
     <button class="pj-card-head" data-pj-open="${esc(p.slug)}">
       <span class="pj-card-title">
         <span class="pj-name">${esc(p.name)}</span>
         ${p.pinned?'<span class="pj-pin" title="Pinned">Pinned</span>':''}
-        ${p.ready?'':'<span class="pj-nodraft" title="No instructions saved yet">Needs setup</span>'}
+        ${p.ready?'':'<span class="pj-nodraft" title="Not pushed from Claude yet">Not on the board yet</span>'}
         <span class="pj-chev">&#9654;</span>
       </span>
       ${p.description?`<span class="pj-desc">${esc(p.description)}</span>`:''}
       <span class="pj-foot">${foot}${runs}</span>
     </button>
-    ${open?`<div class="pj-body">
-      ${runBlocked?`<div class="pj-warn">${runBlocked.text}</div>`:''}
+    ${open&&pending?`<div class="pj-body">${pendingBody}</div>`:''}
+    ${open&&!pending?`<div class="pj-body">
+      ${runHow}
       ${fields.length?fields.map(f=>projectFieldHtml(p.slug,f)).join(''):'<p class="pj-help">This project takes no inputs.</p>'}
       <div class="pj-actions">
-        <button class="btn-primary" data-pj-run="${esc(p.slug)}"${(!p.ready||!projectsState.configured||projectThread[p.slug]?.running)?' disabled':''}>${projectThread[p.slug]?.turns?.length?'Run again':'Run'}</button>
+        <button class="btn-primary" data-pj-run="${esc(p.slug)}"${projectThread[p.slug]?.running?' disabled':''}>${projectThread[p.slug]?.turns?.length?'Run again':'Run'}</button>
+        <a class="btn-out" href="${esc(projectClaudeUrl(p))}" target="_blank" rel="noopener">Open in Claude</a>
         ${projectsState.canEdit?`<button class="btn-out" data-pj-edit="${esc(p.slug)}">Edit</button>`:''}
-        <span class="pj-model">${esc(p.model||projectsState.model||'')}</span>
       </div>
       ${projectThreadHtml(p.slug)}
       ${projectRunsHtml(p.slug)}
@@ -13474,34 +13587,143 @@ function projectCardHtml(p){
   </div>`;
 }
 
+const PROJECT_RUN_POLL_MS=4000;
+/* The line Push from Claude copies. It names the board's slug so Claude's
+   register_project lands on this card rather than beside it under a slightly
+   different name. */
+function projectPushPrompt(p){
+  return `Push this project to the support board: call register_project with name "${p.name}" and slug "${p.slug}", pass your own project instructions verbatim as instructions, a one-line description, and the information you ask people for as inputs.`;
+}
+// After Push, the card checks back until Claude's register_project arrives,
+// so it lights up without anyone pressing Refresh.
+let projectPushWatch=null;
+function watchProjectPush(slug){
+  clearInterval(projectPushWatch?.timer);
+  const until=Date.now()+15*60*1000;
+  projectPushWatch={slug,timer:setInterval(async()=>{
+    if(Date.now()>until){clearInterval(projectPushWatch.timer);projectPushWatch=null;return;}
+    try{
+      const res=await fetch('/api/projects',{credentials:'include'});
+      const data=await res.json();
+      const row=(data.rows||[]).find(r=>r.slug===slug);
+      if(row?.ready){
+        clearInterval(projectPushWatch.timer);projectPushWatch=null;
+        showToast(`"${row.name}" is on the board`,'ok');
+        loadProjects();
+      }
+    }catch(_){/* next tick */}
+  },8000)};
+}
+async function pushProjectFromClaude(slug){
+  const p=projectsState.rows.find(x=>x.slug===slug);
+  if(!p)return;
+  try{await navigator.clipboard?.writeText(projectPushPrompt(p));showToast('Copied - paste it in the project chat that just opened','ok');}
+  catch(_){showToast('Could not copy - select the line on the card instead','warn');}
+  window.open(p.claudeProjectId?projectClaudeUrl(p):'https://claude.ai/projects','_blank','noopener');
+  watchProjectPush(slug);
+  renderProjectsView();
+}
+async function addProjectPlaceholder(){
+  const name=String(prompt('Project name, as it is called in Claude:')||'').trim();
+  if(!name)return;
+  const url=String(prompt('Its claude.ai link (open the project, copy the address bar). Leave empty if you do not have it:')||'').trim();
+  try{
+    const res=await fetch('/api/projects/placeholder',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,url})});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok){showToast(data.message||data.error||`HTTP ${res.status}`,'warn');return;}
+    projectOpen=data.slug;
+    await loadProjects();
+    if(projectOpen)loadProjectRuns(projectOpen);
+  }catch(error){showToast(String(error?.message||error),'warn');}
+}
+// Where "Open Claude" goes: the project itself when the board knows its id
+// (synced over the Compliance API), otherwise a new chat - the run carries its
+// own instructions, so it works from any conversation with the connector on.
+function projectClaudeUrl(p){
+  return p?.claudeProjectId?`https://claude.ai/project/${encodeURIComponent(p.claudeProjectId)}`:'https://claude.ai/new';
+}
+/* What a queued run shows while it waits: the one line that hands it to Claude,
+   with Copy and Open Claude beside it. A runner PC takes it without anyone
+   doing this; the line is for when there is no runner, or it is off. */
+function projectHandoffHtml(p,handoff){
+  if(!handoff)return'';
+  return `<div class="pj-handoff">
+    <code>${esc(handoff)}</code>
+    <div class="pj-handoff-actions">
+      <button class="btn-primary pj-copy" type="button" data-pj-clip="${esc(handoff)}">Copy for Claude</button>
+      <a class="btn-out pj-copy" href="${esc(projectClaudeUrl(p))}" target="_blank" rel="noopener">Open Claude</a>
+      <span class="pj-help" style="margin:0;">Paste it in a Claude chat that has the support board connector switched on.</span>
+    </div>
+  </div>`;
+}
+document.addEventListener('click',e=>{
+  const btn=e.target.closest?.('[data-pj-clip]');
+  if(!btn)return;
+  navigator.clipboard?.writeText(btn.dataset.pjClip||'').then(()=>showToast('Copied - paste it into Claude','ok'),()=>showToast('Could not copy'));
+});
+function projectElapsedText(startedAt){
+  const secs=Math.max(0,Math.round((Date.now()-(startedAt||Date.now()))/1000));
+  return `${Math.floor(secs/60)}:${String(secs%60).padStart(2,'0')}`;
+}
+/* Run queues the job and the server answers with its id straight away. A
+   Claude with the support connector claims it and posts the answer back -
+   the board never calls a model, so no API key is involved. This queues it,
+   then checks back until Claude has answered or given up.
+   Returns the finished run row, or null when there is nothing to show (it did
+   not start, or the thread was reset while it was waiting). */
+async function startAndAwaitProjectRun(slug,p,url,body,t){
+  let runId;
+  try{
+    const res=await fetch(url,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok||data.ok===false||!data.runId){t.error=data?.message||data?.error||`HTTP ${res.status}`;return null;}
+    runId=data.runId;
+    t.runId=runId;t.status='queued';t.handoff=data.handoff||'';t.claimedBy='';
+    renderProjectsView();
+  }catch(error){
+    t.error=String(error?.message||error);
+    return null;
+  }
+  // Puts the Running row into Results, so it is visible there too.
+  loadProjectRuns(slug);
+  for(;;){
+    await new Promise(r=>setTimeout(r,PROJECT_RUN_POLL_MS));
+    if(projectThread[slug]!==t)return null;
+    document.querySelectorAll(`[data-pj-elapsed="${CSS.escape(slug)}"]`).forEach(el=>{el.textContent=projectElapsedText(t.startedAt);});
+    try{
+      const res=await fetch(`/api/projects/${p.id}/runs/${runId}`,{credentials:'include'});
+      if(res.status===404){t.error='This run is no longer on the board.';return null;}
+      const data=await res.json().catch(()=>({}));
+      const run=data?.run;
+      if(res.ok&&run&&(run.status==='done'||run.status==='error')){
+        if(run.status==='error')t.error=run.error||'The run failed.';
+        return run;
+      }
+      // Redrawn only when the state actually moves, so the form under it is
+      // not rebuilt every few seconds.
+      if(res.ok&&run&&run.status!==t.status){
+        t.status=run.status;t.claimedBy=run.claimedBy||'';t.handoff=run.handoff||'';
+        renderProjectsView();
+      }
+    }catch(_){/* one dropped check is not a failed run - try again next tick */}
+  }
+}
+
 // Run starts a fresh thread. Whatever was asked before belongs to the previous
 // set of inputs, so keeping it would only make the transcript lie.
 async function runProject(slug){
   const p=projectsState.rows.find(x=>x.slug===slug);
   if(!p)return;
-  projectThread[slug]={running:true,error:'',draft:'',turns:[]};
+  projectThread[slug]={running:true,error:'',draft:'',turns:[],startedAt:Date.now()};
   renderProjectsView();
   const t=projectThread[slug];
-  try{
-    const res=await fetch(`/api/projects/${p.id}/run`,{
-      method:'POST',credentials:'include',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({values:projectValues[slug]||{}})
-    });
-    const data=await res.json();
-    if(!res.ok||data.ok===false){
-      t.error=data?.message||data?.error||`HTTP ${res.status}`;
-    }else{
-      t.turns=[{role:'assistant',content:data.text||'(no output)',usage:data.usage,ms:data.ms}];
-    }
-  }catch(error){
-    t.error=String(error?.message||error);
-  }
+  const run=await startAndAwaitProjectRun(slug,p,`/api/projects/${p.id}/run`,{values:projectValues[slug]||{}},t);
+  if(projectThread[slug]!==t)return;
+  if(run?.status==='done')t.turns=[{role:'assistant',content:run.output||'(no output)',usage:run.usage,ms:run.ms}];
   t.running=false;
   renderProjectsView();
-  // The server keeps what it just ran, so the Results list below is now a
-  // result behind until it is re-read.
-  if(!t.error)loadProjectRuns(slug);
+  // The Results list still shows this run as Running until it is re-read.
+  loadProjectRuns(slug);
 }
 
 // A follow-up replays the whole thread. The server puts the project's
@@ -13516,36 +13738,26 @@ async function askProjectFollowUp(slug){
   // The question joins the transcript before the request goes out, so the
   // thread reads correctly while the answer is still being written.
   t.turns=[...t.turns,{role:'user',content:question}];
-  t.draft='';t.running=true;t.error='';
+  t.draft='';t.running=true;t.error='';t.startedAt=Date.now();
   renderProjectsView();
-  try{
-    const res=await fetch(`/api/projects/${p.id}/chat`,{
-      method:'POST',credentials:'include',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        values:projectValues[slug]||{},
-        turns:t.turns.map(x=>({role:x.role,content:x.content}))
-      })
-    });
-    const data=await res.json();
-    if(!res.ok||data.ok===false){
-      // Put the question back in the box rather than leaving it stranded at the
-      // end of a thread it never got an answer to - sending again would
-      // otherwise replay it twice.
-      t.turns=t.turns.slice(0,-1);
-      t.draft=question;
-      t.error=data?.message||data?.error||`HTTP ${res.status}`;
-    }else{
-      t.turns=[...t.turns,{role:'assistant',content:data.text||'(no output)',usage:data.usage,ms:data.ms}];
-    }
-  }catch(error){
+  const run=await startAndAwaitProjectRun(slug,p,`/api/projects/${p.id}/chat`,{
+    values:projectValues[slug]||{},
+    turns:t.turns.map(x=>({role:x.role,content:x.content}))
+  },t);
+  if(projectThread[slug]!==t)return;
+  if(run?.status==='done'){
+    t.turns=[...t.turns,{role:'assistant',content:run.output||'(no output)',usage:run.usage,ms:run.ms}];
+  }else{
+    // Put the question back in the box rather than leaving it stranded at the
+    // end of a thread it never got an answer to - sending again would
+    // otherwise replay it twice.
     t.turns=t.turns.slice(0,-1);
     t.draft=question;
-    t.error=String(error?.message||error);
+    if(!t.error)t.error='The follow-up did not finish.';
   }
   t.running=false;
   renderProjectsView();
-  if(!t.error)loadProjectRuns(slug);
+  loadProjectRuns(slug);
 }
 
 function resetProjectThread(slug){
@@ -13697,6 +13909,7 @@ function bindProjectCardHandlers(host){
     projectValues[slug][key]=e.target.value;
   }));
   host.querySelectorAll('[data-pj-run]').forEach(b=>b.addEventListener('click',()=>runProject(b.dataset.pjRun)));
+  host.querySelectorAll('[data-pj-push]').forEach(b=>b.addEventListener('click',()=>pushProjectFromClaude(b.dataset.pjPush)));
   host.querySelectorAll('[data-pj-edit]').forEach(b=>b.addEventListener('click',()=>openProjectEditor(b.dataset.pjEdit)));
   host.querySelectorAll('[data-pj-ask]').forEach(b=>b.addEventListener('click',()=>askProjectFollowUp(b.dataset.pjAsk)));
   host.querySelectorAll('[data-pj-reset]').forEach(b=>b.addEventListener('click',()=>resetProjectThread(b.dataset.pjReset)));
@@ -13766,14 +13979,14 @@ function renderProjectsView(){
     : '';
   const bits=[];
   if(mine.length)bits.push(`<span class="pj-count">${mine.length} project${mine.length===1?'':'s'}</span>`);
-  bits.push('<span>Pushed here from Claude</span>');
-  if(s.model)bits.push(`<span>&middot; ${esc(s.model)}</span>`);
+  bits.push('<span>Pushed here from Claude &middot; run by Claude, no API key</span>');
   const header=`<div class="pj-head">
       <div><div class="pj-title">Projects</div>
         <div class="pj-subtitle">${bits.join('')}</div></div>
       <div class="pj-controls">
         <input class="filter-sel pj-search" id="pj-search" type="text" placeholder="Search projects…" value="${esc(projectsQuery)}" autocomplete="off">
         ${syncBtn}
+        ${s.canEdit?'<button class="btn-out" type="button" id="pj-add-placeholder" title="Add a Claude project by name and link; it shows grayed until Claude pushes it">Add project</button>':''}
         <button class="btn-out" id="pj-refresh">Refresh</button>
       </div>
     </div>`;
@@ -13790,6 +14003,7 @@ function renderProjectsView(){
   host.innerHTML=header+body;
 
   host.querySelector('#pj-refresh')?.addEventListener('click',loadProjects);
+  host.querySelector('#pj-add-placeholder')?.addEventListener('click',addProjectPlaceholder);
   host.querySelector('#pj-claude-sync')?.addEventListener('click',syncClaudeProjects);
   host.querySelector('#pj-claude-disconnect')?.addEventListener('click',disconnectClaude);
   host.querySelector('#pj-zero-copy')?.addEventListener('click',()=>{
@@ -15407,7 +15621,7 @@ function applyTicketAgentSelection(id,previousAgent,selected){
      that is what this checks against. */
   const supportAgent=agentIdentityCode(selected);
   if(!supportAgent||!assignableSupportAgents().includes(supportAgent))return;
-  if(!ticketCSOwner[id]){
+  if(!ticketCSOwner[id]&&!manualCSOverride[id]){
     const cs=currentUserCSAgent();
     if(cs)ticketCSOwner[id]=cs;
   }
@@ -15438,6 +15652,12 @@ function isResolvedTicketHidden(id,now=Date.now()){
 function resolvedReviewHtml(id,csOwner){
   if(normalizeTicketStage(ticketState[id]||'new')!=='res')return'';
   const meta=ticketResolutionMeta[id]||{};
+  // Only reachable through My resolved: the review is over, so say how it
+  // ended instead of counting down a window that has already closed.
+  if(isArchivedTicket(id)||isResolvedTicketHidden(id)){
+    const how=meta.confirmedAt?`Confirmed by ${esc(meta.confirmedBy||'CS')}`:isArchivedTicket(id)?'Archived':'Past the review window';
+    return`<div style="margin-top:7px;padding:5px 8px;border:1px solid var(--green-200);border-radius:8px;background:var(--green-50);color:var(--green-800);font-size:12px;">${how} - off the main board</div>`;
+  }
   const resolvedAt=resolvedAtForTicket(id);
   const remaining=Math.max(0,RESOLVED_RETENTION_MS-(Date.now()-resolvedAt));
   const hoursLeft=Math.ceil(remaining/(60*60*1000));
@@ -16941,6 +17161,7 @@ function currentViewHash(){
   if(activeTicketNumber)params.set('q',activeTicketNumber);
   if(boardGrouping!=='none')params.set('g',boardGrouping);
   if(showSnoozed)params.set('snz','1');
+  if(showMyResolved)params.set('mr','1');
   if(!sortDesc)params.set('sort','asc');
   return params.toString();
 }
@@ -16957,6 +17178,7 @@ function applyViewHash(hash){
   activeTicketNumber=params.get('q')||'';
   boardGrouping=params.get('g')==='company'?'company':'none';
   showSnoozed=params.get('snz')==='1';
+  showMyResolved=params.get('mr')==='1'&&currentUserHasMyResolved();
   sortDesc=params.get('sort')!=='asc';
   syncFilterControlsToState();
   return true;
@@ -16976,6 +17198,7 @@ function syncFilterControlsToState(){
   document.getElementById('sla-filter-btn')?.classList.toggle('active',activeSLA);
   document.getElementById('jira-filter-btn')?.classList.toggle('active',activeJira);
   document.getElementById('snooze-filter-btn')?.classList.toggle('active',showSnoozed);
+  document.getElementById('my-resolved-filter-btn')?.classList.toggle('active',showMyResolved);
   document.getElementById('sort-desc')?.classList.toggle('active',sortDesc);
   document.getElementById('sort-asc')?.classList.toggle('active',!sortDesc);
 }
@@ -17032,12 +17255,17 @@ const COL_EMPTY_ICONS={new:'📥',inp:'🛠️',wus:'⏳',dft:'🧪',wct:'💬',
 // swimlane board can never disagree about what is on screen.
 function ticketPassesBoardFilters(t,agentFilter){
   if(ticketCategory[t.id]==='Spam')return false;
-  if(isArchivedTicket(t.id))return false;
+  // My resolved reaches past the archive and the retention window on purpose -
+  // that is the whole point of it - so those two checks stand down for it.
+  if(showMyResolved){if(!ticketIsMyResolved(t))return false;}
+  else if(isArchivedTicket(t.id))return false;
   if(!ticketVisibleToCurrentUser(t))return false;
   // A snoozed ticket is off the board. The Snoozed chip inverts that and shows
   // only what is sleeping, the same way the Overdue chip works.
-  if(showSnoozed){if(!isSnoozed(t.id))return false;}
-  else if(isSnoozed(t.id))return false;
+  if(!showMyResolved){
+    if(showSnoozed){if(!isSnoozed(t.id))return false;}
+    else if(isSnoozed(t.id))return false;
+  }
   const p=ticketPriority[t.id]||t.priority;
   if(activeP!=='all'&&p!==activeP)return false;
   if(!ticketMatchesAgentFilter(t,agentFilter))return false;
@@ -17046,7 +17274,7 @@ function ticketPassesBoardFilters(t,agentFilter){
   if(activeJira&&!ticketJira[t.id])return false; // Jira filter
   if(activeSLA&&!getSLAStatus(t.id)?.overdue)return false; // Overdue filter
   if(!ticketMatchesNumberQuery(t))return false;
-  if(isResolvedTicketHidden(t.id))return false;
+  if(!showMyResolved&&isResolvedTicketHidden(t.id))return false;
   return true;
 }
 
@@ -17665,7 +17893,7 @@ function renderBoard(){
     });
   }
 
-  updateWorkload();updateSpamBadge();updateArchiveBadge();updateJiraBadge();updateSnoozeBadge();updateWipWarning();renderBoardFilterNotice(visible.length);renderSelectionBar();
+  updateWorkload();updateSpamBadge();updateArchiveBadge();updateJiraBadge();updateSnoozeBadge();updateMyResolvedBadge();updateWipWarning();renderBoardFilterNotice(visible.length);renderSelectionBar();
 }
 
 /* Swimlanes.
@@ -17727,6 +17955,22 @@ function renderLaneBoard(visible){
   });
 }
 
+function ticketIsMyResolved(t){
+  if(ticketCategory[t.id]==='Spam')return false;
+  if(normalizeTicketStage(ticketState[t.id]||'new')!=='res')return false;
+  const me=supportIdentityCode();
+  return !!me&&ticketFilterAgentValues(t).assignee===me;
+}
+function currentUserHasMyResolved(){
+  return !currentUserIsAdmin()&&currentUserTeam()==='support';
+}
+function updateMyResolvedBadge(){
+  const badge=document.getElementById('my-resolved-count');
+  if(!badge)return;
+  const count=currentUserHasMyResolved()?allTickets.filter(ticketIsMyResolved).length:0;
+  badge.textContent=count>999?'999+':count;
+  badge.style.display=count?'inline-flex':'none';
+}
 function updateSnoozeBadge(){
   const btn=document.getElementById('snooze-filter-btn');
   const badge=document.getElementById('snooze-count');
@@ -17755,6 +17999,7 @@ function activeBoardFilterLabels(){
   if(activeJira)on.push('Jira only');
   if(activeSLA)on.push('overdue only');
   if(showSnoozed)on.push('snoozed only');
+  if(showMyResolved)on.push('my resolved');
   if(String(activeTicketNumber||'').trim())on.push(`search "${String(activeTicketNumber).trim()}"`);
   if(supportOnlyMine)on.push('only mine');
   return on;
@@ -17782,7 +18027,7 @@ function boardTicketCountWithoutFilters(){
 }
 function clearAllBoardFilters(){
   activeP='all';activeA='all';activeCompany='all';activeStage='all';activeLanguage='all';
-  activeSLA=false;activeJira=false;activeTicketNumber='';showSnoozed=false;
+  activeSLA=false;activeJira=false;activeTicketNumber='';showSnoozed=false;showMyResolved=false;
   // Only for whoever is actually offered the toggle - clearing it for CS would
   // be clearing a rule, not a filter.
   if(currentUserHasBoardScopeToggle())supportOnlyMine=false;
@@ -17855,6 +18100,7 @@ document.getElementById('sla-filter-btn').addEventListener('click',()=>{activeSL
 document.getElementById('group-filter')?.addEventListener('change',e=>{boardGrouping=e.target.value==='company'?'company':'none';saveLastWorkspaceSession();renderBoard();});
 document.getElementById('language-filter')?.addEventListener('change',e=>{activeLanguage=e.target.value||'all';saveLastWorkspaceSession();renderBoard();});
 document.getElementById('snooze-filter-btn')?.addEventListener('click',()=>{showSnoozed=!showSnoozed;document.getElementById('snooze-filter-btn').classList.toggle('active',showSnoozed);renderBoard();});
+document.getElementById('my-resolved-filter-btn')?.addEventListener('click',()=>{showMyResolved=!showMyResolved;document.getElementById('my-resolved-filter-btn').classList.toggle('active',showMyResolved);renderBoard();});
 document.getElementById('save-view-btn')?.addEventListener('click',saveCurrentView);
 document.getElementById('copy-view-btn')?.addEventListener('click',copyViewLink);
 document.getElementById('saved-views')?.addEventListener('change',e=>{const v=e.target.value;e.target.value='';if(v!=='')applySavedView(v);});
@@ -18470,11 +18716,10 @@ function emCopyFallback(text){
   }catch(_){return false;}
 }
 
-/* auto=true is the copy that happens by itself when a ticket opens: it must not
-   nag. A clipboard write needs the tab focused and the permission granted, and
-   an agent who alt-tabbed away mid-load does not need a red toast about it -
-   the Copy email button is right there. A copy they actually clicked always
-   says what happened. */
+/* Only the Copy email button calls this now - opening a ticket used to copy
+   the message by itself, and agents asked for that to stop. auto=true is kept
+   as a quiet mode (no failure toast) for any future caller that copies
+   unasked; a copy someone clicked always says what happened. */
 async function emCopyEmail({auto=false}={}){
   const p=emCopyPayload();
   if(!p||!p.text){if(!auto)showToast('There is nothing to copy yet - the message has not loaded','warn');return false;}
@@ -20128,7 +20373,6 @@ async function openEmailModal(ticket){
     emApplySheetMode();
     document.getElementById('email-modal').classList.add('open');
     trAutoTranslateBody(id);
-    emCopyEmail({auto:true});
     atShowForTicket(id);
     return;
   }
@@ -20216,10 +20460,6 @@ function emRenderEmailBody({ticket,id,bodyHtml,images,imagesError,uri}){
   }
   emSweepBrokenImages(rendered);
   emApplySheetMode();
-  // The message is on screen, so this is the moment it can be copied - and it
-  // happens before the translation pass below rewrites any of it, so what an
-  // agent pastes is the client's own words rather than machine output.
-  emCopyEmail({auto:true});
   // The body only exists now, so this is the first moment it can be translated.
   // If the agent already chose to read this ticket in another language, follow
   // through without making them ask again.

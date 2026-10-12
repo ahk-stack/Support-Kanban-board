@@ -568,10 +568,36 @@ card per project that expands into **a form built from that project's own
 inputs** — Q-SEO Implementation asks for a URL, account ID, license key and a
 server-language dropdown; Q-Share Mapping asks for a URL and a teamId.
 
-Pressing Run sends the project's instructions as the system prompt and the form
-values as the message, and shows the answer in place with timing and token
-usage. The answer opens a thread: **Ask a follow-up** keeps going against the
-same project without going back to the form.
+**The board never calls a model and needs no Anthropic API key.** Claude does
+the work, on a Claude account the team already has:
+
+1. **Run** queues the job (form values, and the project's instructions) and
+   the card shows *Waiting for Claude*.
+2. A Claude with the support board connector takes it with `claim_project_run`.
+   Either a runner PC does this by itself (`scripts/project-runner.ps1`, below),
+   or someone clicks **Copy for Claude** on the card and pastes the one line
+   into a claude.ai chat with the connector switched on.
+3. Claude does the work with its own tools — web, browser, any other MCP
+   servers it has — and calls `post_project_run` with the run's id.
+4. The card shows *Claude working*, then the answer under **Results**. Closing
+   the tab does not matter; the answer lands either way.
+
+**Ask a follow-up** queues another run carrying the conversation so far.
+
+Projects reach the board the same way: an admin opens the project in Claude and
+asks it to register itself (**Add from Claude** copies the line to paste). There
+is no free API that lists claude.ai Projects, so Claude pushes them rather than
+the board pulling them.
+
+### The runner PC (optional)
+
+`scripts/project-runner.ps1` turns Run into a hands-off button. Leave it running
+on an always-on Windows PC with Claude Code signed in and the board connector
+added (`claude mcp add --scope user ...`; setup steps are at the top of the
+script). It checks the queue over plain HTTP every 20 seconds, so an empty queue
+costs nothing, and starts `claude -p` only when a run is waiting. Runs count
+against the Claude account signed in on that PC. Without a runner, runs wait
+for someone to paste the hand-off line.
 
 ### Why the catalogue lives here and not in Claude
 
@@ -593,12 +619,11 @@ prompt would be worse than an honest gap. Until one is filled in the card reads
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | unset | Required. Without it the panel lists projects but nothing can be run, and says so. |
-| `PROJECT_MODEL` | `claude-opus-5` | Model used for a run, unless a project overrides it. |
+| `PROJECT_RUN_STALE_MINUTES` | `120` | A run Claude claimed but never answered is reported as failed after this long. |
+| `PROJECT_QUEUE_EXPIRE_HOURS` | `72` | A run nobody picked up is dropped after this long. |
 | `CLAUDE_CREDENTIAL_SECRET` | falls back to `SESSION_SECRET` | Wraps each agent's Compliance Access Key before it is stored. See below. |
 
-`ANTHROPIC_API_KEY` is read from the environment on every run and is never sent
-to the browser — the panel is told only whether one is set.
+No `ANTHROPIC_API_KEY` is needed for projects.
 
 ### The Compliance Access Key is encrypted at rest
 
@@ -773,7 +798,10 @@ everyone, who then simply sign in again.
 1. In Google Cloud, enable the **Google Sheets API**, create a service account
    and download a JSON key for it.
 2. Share the sheet with the service account's email (Viewer is enough).
-3. Set `GOOGLE_SERVICE_ACCOUNT_JSON` to the key file's contents, raw or base64.
+3. Either upload the key file from the board - **Account > Google account**
+   (admins only), stored encrypted in `OAuthToken` (`google-service-account`)
+   and checked against the sheet on save - or set `GOOGLE_SERVICE_ACCOUNT_JSON`
+   to the key file's contents, raw or base64 (the environment wins).
 
 **Status and the SLA.** The bug's **Status** column is read with the row (the
 value the dropdown shows). While it is anything other than DONE the ticket's SLA

@@ -4356,8 +4356,8 @@ const GOOGLE_OAUTH_REDIRECT_URI = String(process.env.GOOGLE_OAUTH_REDIRECT_URI |
 const GOOGLE_PROVIDER_PREFIX = 'google:';
 const googleProviderKey = userId => `${GOOGLE_PROVIDER_PREFIX}${Number(userId)}`;
 
-function googleServiceAccount() {
-  const raw = String(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '').trim();
+function parseGoogleServiceAccountKey(raw) {
+  raw = String(raw || '').trim();
   if (!raw) return null;
   try {
     const json = raw.startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8');
@@ -4369,9 +4369,27 @@ function googleServiceAccount() {
   }
 }
 
+/* The service account the board reads the Velma sheet with - no one signs in.
+
+   Set in the environment (GOOGLE_SERVICE_ACCOUNT_JSON, which wins) or uploaded
+   once by an admin from Account > Google account, stored in OAuthToken as
+   "google-service-account" with the whole key file encrypted. */
+const GOOGLE_SERVICE_ACCOUNT_PROVIDER = 'google-service-account';
+let googleServiceAccountCache = { at: 0, value: null };
+async function googleServiceAccount() {
+  const fromEnv = parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  if (fromEnv) return { ...fromEnv, source: 'env' };
+  if (googleServiceAccountCache.at && Date.now() - googleServiceAccountCache.at < 60 * 1000) return googleServiceAccountCache.value;
+  const row = await getStoredOAuthTokens(GOOGLE_SERVICE_ACCOUNT_PROVIDER);
+  const parsed = parseGoogleServiceAccountKey(decryptClaudeCredential(row?.accessToken || ''));
+  const value = parsed ? { ...parsed, source: 'board', savedBy: row?.metadata?.savedBy || null } : null;
+  googleServiceAccountCache = { at: Date.now(), value };
+  return value;
+}
+
 let googleTokenCache = { token: '', expiresAt: 0 };
 async function googleServiceAccountToken(account) {
-  if (googleTokenCache.token && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
+  if (googleTokenCache.token && googleTokenCache.email === account.email && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
   const nowSec = Math.floor(Date.now() / 1000);
   const encode = obj => Buffer.from(JSON.stringify(obj)).toString('base64url');
   const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({
@@ -4389,7 +4407,7 @@ async function googleServiceAccountToken(account) {
   });
   const out = await res.json().catch(() => ({}));
   if (!res.ok || !out.access_token) throw new Error(`google_auth_failed: ${out.error_description || out.error || res.status}`);
-  googleTokenCache = { token: out.access_token, expiresAt: Date.now() + Number(out.expires_in || 3600) * 1000 };
+  googleTokenCache = { token: out.access_token, email: account.email, expiresAt: Date.now() + Number(out.expires_in || 3600) * 1000 };
   return googleTokenCache.token;
 }
 
@@ -4490,7 +4508,7 @@ async function googleConnectionToken(connection) {
 // account they just connected.
 async function googleSheetCredentials(preferUserId = null) {
   const out = [];
-  const account = googleServiceAccount();
+  const account = await googleServiceAccount();
   if (account) out.push({ kind: 'service_account', label: account.email, token: () => googleServiceAccountToken(account) });
   if (await googleOAuthClient()) {
     const connections = await listGoogleConnections();
@@ -4507,7 +4525,7 @@ async function googleSheetCredentials(preferUserId = null) {
 async function googleSheetsGet(pathAndQuery, { preferUserId = null } = {}) {
   const credentials = await googleSheetCredentials(preferUserId);
   if (!credentials.length) {
-    throw new Error('velma_sheet_not_configured: connect a Google account that can open the Velma bug sheet (Account > Google account), or set GOOGLE_SERVICE_ACCOUNT_JSON on the server');
+    throw new Error('velma_sheet_not_configured: upload a service account key that can open the Velma bug sheet (Account > Google account), or set GOOGLE_SERVICE_ACCOUNT_JSON on the server');
   }
   // Each credential in turn: a person who connected but was never given
   // access to the sheet must not stop the next one from being tried.
@@ -4993,7 +5011,7 @@ app.get('/auth/google/callback', requireAuth, async (req, res) => {
 app.get('/auth/google/status', requireAuth, async (req, res) => {
   const mine = await getStoredOAuthTokens(googleProviderKey(req.session.userId));
   const connections = await listGoogleConnections();
-  const account = googleServiceAccount();
+  const account = await googleServiceAccount();
   const meta = (mine?.metadata && typeof mine.metadata === 'object') ? mine.metadata : {};
   res.json({
     configured: !!(await googleOAuthClient()),
@@ -5003,6 +5021,7 @@ app.get('/auth/google/status', requireAuth, async (req, res) => {
     clientSource: (await googleOAuthClient())?.source || null,
     redirectUri: googleRedirectUri(req),
     serviceAccount: account ? account.email : null,
+    serviceAccountSource: account ? account.source : null,
     connected: !!mine?.refreshToken,
     email: meta.email || null,
     connectedAt: meta.connectedAt || null,
@@ -5028,6 +5047,48 @@ app.post('/auth/google/disconnect', requireAuth, async (req, res) => {
       body: new URLSearchParams({ token: refreshToken })
     }).catch(() => null);
   }
+  velmaSheetCache = { at: 0, rows: null, title: '' };
+  res.json({ ok: true });
+});
+
+// The no-sign-in way: an admin uploads the service account's JSON key once.
+// The key is checked against the sheet straight away, so the admin learns
+// there and then whether the sheet still has to be shared with its email.
+app.put('/api/google/service-account', requireAdmin, async (req, res) => {
+  try {
+    if (parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)) return res.status(409).json({ error: 'set_in_environment' });
+    const raw = String(req.body?.key || '').trim();
+    let parsedJson = null;
+    try { parsedJson = JSON.parse(raw); } catch (_) {}
+    if (!parsedJson || parsedJson.type !== 'service_account') return res.status(400).json({ error: 'not_a_service_account_key' });
+    const parsed = parseGoogleServiceAccountKey(raw);
+    if (!parsed) return res.status(400).json({ error: 'not_a_service_account_key' });
+    // Prove the key works before keeping it.
+    try { await googleServiceAccountToken(parsed); } catch (error) { return res.status(400).json({ error: String(error.message || error) }); }
+    await setStoredOAuthTokens(GOOGLE_SERVICE_ACCOUNT_PROVIDER, {
+      accessToken: encryptClaudeCredential(raw),
+      metadata: { email: parsed.email, savedBy: String(req.session.username || '').toUpperCase() || null, savedAt: new Date().toISOString() }
+    });
+    googleServiceAccountCache = { at: 0, value: null };
+    velmaSheetCache = { at: 0, rows: null, title: '' };
+    let sheetAccess = 'ok';
+    let sheetError = null;
+    try {
+      await readVelmaBugSheet({ fresh: true });
+    } catch (error) {
+      sheetError = String(error.message || error);
+      sheetAccess = /not_shared|403|404|permission/i.test(sheetError) ? 'not_shared' : 'unverified';
+    }
+    return res.json({ ok: true, email: parsed.email, sheetAccess, sheetError });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+app.delete('/api/google/service-account', requireAdmin, async (req, res) => {
+  if (parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)) return res.status(409).json({ error: 'set_in_environment' });
+  await prisma.oAuthToken.delete({ where: { provider: GOOGLE_SERVICE_ACCOUNT_PROVIDER } }).catch(() => null);
+  googleServiceAccountCache = { at: 0, value: null };
+  googleTokenCache = { token: '', expiresAt: 0 };
   velmaSheetCache = { at: 0, rows: null, title: '' };
   res.json({ ok: true });
 });
@@ -6682,7 +6743,12 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
 // ---------------------------------------------------------------------------
 // Projects
 //
-// The team's Claude projects, runnable from the board.
+// The team's Claude projects, runnable from the board - with no Anthropic API
+// key on this deployment. The board never calls a model. Run puts a job in a
+// queue; a Claude that has the support connector (claude.ai, or Claude Code on
+// a machine running scripts/project-runner.ps1) claims it with
+// claim_project_run, does the work with its own tools, and hands the answer
+// back with post_project_run. The panel watches the job until it lands.
 //
 // The board keeps a local registry because ordinary Claude API keys cannot list
 // claude.ai Projects. Enterprise/eligible orgs can sync them through the
@@ -6697,6 +6763,13 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
 const PROJECT_SCOPES = new Set(['mine', 'org', 'shared']);
 const PROJECT_FIELD_TYPES = new Set(['text', 'textarea', 'number', 'select', 'url']);
 const PROJECT_MODEL = String(process.env.PROJECT_MODEL || 'claude-opus-5').trim();
+// A run Claude claimed but never posted back - the chat was closed, the runner
+// PC went to sleep - is reported as failed after this long, so the panel stops
+// waiting on it.
+const PROJECT_RUN_STALE_MS = Math.max(10, Number(process.env.PROJECT_RUN_STALE_MINUTES || 120)) * 60 * 1000;
+// A run nobody has picked up is dropped after this long. Days rather than
+// minutes: with no runner switched on, a queued run waits for a person.
+const PROJECT_QUEUE_EXPIRE_MS = Math.max(1, Number(process.env.PROJECT_QUEUE_EXPIRE_HOURS || 72)) * 60 * 60 * 1000;
 const CLAUDE_COMPLIANCE_API_BASE = String(process.env.CLAUDE_COMPLIANCE_API_BASE || 'https://api.anthropic.com').replace(/\/+$/, '');
 const CLAUDE_PROJECT_SYNC_LIMIT = Math.min(500, Math.max(1, Number(process.env.CLAUDE_PROJECT_SYNC_LIMIT || 100)));
 // Runs cost money and are started by a button, so they get their own ceiling
@@ -6773,6 +6846,17 @@ async function ensureProjectRunTable() {
     )
   `;
   await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProjectRun_projectId_idx" ON "ClaudeProjectRun"("projectId","createdAt" DESC)`;
+  // A run from the board is a queue entry first: 'queued' until a Claude claims
+  // it, 'running' while that Claude works, then 'done' or 'error'. 'done' is the
+  // default because every row written before the queue existed was finished.
+  // "request" is what the claiming Claude is handed - the brief built from the
+  // form, and any follow-up turns - so the job carries everything it needs.
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'done'`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "error" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "request" JSONB`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "claimedBy" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "claimedAt" TIMESTAMP(3)`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProjectRun_status_idx" ON "ClaudeProjectRun"("status","createdAt")`;
 }
 
 // The inputs a run was given, flattened to label/value pairs so the panel can
@@ -6804,19 +6888,59 @@ async function saveProjectRun(entry) {
             ${entry.outputTokens == null ? null : Number(entry.outputTokens)}, ${String(entry.createdBy || '').slice(0, 120)})
     RETURNING "id"
   `;
-  // Only the last few runs of a project are worth keeping; the panel shows a
-  // history, not an archive, and the output column is large.
+  await pruneProjectRuns(entry.projectId);
+  return Array.isArray(rows) ? rows[0]?.id ?? null : null;
+}
+
+// Only the last few runs of a project are worth keeping; the panel shows a
+// history, not an archive, and the output column is large. A run still waiting
+// or in progress is never pruned out from under the Claude working on it.
+async function pruneProjectRuns(projectId) {
   await prisma.$executeRaw`
     DELETE FROM "ClaudeProjectRun"
-    WHERE "projectId" = ${Number(entry.projectId)}
+    WHERE "projectId" = ${Number(projectId)}
+      AND "status" NOT IN ('queued', 'running')
       AND "id" NOT IN (
         SELECT "id" FROM "ClaudeProjectRun"
-        WHERE "projectId" = ${Number(entry.projectId)}
+        WHERE "projectId" = ${Number(projectId)}
         ORDER BY "createdAt" DESC, "id" DESC
         LIMIT ${PROJECT_RUN_KEEP}
       )
   `;
+}
+
+async function queueProjectRunRow(entry) {
+  await ensureProjectRunTable();
+  const rows = await prisma.$queryRaw`
+    INSERT INTO "ClaudeProjectRun" ("projectId","source","title","inputs","output","model","status","request","createdBy")
+    VALUES (${Number(entry.projectId)}, 'board', ${String(entry.title || '').slice(0, 200)},
+            ${JSON.stringify(entry.inputs || [])}::jsonb, '', '', 'queued',
+            ${JSON.stringify(entry.request || {})}::jsonb, ${String(entry.createdBy || '').slice(0, 120)})
+    RETURNING "id"
+  `;
+  await pruneProjectRuns(entry.projectId);
   return Array.isArray(rows) ? rows[0]?.id ?? null : null;
+}
+
+async function expireStaleProjectRuns() {
+  const claimCutoff = new Date(Date.now() - PROJECT_RUN_STALE_MS);
+  const queueCutoff = new Date(Date.now() - PROJECT_QUEUE_EXPIRE_MS);
+  await prisma.$executeRaw`
+    UPDATE "ClaudeProjectRun" SET "status" = 'error',
+      "error" = 'Claude picked this run up but never posted an answer back. Run it again.'
+    WHERE "status" = 'running' AND COALESCE("claimedAt", "createdAt") < ${claimCutoff}
+  `;
+  await prisma.$executeRaw`
+    UPDATE "ClaudeProjectRun" SET "status" = 'error',
+      "error" = 'Nobody picked this run up, so it was dropped. Run it again, then hand it to Claude.'
+    WHERE "status" = 'queued' AND "createdAt" < ${queueCutoff}
+  `;
+}
+
+// The words that hand a queued run to Claude. Shown on the board for someone to
+// paste into claude.ai, and used verbatim by the runner script.
+function projectRunHandoffPrompt(runId) {
+  return `Use the support board connector: call claim_project_run with runId ${runId}, do the work it describes with the tools you have, then call post_project_run with runId ${runId} and the finished answer.`;
 }
 
 function projectRunRow(row) {
@@ -6826,6 +6950,10 @@ function projectRunRow(row) {
     title: row.title || '',
     inputs: Array.isArray(row.inputs) ? row.inputs : [],
     output: row.output || '',
+    status: ['queued', 'running', 'error'].includes(row.status) ? row.status : 'done',
+    error: row.error || '',
+    claimedBy: row.claimedBy || '',
+    handoff: row.status === 'queued' ? projectRunHandoffPrompt(row.id) : '',
     model: row.model || '',
     ms: row.ms == null ? null : Number(row.ms),
     usage: { inputTokens: row.inputTokens ?? null, outputTokens: row.outputTokens ?? null },
@@ -7117,7 +7245,10 @@ function projectRow(row, { includeInstructions = false } = {}) {
     // API, or pushed in by register_project, which writes createdBy 'mcp:'.
     // The panel shows only these.
     fromClaude: row.source === 'claude' || String(row.createdBy || '').startsWith('mcp:'),
+    // Added on the board by name and link, waiting for Claude to push the rest.
+    placeholder: row.source === 'placeholder',
     sourceUserEmail: row.sourceUserEmail || '',
+    claudeProjectId: row.claudeProjectId || '',
     syncedAt: row.syncedAt || null,
     runCount: Number(row.runCount || 0),
     lastRunAt: row.lastRunAt || null,
@@ -7140,7 +7271,7 @@ app.get('/api/projects', requireAuth, async (req, res) => {
       FROM "ClaudeProject" p
       LEFT JOIN (
         SELECT "projectId", count(*)::int AS "n", max("createdAt") AS "last"
-        FROM "ClaudeProjectRun" GROUP BY "projectId"
+        FROM "ClaudeProjectRun" WHERE "status" = 'done' GROUP BY "projectId"
       ) r ON r."projectId" = p."id"
       ORDER BY p."pinned" DESC, p."updatedAt" DESC`;
     const isAdmin = isAdminRole(req.session.role);
@@ -7150,7 +7281,6 @@ app.get('/api/projects', requireAuth, async (req, res) => {
       ok: true,
       canEdit: isAdmin,
       model: PROJECT_MODEL,
-      configured: !!String(process.env.ANTHROPIC_API_KEY || '').trim(),
       claude: claudeConnectionStatusFromTokens(claudeTokens),
       rows: list
     });
@@ -7265,6 +7395,42 @@ app.post('/api/projects', requireAdmin, async (req, res) => {
   }
 });
 
+/* A project the board knows of but does not have yet.
+
+   Nothing free can list a person's claude.ai projects, so the board cannot
+   discover them by itself. An admin adds one by name and its claude.ai link;
+   the card shows grayed out with a Push from Claude button, which opens that
+   project and hands Claude the line that makes it register itself under this
+   exact slug. register_project then fills the same row in - instructions,
+   inputs, description - and the card comes alive. */
+const CLAUDE_PROJECT_URL_ID = /claude\.ai\/project\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+app.post('/api/projects/placeholder', requireAdmin, async (req, res) => {
+  try {
+    await ensureProjectTable();
+    const name = String(req.body?.name || '').trim().slice(0, 120);
+    if (!name) return res.status(400).json({ error: 'name_required', message: 'Give the project the name it has in Claude.' });
+    const link = String(req.body?.url || '').trim();
+    const match = link.match(CLAUDE_PROJECT_URL_ID);
+    if (link && !match) return res.status(400).json({ error: 'invalid_url', message: 'That is not a claude.ai project link - it should look like https://claude.ai/project/…' });
+    const claudeProjectId = match ? match[1].toLowerCase() : null;
+    if (claudeProjectId) {
+      const taken = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" WHERE "claudeProjectId" = ${claudeProjectId} LIMIT 1`;
+      if (Array.isArray(taken) && taken[0]) return res.status(409).json({ error: 'already_added', message: `That project is already on the board as "${taken[0].name}".` });
+    }
+    const existing = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" WHERE "slug" = ${projectSlugFromName(name)} OR lower("name") = ${name.toLowerCase()} LIMIT 1`;
+    if (Array.isArray(existing) && existing[0]) return res.status(409).json({ error: 'already_added', message: `"${existing[0].name}" is already on the board.` });
+    const slug = await uniqueProjectSlug(name);
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProject" ("slug","name","scope","instructions","inputs","accent","createdBy","updatedAt","source","claudeProjectId")
+      VALUES (${slug}, ${name}, 'org', '', '[]'::jsonb, 'slate', ${String(req.session.username || '')}, CURRENT_TIMESTAMP, 'placeholder', ${claudeProjectId})
+    `;
+    return res.json({ ok: true, slug });
+  } catch (error) {
+    console.error('Project placeholder failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_save_failed' });
+  }
+});
+
 app.delete('/api/projects/:id', requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -7349,70 +7515,16 @@ async function loadRunnableProject(id) {
   return { project };
 }
 
-async function callProjectModel(project, messages) {
-  const client = new Anthropic({ apiKey: String(process.env.ANTHROPIC_API_KEY || '').trim(), maxRetries: 2 });
-  // Streamed and awaited whole: these answers are long, and a non-streaming
-  // request of that size is what trips an HTTP timeout.
-  const stream = client.messages.stream({
-    model: String(project.model || PROJECT_MODEL),
-    max_tokens: 32_000,
-    system: [{ type: 'text', text: String(project.instructions || '').trim(), cache_control: { type: 'ephemeral' } }],
-    thinking: { type: 'adaptive' },
-    output_config: { effort: 'high' },
-    messages: messages.map(m => ({ role: m.role, content: [{ type: 'text', text: m.content }] }))
-  });
-  return stream.finalMessage();
-}
-
-function projectRunResponse(message, project, started) {
-  // A policy decline arrives as a normal 200 with this stop reason, so it has
-  // to be checked before the content is read or the panel shows an empty box.
-  if (message.stop_reason === 'refusal') {
-    return {
-      status: 200,
-      body: {
-        ok: false, refused: true,
-        message: 'Claude declined to run this one. Rephrase the inputs, or check the project instructions.',
-        category: message.stop_details?.category || null
-      }
-    };
-  }
-  const text = (message.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
-  return {
-    status: 200,
-    body: {
-      ok: true,
-      project: { id: project.id, name: project.name },
-      text,
-      usage: {
-        inputTokens: message.usage?.input_tokens ?? null,
-        outputTokens: message.usage?.output_tokens ?? null,
-        cacheRead: message.usage?.cache_read_input_tokens ?? null
-      },
-      ms: Date.now() - started
-    }
-  };
-}
-
-function projectRunError(error, res) {
-  const detail = String(error?.message || error);
-  console.error('Project run failed:', detail);
-  if (error instanceof Anthropic.AuthenticationError) return res.status(502).json({ error: 'auth_failed', message: "The server's Anthropic API key was rejected." });
-  if (error instanceof Anthropic.RateLimitError) return res.status(429).json({ error: 'rate_limited', message: 'Anthropic is rate limiting this key right now. Try again shortly.' });
-  if (error instanceof Anthropic.APIConnectionError) return res.status(504).json({ error: 'unreachable', message: 'Could not reach the Anthropic API.' });
-  return res.status(502).json({ error: 'project_run_failed', message: detail.slice(0, 300) });
-}
-
 // Shared by /run and /chat: the only difference between them is whether any
 // turns follow the form brief.
+//
+// Neither calls a model. They queue the job - brief, follow-up turns and all -
+// and return its id; a Claude with the connector claims and answers it, and
+// the panel polls the row until it lands. No API key is involved anywhere.
 async function handleProjectRun(req, res, { withHistory }) {
-  const started = Date.now();
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
-    if (!String(process.env.ANTHROPIC_API_KEY || '').trim()) {
-      return res.status(503).json({ error: 'not_configured', message: 'ANTHROPIC_API_KEY is not set on this deployment, so the board cannot run a project.' });
-    }
 
     const loaded = await loadRunnableProject(id);
     if (!loaded.project) return res.status(loaded.status).json({ error: loaded.error, ...(loaded.message ? { message: loaded.message } : {}) });
@@ -7425,35 +7537,18 @@ async function handleProjectRun(req, res, { withHistory }) {
     if (history.error) return res.status(400).json({ error: 'invalid_history', message: history.error });
     if (withHistory && !history.turns.length) return res.status(400).json({ error: 'invalid_history', message: 'There is no question to answer yet.' });
 
-    const message = await callProjectModel(project, [
-      { role: 'user', content: brief || 'Run this project.' },
-      ...history.turns
-    ]);
-    const result = projectRunResponse(message, project, started);
-    // Persisted after the response is built but before it is sent, so a stored
-    // run and the one on screen cannot disagree. A failure to store is logged
-    // and swallowed: losing the history entry is not worth losing the answer.
-    if (result.body?.ok && result.body.text) {
-      try {
-        await saveProjectRun({
-          projectId: project.id,
-          source: 'board',
-          title: withHistory ? 'Follow-up' : 'Run',
-          inputs: projectRunInputPairs(project, req.body?.values),
-          output: result.body.text,
-          model: String(project.model || PROJECT_MODEL),
-          ms: result.body.ms,
-          inputTokens: result.body.usage?.inputTokens,
-          outputTokens: result.body.usage?.outputTokens,
-          createdBy: req.session?.username || ''
-        });
-      } catch (storeError) {
-        console.error('Project run not stored:', storeError?.message || storeError);
-      }
-    }
-    return res.status(result.status).json(result.body);
+    const runId = await queueProjectRunRow({
+      projectId: project.id,
+      title: withHistory ? 'Follow-up' : 'Run',
+      inputs: projectRunInputPairs(project, req.body?.values),
+      request: { brief: brief || '', turns: history.turns },
+      createdBy: req.session?.username || ''
+    });
+    if (!runId) return res.status(500).json({ error: 'project_run_failed', message: 'Could not queue the run.' });
+    return res.status(202).json({ ok: true, runId, status: 'queued', handoff: projectRunHandoffPrompt(runId) });
   } catch (error) {
-    return projectRunError(error, res);
+    console.error('Project run could not be queued:', String(error?.message || error));
+    return res.status(500).json({ error: 'project_run_failed', message: 'Could not queue the run.' });
   }
 }
 
@@ -7462,6 +7557,7 @@ app.get('/api/projects/:id/runs', requireAuth, async (req, res) => {
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
   try {
     await ensureProjectRunTable();
+    await expireStaleProjectRuns();
     const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), PROJECT_RUN_KEEP);
     const rows = await prisma.$queryRaw`
       SELECT * FROM "ClaudeProjectRun" WHERE "projectId" = ${id}
@@ -7470,6 +7566,25 @@ app.get('/api/projects/:id/runs', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Project run history failed:', error?.message || error);
     return res.status(500).json({ error: 'project_runs_failed' });
+  }
+});
+
+// What the panel polls while a run is in progress.
+app.get('/api/projects/:id/runs/:runId', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  const runId = Number(req.params.runId);
+  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(runId) || runId <= 0) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    await ensureProjectRunTable();
+    await expireStaleProjectRuns();
+    const rows = await prisma.$queryRaw`
+      SELECT * FROM "ClaudeProjectRun" WHERE "id" = ${runId} AND "projectId" = ${id} LIMIT 1`;
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return res.status(404).json({ error: 'run_not_found' });
+    return res.json({ ok: true, run: projectRunRow(row) });
+  } catch (error) {
+    console.error('Project run lookup failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_run_lookup_failed' });
   }
 });
 
@@ -8303,17 +8418,88 @@ async function mcpListBoardProjects() {
   }));
 }
 
-// Claude ran the project on its own side and hands the answer over. This is
-// what makes the panel useful on a deployment with no ANTHROPIC_API_KEY: the
-// board never calls a model, it stores and renders what came back.
+/* Claude takes a queued run. Returns everything the job needs - the project's
+   instructions, the brief from the form, any follow-up turns - so it can be
+   done from any conversation, not only one opened inside that project.
+   The claim is a conditional update, so two runners polling the same queue
+   cannot both take one job. */
+async function mcpClaimProjectRun(apiUser, args) {
+  await ensureProjectTable();
+  await ensureProjectRunTable();
+  await expireStaleProjectRuns();
+  const wanted = Number(args?.runId) || 0;
+  const who = 'mcp:' + (apiUser?.username || '');
+  const rows = wanted
+    ? await prisma.$queryRaw`
+        UPDATE "ClaudeProjectRun" SET "status" = 'running', "claimedBy" = ${who}, "claimedAt" = CURRENT_TIMESTAMP
+        WHERE "id" = ${wanted} AND "status" = 'queued'
+        RETURNING *`
+    : await prisma.$queryRaw`
+        UPDATE "ClaudeProjectRun" SET "status" = 'running', "claimedBy" = ${who}, "claimedAt" = CURRENT_TIMESTAMP
+        WHERE "id" = (SELECT "id" FROM "ClaudeProjectRun" WHERE "status" = 'queued' ORDER BY "createdAt" ASC, "id" ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
+          AND "status" = 'queued'
+        RETURNING *`;
+  const run = Array.isArray(rows) ? rows[0] : null;
+  if (!run) {
+    if (!wanted) return { ok: true, claimed: false, status: 'Nothing is waiting in the board queue.' };
+    const existing = await prisma.$queryRaw`SELECT "status","claimedBy" FROM "ClaudeProjectRun" WHERE "id" = ${wanted} LIMIT 1`;
+    const row = Array.isArray(existing) ? existing[0] : null;
+    if (!row) throw Object.assign(new Error(`run_not_found: there is no run ${wanted} on the board.`), { status: 404 });
+    throw Object.assign(new Error(`run_not_available: run ${wanted} is ${row.status}${row.claimedBy ? ` (taken by ${row.claimedBy})` : ''}, so there is nothing to claim.`), { status: 409 });
+  }
+  const projects = await prisma.$queryRaw`SELECT "name","instructions" FROM "ClaudeProject" WHERE "id" = ${run.projectId} LIMIT 1`;
+  const project = Array.isArray(projects) ? projects[0] : null;
+  const request = run.request && typeof run.request === 'object' ? run.request : {};
+  return {
+    ok: true,
+    claimed: true,
+    runId: run.id,
+    project: project?.name || '',
+    requestedBy: run.createdBy || '',
+    instructions: String(project?.instructions || ''),
+    brief: String(request.brief || ''),
+    followUp: Array.isArray(request.turns) ? request.turns : [],
+    howToFinish: [
+      'Follow "instructions" as your project instructions, with "brief" as what the person asked for.',
+      Array.isArray(request.turns) && request.turns.length
+        ? '"followUp" is the conversation so far: your earlier answer, then the question to answer now. Answer the last question.'
+        : '',
+      'Nobody is watching the board while you work, so do not stop to ask questions: make reasonable assumptions and list them at the end.',
+      'Anything that would be a file, put in the answer as a fenced code block headed by its file name.',
+      `When finished, call post_project_run with runId ${run.id} and the full answer as output (Markdown). If you cannot do it, call post_project_run with runId ${run.id} and error set to the reason, so the board stops waiting.`
+    ].filter(Boolean).join('\n')
+  };
+}
+
+async function mcpListQueuedProjectRuns() {
+  await ensureProjectTable();
+  await ensureProjectRunTable();
+  await expireStaleProjectRuns();
+  const rows = await prisma.$queryRaw`
+    SELECT r."id", r."status", r."title", r."createdBy", r."createdAt", r."claimedBy", p."name" AS "project"
+    FROM "ClaudeProjectRun" r JOIN "ClaudeProject" p ON p."id" = r."projectId"
+    WHERE r."status" IN ('queued', 'running') ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 50`;
+  return (Array.isArray(rows) ? rows : []).map(r => ({
+    runId: r.id, project: r.project, status: r.status, title: r.title || '', requestedBy: r.createdBy || '',
+    queuedAt: r.createdAt, claimedBy: r.claimedBy || ''
+  }));
+}
+
+// Claude ran the project on its own side and hands the answer over. The board
+// never calls a model; it stores and renders what came back. With runId it
+// settles a run that was queued from the board - the one the panel is
+// watching. Without it, it adds a fresh result, for runs started in Claude.
 //
 // Not admin-gated, unlike register_project. Registering changes what the board
 // offers; posting a result adds one, and every token here belongs to a member
 // of the team. The row records which token wrote it either way.
 async function mcpPostProjectRun(apiUser, args) {
-  const wanted = String(args?.project || '').trim();
-  if (!wanted) throw Object.assign(new Error('project_required'), { status: 400 });
   const output = String(args?.output || '').trim();
+  const failure = String(args?.error || '').trim();
+  const runId = Number(args?.runId) || 0;
+  if (runId) return mcpSettleQueuedRun(apiUser, runId, { output, failure, model: args?.model });
+  const wanted = String(args?.project || '').trim();
+  if (!wanted) throw Object.assign(new Error('project_required: pass runId for a run queued from the board, or the project name for a new result'), { status: 400 });
   if (!output) throw Object.assign(new Error('output_required: pass the result text as output'), { status: 400 });
 
   await ensureProjectTable();
@@ -8358,6 +8544,40 @@ async function mcpPostProjectRun(apiUser, args) {
     project: project.name,
     stored: output.length,
     status: `Result stored against "${project.name}". The team can read it in QT-Tools -> Projects, on that project's card under Results.`
+  };
+}
+
+async function mcpSettleQueuedRun(apiUser, runId, { output, failure, model }) {
+  if (!output && !failure) throw Object.assign(new Error('output_required: pass the answer as output, or error with the reason it could not be done'), { status: 400 });
+  await ensureProjectRunTable();
+  const ok = !!output;
+  const rows = await prisma.$queryRaw`
+    UPDATE "ClaudeProjectRun" SET
+      "status" = ${ok ? 'done' : 'error'},
+      "output" = ${ok ? output.slice(0, PROJECT_RUN_MAX_CHARS) : ''},
+      "error" = ${ok ? null : failure.slice(0, 1000)},
+      "source" = 'claude',
+      "model" = ${String(model || '').trim().slice(0, 80)},
+      "claimedBy" = COALESCE("claimedBy", ${'mcp:' + (apiUser?.username || '')}),
+      "ms" = (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - "createdAt")) * 1000)::int
+    WHERE "id" = ${runId} AND "status" IN ('queued', 'running')
+    RETURNING "id", "projectId"`;
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row) {
+    const existing = await prisma.$queryRaw`SELECT "status" FROM "ClaudeProjectRun" WHERE "id" = ${runId} LIMIT 1`;
+    const found = Array.isArray(existing) ? existing[0] : null;
+    if (!found) throw Object.assign(new Error(`run_not_found: there is no run ${runId} on the board.`), { status: 404 });
+    throw Object.assign(new Error(`run_already_settled: run ${runId} is already ${found.status}. Post without runId to add it as a new result instead.`), { status: 409 });
+  }
+  const projects = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" WHERE "id" = ${row.projectId} LIMIT 1`;
+  const name = (Array.isArray(projects) ? projects[0]?.name : '') || 'the project';
+  return {
+    ok: true,
+    runId,
+    project: name,
+    status: ok
+      ? `Run ${runId} is done. The answer is on "${name}" in QT-Tools -> Projects, under Results.`
+      : `Run ${runId} is marked as failed on the board, with your reason.`
   };
 }
 
@@ -8440,6 +8660,27 @@ async function mcpShiftHandover(hours) {
     unassigned
   };
 }
+// For scripts/project-runner.ps1: is there anything to do? Answered with a
+// connector token, so the runner can check the queue every few seconds without
+// starting Claude - and without spending anyone's usage - when it is empty.
+app.get('/api/mcp/project-runs/queued', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    await ensureProjectRunTable();
+    await expireStaleProjectRuns();
+    const rows = await prisma.$queryRaw`
+      SELECT r."id", p."name" AS "project", r."createdBy", r."createdAt"
+      FROM "ClaudeProjectRun" r JOIN "ClaudeProject" p ON p."id" = r."projectId"
+      WHERE r."status" = 'queued' ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 20`;
+    const runs = (Array.isArray(rows) ? rows : []).map(r => ({
+      runId: r.id, project: r.project, requestedBy: r.createdBy || '', queuedAt: r.createdAt, prompt: projectRunHandoffPrompt(r.id)
+    }));
+    return res.json({ ok: true, count: runs.length, runs });
+  } catch (error) {
+    console.error('Project queue lookup failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_queue_failed' });
+  }
+});
+
 app.get('/api/mcp/tickets', requireApiToken, mcpApiLimiter, async (req, res) => {
   const tickets = await mcpListTickets(req.query);
   res.json({ tickets });
@@ -8838,13 +9079,41 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
   );
 
   server.registerTool(
+    'claim_project_run',
+    {
+      title: 'Take a project run queued on the support board',
+      description: "Someone pressed Run on a project in QT-Tools and the job is waiting for you. This claims it and returns everything needed to do it: the project's instructions, the brief from the form, and any follow-up conversation. Do the work with the tools you have, then call post_project_run with the same runId. Pass runId when you were given one; leave it out to take the oldest waiting run.",
+      inputSchema: {
+        runId: z.number().int().positive().optional().describe('The run to take, e.g. from a "claim_project_run with runId N" request. Omit to take the oldest queued run.')
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpClaimProjectRun(apiUser, args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'list_queued_project_runs',
+    {
+      title: 'See project runs waiting on the board',
+      description: 'Runs queued from QT-Tools that no Claude has finished yet - waiting, or claimed and in progress. Use claim_project_run to take one.',
+      inputSchema: {}
+    },
+    async () => {
+      try { return mcpTextResult(await mcpListQueuedProjectRuns()); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
     'post_project_run',
     {
       title: 'Put a result on the support board',
-      description: "Hand the board the result of running a project, so the team can read it in QT-Tools without opening Claude. Use this after you have run a registered project's work for someone: pass the project name and the finished answer as output. This is the route that works when the board has no ANTHROPIC_API_KEY of its own - you do the run, the board keeps and renders the answer. Markdown in output is rendered (headings, lists, tables, code). Register the project first with register_project if it is not on the board yet.",
+      description: "Hand the board the result of running a project, so the team can read it in QT-Tools without opening Claude. For a run you took with claim_project_run, pass its runId - that completes the run the board is waiting on. If you could not do it, pass runId with error instead of output, so the board stops waiting. For a run nobody queued, pass the project name instead of runId and it is added as a new result. Markdown in output is rendered (headings, lists, tables, code).",
       inputSchema: {
-        project: z.string().min(1).describe('The project name or slug as it appears on the board. Check with list_board_projects.'),
-        output: z.string().min(1).describe('The finished result, verbatim. Markdown is rendered on the board.'),
+        runId: z.number().int().positive().optional().describe('The run from claim_project_run. Completes that queued run.'),
+        project: z.string().optional().describe('The project name or slug, when there is no runId. Check with list_board_projects.'),
+        output: z.string().optional().describe('The finished result, verbatim. Markdown is rendered on the board.'),
+        error: z.string().optional().describe('With runId and no output: why the run could not be done.'),
         title: z.string().optional().describe('A short label for this run, e.g. the hotel or URL it was about. Shown in the history list.'),
         model: z.string().optional().describe('Which model produced it, if worth recording.'),
         inputs: z.array(z.object({
