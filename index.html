@@ -9257,15 +9257,18 @@ let ticketSlaResetAt={};
    else moves it while it stays there. If the clock was already restarted
    during the wait - the client's reply stamps it, which is usually what pulls
    a ticket out of this column - that reply is the new starting point and
-   there is nothing to add. The shift is in wall-clock time, which is exact
-   for waits of whole days and close otherwise. */
+   there is nothing to add. The shift is in working time, not wall time: the
+   clock resumes with exactly the working hours it had when the hold began.
+   Shifting by the wall-clock length of the wait moved the start across
+   nights and weekends the hold had nothing to do with. Mirrors
+   slaResumePointAfterHold in server.js. */
 function resumeSlaAfterHold(id,since,now){
   since=Number(since||0);
   if(!since||since>=now)return;
   const created=new Date(ticketCreatedAt[id]||0).getTime()||0;
   const base=Math.max(created,Number(ticketSlaResetAt[id]||0));
   if(!base||base>=since)return;
-  ticketSlaResetAt[id]=base+(now-since);
+  ticketSlaResetAt[id]=businessPointBefore(now,businessMsInRange(base,since));
 }
 function resumeSlaAfterContactWait(id,now){resumeSlaAfterHold(id,ticketStageTouchedAt[id],now);}
 function setTicketStage(id,col,at){
@@ -10552,6 +10555,9 @@ function applyAgentLeave(map){
   const next=(map&&typeof map==='object')?map:{};
   if(JSON.stringify(next)===JSON.stringify(agentLeave))return;
   agentLeave=next;
+  // The SLA clock reads the periods off from the shift data, which the server
+  // has just updated - fetch it now rather than at the next five-minute poll.
+  refreshShiftState().then(refreshSLABadges);
   fillCreateTicketAgentSelect();
   if(typeof renderActiveView==='function')renderActiveView();
   if(document.getElementById('availability-modal')?.classList.contains('open'))renderAvailabilityModal();
@@ -10620,6 +10626,32 @@ function businessMsInRange(from, to) {
   }
   return total;
 }
+// The inverse: the latest moment from which `amount` of working time has run
+// by `to`. Walks the windows backwards a day at a time, weekends skipped.
+// Mirrors businessPointBefore in server.js.
+function businessPointBefore(to, amount) {
+  let left = amount;
+  if (!(left > 0)) return to;
+  const cursor = new Date(to);
+  cursor.setHours(0, 0, 0, 0);
+  // Ten years of days: far past any SLA, and a stop if the windows are empty.
+  for (let day = 0; day < 3660; day++) {
+    if (!isWeekendDay(cursor)) {
+      for (let i = BUSINESS_WINDOWS.length - 1; i >= 0; i--) {
+        const [sh, sm, eh, em] = BUSINESS_WINDOWS[i];
+        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
+        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
+        const end = Math.min(windowEnd.getTime(), to);
+        const start = windowStart.getTime();
+        if (!(end > start)) continue;
+        if (end - start >= left) return end - left;
+        left -= end - start;
+      }
+    }
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return to - amount;
+}
 // Milliseconds of [from,to) that land on a weekday. Walks day by day via
 // setDate so daylight-saving transitions cannot drift the boundaries the way
 // adding a fixed 86400000 would.
@@ -10657,23 +10689,37 @@ function clientBreakEndMs(b,now){
   const ended=(b.end===null||b.end===undefined)?now:Number(b.end);
   return Math.min(ended,start+shiftBreakMs);
 }
+// When a period off ended: its end once closed, else its return date if that
+// has passed, else now. Mirrors leavePeriodEnd in server.js.
+function leavePeriodEnd(p,now){
+  if(p.end!==null&&p.end!==undefined)return Number(p.end);
+  const until=Number(p.until||0);
+  return until&&until<now?until:now;
+}
 // Worked milliseconds for one agent within [fromMs,toMs): their shift sessions,
-// clipped to weekdays, minus any break that overlaps.
+// clipped to working hours, minus any break and any time they were off -
+// merged first, so a break on a day marked off is not taken away twice.
+// Mirrors shiftElapsedMs in server.js.
 function shiftElapsedMs(fromMs,toMs,agentCode){
   const rec=shiftAgents[String(agentCode||'').toUpperCase()];
   if(!rec||!Array.isArray(rec.sessions))return 0;
   const now=Date.now();
+  const leaves=(rec.leaves||[]).map(p=>[Number(p.start||0),leavePeriodEnd(p,now)]);
   let total=0;
   rec.sessions.forEach(s=>{
     const start=Math.max(Number(s.start||0),fromMs);
     const end=Math.min(s.end===null||s.end===undefined?now:Number(s.end),toMs);
     if(!(end>start))return;
+    const excluded=[...(s.breaks||[]).map(b=>[Number(b.start||0),clientBreakEndMs(b,now)]),...leaves]
+      .map(([a,b])=>[Math.max(a,start),Math.min(b,end)])
+      .filter(([a,b])=>b>a)
+      .sort((x,y)=>x[0]-y[0]);
     let worked=businessMsInRange(start,end);
-    (s.breaks||[]).forEach(b=>{
-      const bs=Math.max(Number(b.start||0),start);
-      const be=Math.min(clientBreakEndMs(b,now),end);
-      if(be>bs)worked-=businessMsInRange(bs,be);
-    });
+    let cursor=start;
+    for(const [a,b] of excluded){
+      const from=Math.max(a,cursor);
+      if(b>from){worked-=businessMsInRange(from,b);cursor=b;}
+    }
     total+=Math.max(0,worked);
   });
   return total;
@@ -10837,6 +10883,11 @@ function getSLAStatus(id){
   if(!agent){
     return{text:'Unassigned - clock not started',cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true};
   }
+  /* The agent holding it is off, so the clock waits for them. Their time off
+     is cut out of shiftElapsedMs, so it resumes where it stopped when they
+     are back - or straight away if the ticket goes to someone who is in.
+     Mirrors leave_hold in ticketSlaSnapshot. */
+  if(isAgentOff(agent))return{text:`SLA on hold - ${agent} off`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,leaveHold:agent};
   // Until the shift history has loaded, showing a full SLA would flash a wrong
   // value on every card. Stay quiet for the moment it takes.
   if(!shiftLoaded){
@@ -10866,6 +10917,11 @@ function slaTooltip(status){
     return['SLA is not counting: this ticket is linked to Velma bug '+status.velmaHold+'.',
       'Wall clock: '+(status.wallText||''),
       'Unlinking the bug resumes the clock where it stopped.'].join('\n');
+  }
+  if(status.leaveHold){
+    return['SLA is on hold: '+status.leaveHold+' is off'+(agentLeaveText(status.leaveHold).replace(/^Off/,'')||'')+'.',
+      'Wall clock: '+(status.wallText||''),
+      'The timer resumes where it stopped when they are back, or when the ticket is given to someone who is in.'].join('\n');
   }
   if(status.contactHold){
     return['SLA is on hold: this ticket is waiting on the contact. The timer is stopped.',
@@ -11633,7 +11689,7 @@ function googleSetupFormHtml(st){
     <strong>Turn on "Sign in with Google" (one time, about five minutes)</strong>
     <ol class="google-setup-steps">
       <li>Open <a href="https://console.cloud.google.com/apis/library/sheets.googleapis.com" target="_blank" rel="noopener">Google Cloud &gt; Google Sheets API</a> and click <b>Enable</b>.</li>
-      <li>Under <a href="https://console.cloud.google.com/apis/credentials/consent" target="_blank" rel="noopener">OAuth consent screen</a>, choose <b>Internal</b> and save.</li>
+      <li>Under <a href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noopener">Google Auth Platform &gt; Audience</a>, choose <b>External</b> and click <b>Publish app</b> (not Testing - Google cuts access every 7 days there). <b>Internal</b> only works if the Cloud project belongs to quinta.im's own Google organisation; anywhere else it refuses every quinta.im account (403 org_internal).</li>
       <li>In <a href="https://console.cloud.google.com/apis/credentials/oauthclient" target="_blank" rel="noopener">Credentials &gt; Create OAuth client ID</a>, pick <b>Web application</b> and add:${copy('Authorised JavaScript origin',origin)}${copy('Authorised redirect URI',st.redirectUri||'')}</li>
       <li>Paste the client ID and secret Google shows you:</li>
     </ol>
@@ -14334,12 +14390,17 @@ function stopKpiAutoRefresh(){
 // bursts, so overlapping pulls are collapsed rather than queued: the guard in
 // renderKpiView drops a request while one is already in flight.
 let kpiFetchInFlight=false;
+// Every figure this formats is SLA time - working hours, seven to a day
+// (08:00-12:00 and 14:00-17:00) - so a "day" here is seven of them, not
+// twenty-four. Dividing by 24 made 475 working hours read as 19.8 days when it
+// is 68 working days. Hours up to 99, so SLA targets (4h, 24h, 48h) read as set.
+const SLA_HOURS_PER_WORKDAY=7;
 function fmtHours(h){
   const n=Number(h||0);
   if(!Number.isFinite(n)||n<=0)return'0h';
   if(n<1)return`${Math.round(n*60)}m`;
-  if(n<48)return`${Math.round(n*10)/10}h`;
-  return`${Math.round(n/24*10)/10}d`;
+  if(n<100)return`${Math.round(n*10)/10}h`;
+  return`${Math.round(n/SLA_HOURS_PER_WORKDAY*10)/10} working days`;
 }
 // Every card carries the tickets behind its number so clicking one opens
 // them, rather than leaving the agent to go hunt through a filter to find
@@ -14527,9 +14588,9 @@ async function renderKpiView(){
       kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left',category:'atRisk'}),
       kpiCard('SLA met',compliance===null||compliance===undefined?'-':`${compliance}%`,{
         tone:compliance===null||compliance===undefined?'':(compliance>=90?'good':compliance>=75?'warn':'bad'),
-        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`,category:'slaMeasured'}),
+        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`+(sla.noHistory?` - ${sla.noHistory} not measured (from before shift history was kept)`:''),category:'slaMeasured'}),
       kpiCard('Avg resolve',fmtHours(sla.avgResolveShiftHours),{hint:`Median ${fmtHours(sla.medianResolveShiftHours)} - shift time`,category:'slaMeasured'}),
-      kpiCard('Oldest open',fmtHours(sla.oldestOpenHours),{hint:'Wall clock since arrival',category:'oldestOpen'}),
+      kpiCard('Oldest open',fmtHours(sla.oldestOpenHours),{hint:'Working hours since arrival (no nights or weekends)',category:'oldestOpen'}),
       kpiCard('Created',flow.created||0,{hint:'In this range',category:'created'}),
       kpiCard('Resolved',flow.resolved||0,{hint:`Net ${(flow.net||0)>0?'+':''}${flow.net||0} vs created`,tone:(flow.net||0)>0?'warn':'',category:'resolved'}),
       kpiCard('Reopened',flow.reopened||0,{tone:(flow.reopened||0)>0?'warn':'',hint:'Left Resolved again',category:'reopened'}),

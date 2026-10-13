@@ -702,6 +702,29 @@ The same rule is implemented twice on purpose - `businessMsInRange` in
 `server.js` for the KPI dashboard, and its twin in `index.html` for the badges -
 so both sides of the app agree. Change one and change the other.
 
+Those hours are the team's local time. The board reads them in the browser's
+timezone; the server sets its own at startup from `SLA_TIMEZONE` (an IANA name,
+default `Africa/Casablanca`, or `TZ` if that is set). Without it the container
+counted in UTC, an hour off the board.
+
+A hold (Waiting on Contact, a Jira link, an open Velma bug) carries the clock
+over in working time: when it ends, the ticket resumes with exactly the working
+hours it had when the hold began (`businessPointBefore`).
+
+**Shift history survives deploys.** `data/` is not a persistent volume, so
+`data/shifts.json` is also saved to Postgres (`OAuthToken` row `shift-store`) a
+few seconds after each change and on SIGTERM, and merged back at boot. Before
+this, every deploy wiped all logged-in time, and every resolved ticket's SLA
+read "met in 0h". `since` in that row is when the history became complete;
+resolved tickets whose clock started earlier are reported as not measured
+(`no_history`) instead of met.
+
+An agent marked **Off** puts every open ticket they hold on hold. Each leave is
+also kept as a period in `data/shifts.json` (`agents.<CODE>.leaves`), because
+the leave row itself is deleted when it ends, and those periods are cut out of
+the clock - so it resumes where it stopped when they are back, or as soon as
+the ticket is given to someone who is in.
+
 ### Breaks
 
 | | | |
@@ -772,8 +795,14 @@ close the tab. If several people connect, the most recent one is tried first and
 an account without access to the sheet is skipped for the next.
 
 1. In Google Cloud, enable the **Google Sheets API**.
-2. Configure the OAuth consent screen (Internal, for the quinta.im workspace) with
-   the scopes `openid`, `email` and `.../auth/spreadsheets.readonly`.
+2. Configure the OAuth consent screen with the scopes `openid`, `email` and
+   `.../auth/spreadsheets.readonly`. Audience: **External, published** (not
+   Testing, whose tokens expire after 7 days). **Internal** only works when the
+   Cloud project belongs to quinta.im's own Google organisation - the current
+   project ("Dash Spreadsheet Connection") is under `sfa-org`, where Internal
+   refuses every quinta.im account with `403 org_internal`. An unverified
+   External app shows a "Google hasn't verified this app" warning on first
+   sign-in: Advanced > Go to the app.
 3. Create an **OAuth client ID** of type *Web application* with the authorised
    redirect URI `https://<board host>/auth/google/callback` - one per environment
    (pre-prod and prod each need their own URI listed).
@@ -792,6 +821,10 @@ tells the board (over a BroadcastChannel, since Cross-Origin-Opener-Policy cuts
 The stored tokens are encrypted with `CLAUDE_CREDENTIAL_SECRET` (falling back to
 `SESSION_SECRET`), the same key as the Claude connector - changing it disconnects
 everyone, who then simply sign in again.
+
+If no signed-in account or service account can read the sheet, the server falls back to the sheet's
+link: a sheet shared as "Anyone with the link can view" is read from its CSV
+export with no credential.
 
 **Option B - a service account (nobody has to stay signed in).**
 
