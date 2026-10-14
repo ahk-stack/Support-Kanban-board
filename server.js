@@ -2098,6 +2098,75 @@ function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
     });
   }
 
+  /* Re-pointing a ticket at a different CS is an admin decision.
+
+     What marks it as a human decision is manualCSOverride: every automatic
+     path (HubSpot company default, sender-derived CS, the first-assignment
+     auto-assign every open tab runs) only writes the owner while that flag is
+     unset, so an owner change that arrives WITH the flag set is a person
+     choosing, and the person has to be an admin. Automatic changes and the
+     first assignment of an unowned ticket are left alone - refusing those
+     would stop HubSpot corrections reaching any tab that is not an admin's.
+
+     Manual tickets are exempt: their edit modal sets the CS owner and is open
+     to everyone on purpose (see currentUserCanEditManualTicket).
+
+     This is as strong as the flag is honest: a hand-built request that changes
+     the owner without setting it looks like automation and is not caught here.
+     The board never produces one. */
+  {
+    const currentCs = isMap(currentState.ticketCSOwner) ? currentState.ticketCSOwner : {};
+    const incomingCs = isMap(nextState.ticketCSOwner) ? nextState.ticketCSOwner : {};
+    const currentOverride = isMap(currentState.manualCSOverride) ? currentState.manualCSOverride : {};
+    const incomingOverride = isMap(nextState.manualCSOverride) ? nextState.manualCSOverride : {};
+
+    /* Stale carry-back, for every role. The owner is merged on the same
+       per-ticket clock as the support assignee, so a tab that never heard about
+       a person's CS choice and then does something ordinary - a support
+       reassignment - stamps that clock newer and drags its OLD owner in with
+       it, silently undoing the choice. Once a person has set the owner
+       (override already true in the stored state), an automatic path will not
+       write it again, so an incoming change that does not itself carry the
+       flag cannot be a decision: it is a stale copy, and is put back. Not a
+       refusal - nobody did anything wrong, so no toast.
+
+       Residual: a stale tab that itself still holds an older override=true for
+       the same ticket looks like a fresh decision and is not caught. That needs
+       the ticket's owner to have been set by hand at least twice and a tab to
+       miss the live-sync push, and would take a dedicated owner clock to close. */
+    Object.keys(incomingCs).forEach((ticketId) => {
+      const before = String(currentCs[ticketId] || '').trim();
+      const after = String(incomingCs[ticketId] || '').trim();
+      if (!before || before === after) return;
+      if (currentOverride[ticketId] !== true || incomingOverride[ticketId] === true) return;
+      incomingCs[ticketId] = currentCs[ticketId];
+    });
+  }
+
+  if (effectiveTeam(role, username) !== 'admin') {
+    const currentCs = isMap(currentState.ticketCSOwner) ? currentState.ticketCSOwner : {};
+    const incomingCs = isMap(nextState.ticketCSOwner) ? nextState.ticketCSOwner : {};
+    const currentOverride = isMap(currentState.manualCSOverride) ? currentState.manualCSOverride : {};
+    const incomingOverride = isMap(nextState.manualCSOverride) ? nextState.manualCSOverride : {};
+    const manualTicketIds = new Set((Array.isArray(currentState.allTickets) ? currentState.allTickets : [])
+      .filter(t => t && (t.isManual || t.email?.isManual))
+      .map(t => String(t.id)));
+    Object.keys(incomingCs).forEach((ticketId) => {
+      const before = String(currentCs[ticketId] || '').trim();
+      const after = String(incomingCs[ticketId] || '').trim();
+      if (!before || before === after) return;
+      if (incomingOverride[ticketId] !== true) return;
+      if (manualTicketIds.has(ticketId)) return;
+      incomingCs[ticketId] = currentCs[ticketId];
+      // The flag describes the choice that was just refused, so it goes back
+      // too - left behind it would stop the automatic CS default from ever
+      // correcting this ticket again.
+      if (Object.prototype.hasOwnProperty.call(currentOverride, ticketId)) incomingOverride[ticketId] = currentOverride[ticketId];
+      else delete incomingOverride[ticketId];
+      refused.push({ field: 'ticketCSOwner', id: ticketId, claims: [after || '(cleared)'] });
+    });
+  }
+
   if (refused.length) {
     console.warn(`[permissions] dropped ${refused.length} CS-only change(s) from a ${effectiveTeam(role, username)} save by ${actor?.username || 'unknown'}: ${refused.slice(0, 5).map(r => `${r.field}/${r.id}`).join(', ')}`);
   }

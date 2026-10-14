@@ -6994,6 +6994,29 @@ input.ticket-number-filter:focus {
 
 .card-tagged-badge { padding-left: 8px; border-style: dashed; }
 
+/* The admin-only CS picker: the same badge, with a native select inside. */
+.card-cs-picker { cursor: pointer; padding-right: 4px; }
+.card-cs-picker:hover { border-color: color-mix(in srgb, var(--agent-accent) 55%, transparent); }
+.card-cs-picker:focus-within { outline: 2px solid color-mix(in srgb, var(--agent-accent) 55%, transparent); outline-offset: 1px; }
+.card-cs-select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  outline: 0;
+  margin: 0;
+  padding: 0 14px 0 0;
+  max-width: 96px;
+  background-color: transparent;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 6px) 50%, calc(100% - 2px) 50%;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.card-cs-select option { color: var(--text); background: var(--surface); }
+
 .card-cs-tag {
   height: 18px;
   padding: 0 5px;
@@ -9660,6 +9683,13 @@ function currentUserCanAssignTicket(ticket){
   const {csOwner}=ticketFilterAgentValues(ticket);
   return !!me&&me===csOwner;
 }
+// Re-pointing a ticket at a different CS is an admin decision, unlike handing
+// it to a support agent, which CS may also do. The server refuses the same
+// change from anyone else in applyRolePermissionsToStateWrite, so this is
+// about not offering a control that would be rejected.
+function currentUserCanChangeCSOwner(){
+  return currentUserIsAdmin();
+}
 /* The code a support agent takes a ticket under.
 
    Their roster trigram where they have one, their own username where they do
@@ -9847,7 +9877,9 @@ async function apiSaveState(payload){
         const fields=[...new Set(refused.map(r=>String(r?.field||'')))];
         const what=fields.includes('ticketAssignee')&&fields.length===1
           ?'Support assignment is CS-only - that change was not saved'
-          :'Confirming a resolved ticket is CS-only - that change was not saved';
+          :fields.includes('ticketCSOwner')&&fields.length===1
+            ?'Changing the CS owner is admin-only - that change was not saved'
+            :'Confirming a resolved ticket is CS-only - that change was not saved';
         showToast(what,'warn');
         // Take the board back to what was actually stored rather than leaving
         // the refused value on screen.
@@ -15696,6 +15728,44 @@ function applyTicketAgentSelection(id,previousAgent,selected){
   renderBoard();
 }
 
+// The CS owner as a picker rather than a badge, for the people allowed to
+// change it. A native select on purpose: the support-agent menu needs a custom
+// floating layer, this does not. Someone who is off stays listed but cannot be
+// picked, like the support menu; the current owner always stays selectable so
+// the control never shows a name it cannot hold. No owner still renders a
+// control - an admin who cleared it must be able to set it again.
+function csOwnerPickerHtml(id,csOwner){
+  const roster=CS_AGENTS.slice();
+  if(csOwner&&!roster.includes(csOwner))roster.push(csOwner);
+  const options=['<option value="">No CS</option>'].concat(roster.map(a=>{
+    const off=a!==csOwner&&isAgentOff(a);
+    return `<option value="${esc(a)}"${a===csOwner?' selected':''}${off?' disabled':''}>${esc(a)}${off?' ('+esc(agentLeaveText(a))+')':''}</option>`;
+  })).join('');
+  return `<label class="agent-badge-card card-cs-badge card-cs-picker" style="--agent-accent:${agentColor(csOwner||'CS')}" title="CS owner - admins can change it"><span class="card-cs-tag">CS</span><select class="card-cs-select" data-cs-pick="${esc(id)}" aria-label="CS owner">${options}</select></label>`;
+}
+function applyTicketCSSelection(id,selected){
+  if(!id)return;
+  if(!currentUserCanChangeCSOwner()){showToast('Changing the CS owner is admin-only','warn');return;}
+  const next=selected?normalizeCSAgent(selected):'';
+  if(selected&&!next){showToast(`${selected} is not on the CS roster`,'warn');return;}
+  if(next&&next!==(ticketCSOwner[id]||'')&&isAgentOff(next)){
+    showToast(`${next} is ${agentLeaveText(next).toLowerCase()} - pick someone who is in`,'warn');
+    renderBoard();
+    return;
+  }
+  if((ticketCSOwner[id]||'')===next)return;
+  ticketCSOwner[id]=next||null;
+  // A person chose this: stops the HubSpot company default from putting it back.
+  manualCSOverride[id]=true;
+  // The CS owner is merged on the assignment's clock (server safeWriteState),
+  // so it has to be stamped like a support reassignment or a tab saving an
+  // older snapshot can overwrite it. Re-stating the unchanged support agent is
+  // what stamps that clock without touching the assignment itself.
+  setTicketAssignee(id,ticketAssignee[id]||'',boardNow(),'manual_cs_dropdown');
+  saveState('manual_cs_dropdown');
+  renderBoard();
+}
+
 function clearNewReplyGlow(id){if(!ticketHasNewReply[id])return;delete ticketHasNewReply[id];saveState('new_reply_seen');renderBoard();}
 function resolvedAtForTicket(id){
   const touched=Number(ticketStageTouchedAt[id]||0);
@@ -16748,7 +16818,7 @@ function makeCard(ticket,isNew=false){
           </button>
           <div class="agent-assign-menu" data-agent-menu-id="${id}">${agentAssignMenuHtml(agent,taggedSupport)}</div>
         </div>
-        ${showCSBadge?`<span class="agent-badge-card card-cs-badge" style="--agent-accent:${agentColor(csOwner)}" title="CS owner"><span class="card-cs-tag">CS</span>${csOwner}</span>`:''}
+        ${currentUserCanChangeCSOwner()?csOwnerPickerHtml(id,csOwner):(showCSBadge?`<span class="agent-badge-card card-cs-badge" style="--agent-accent:${agentColor(csOwner)}" title="CS owner"><span class="card-cs-tag">CS</span>${csOwner}</span>`:'')}
         ${taggedSupport.length&&taggedSupport[0]!==agent?`<span class="agent-badge-card card-tagged-badge" style="--agent-accent:${agentColor(taggedSupport[0])}" title="Tagged in the email: ${esc(taggedSupport.join(', '))} - CS can assign it to them">@${esc(taggedSupport[0])} in mail</span>`:''}
       </div>
     </div>
@@ -16768,6 +16838,11 @@ function makeCard(ticket,isNew=false){
   div.addEventListener('dragstart',e=>{e.dataTransfer.setData('ticketId',id);setTimeout(()=>div.classList.add('dragging'),0);});
   div.addEventListener('dragend',()=>{div.classList.remove('dragging');rearmDrag();});
   div.querySelector('[data-pr]').addEventListener('click',e=>{e.stopPropagation();ticketPriority[id]=nextPriority(priority);saveState();renderBoard();});
+  const csPick=div.querySelector('[data-cs-pick]');
+  if(csPick){
+    csPick.addEventListener('click',e=>e.stopPropagation());
+    csPick.addEventListener('change',e=>{e.stopPropagation();applyTicketCSSelection(id,e.target.value);});
+  }
   const agentWrap=div.querySelector('[data-agent-menu]');
   div.querySelector('[data-agent-trigger]').addEventListener('click',e=>{
     e.stopPropagation();
