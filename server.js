@@ -267,7 +267,7 @@ const CS_TEAMS_EMAIL_OVERRIDES = (() => {
   }
 })();
 const SUPPORT_AGENT_CODES = new Set(['SGU','ZIO','SFA','MEZ','SHE','JBA','RMD']);
-const CS_AGENT_CODES = new Set(['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC']);
+const CS_AGENT_CODES = new Set(['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC','TNY','LGI']);
 
 const APP_BUILD_VERSION = (
   process.env.RENDER_GIT_COMMIT ||

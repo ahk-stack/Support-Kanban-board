@@ -8934,7 +8934,7 @@ if(!window.cowork||typeof window.cowork.callMcpTool!=='function'){
   };
 }
 const SUPPORT_AGENTS=['SGU','ZIO','SFA','MEZ','SHE','JBA','RMD'];
-const CS_AGENTS=['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC'];
+const CS_AGENTS=['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC','TNY','LGI'];
 const ALL_AGENTS=[...SUPPORT_AGENTS,...CS_AGENTS];
 const CLIENT_TAG='CLIENT';
 const EMAIL_MAP=Object.fromEntries(ALL_AGENTS.map(t=>[t,t.toLowerCase()+'@quinta.im']));
@@ -9494,7 +9494,9 @@ const DEFAULT_COOWNER_ID_MAPPINGS={
   '1985888411':'AZA',
   '1428180469':'GGO',
   '31905590':'WPH',
-  '333193948':'JFC'
+  '333193948':'JFC',
+  '38433503':'TNY',
+  '37619562':'LGI'
 };
 const DEFAULT_COOWNER_NAME_MAPPINGS={
   'vincent guillot':'VGU',
@@ -9511,7 +9513,9 @@ const DEFAULT_COOWNER_NAME_MAPPINGS={
   'ana zarnadze':'AZA',
   'george gogaladze':'GGO',
   'watiwan phuaphaiboonwong':'WPH',
-  'juan carlos forero c':'JFC'
+  'juan carlos forero c':'JFC',
+  'terry nyborg':'TNY',
+  'levan giunashvili':'LGI'
 };
 let dataHygieneReport=null;
 let dataHygieneLoading=false;
