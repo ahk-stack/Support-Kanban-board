@@ -5085,6 +5085,25 @@ th {
 .undo-btn:hover { background: rgba(255,255,255,.14); }
 .undo-x { background: transparent; border: 0; color: rgba(255,255,255,.6); font-size: 16px; cursor: pointer; line-height: 1; padding: 0 2px; }
 
+/* Re-open requests: a resolved ticket got a client reply. Top right, under
+   the header, one card per reply (up to three). */
+.reopen-requests { position: fixed; top: 72px; right: 16px; z-index: 3550; display: grid; gap: 10px; width: min(360px, calc(100vw - 32px)); pointer-events: none; }
+.reopen-card { pointer-events: auto; background: var(--ink-soft, #1a1d38); color: #fff; border: 1px solid rgba(255,255,255,.12); border-left: 4px solid #f59e0b; border-radius: 14px; padding: 12px 14px; box-shadow: 0 14px 34px rgba(15,23,42,.35); font-size: 13px; animation: reopen-in .18s ease; }
+@keyframes reopen-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.reopen-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
+.reopen-kicker { font-size: 11px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: #fbbf24; }
+.reopen-x { background: transparent; border: 0; color: rgba(255,255,255,.75); font-size: 12px; font-weight: 700; cursor: pointer; text-decoration: underline; padding: 0; }
+.reopen-title { font-weight: 700; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.reopen-meta { color: rgba(255,255,255,.65); font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
+.reopen-preview { color: rgba(255,255,255,.85); font-size: 12px; font-style: italic; margin-top: 6px; overflow-wrap: anywhere; }
+.reopen-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.reopen-btn { background: transparent; border: 1px solid rgba(255,255,255,.4); color: #fff; border-radius: 8px; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.reopen-btn:hover:not(:disabled) { background: rgba(255,255,255,.14); }
+.reopen-btn.primary { background: #f59e0b; border-color: #f59e0b; color: #1a1d38; }
+.reopen-btn.primary:hover:not(:disabled) { background: #fbbf24; }
+.reopen-btn:disabled { opacity: .5; cursor: default; }
+.reopen-more { pointer-events: auto; justify-self: end; background: var(--ink-soft, #1a1d38); color: #fff; border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 700; }
+
 .palette-overlay {
   position: fixed; inset: 0; z-index: 4200; display: none;
   background: rgba(15, 23, 42, .42); backdrop-filter: blur(2px);
@@ -8560,6 +8579,7 @@ th {
 </div></div>
 <!-- Undo lives apart from the ordinary toast because it needs a button. -->
 <div class="undo-toast" id="undo-toast"></div>
+<div class="reopen-requests" id="reopen-requests" aria-live="polite"></div>
 <!-- Command palette (Ctrl/Cmd + K) -->
 <div class="palette-overlay" id="palette">
   <div class="palette">
@@ -8933,11 +8953,44 @@ if(!window.cowork||typeof window.cowork.callMcpTool!=='function'){
     }
   };
 }
+/* The CS and Support rosters. The server builds them from the users table
+   (each user's Team, set by admins in Manage Users) and sends them with
+   /auth/me and /api/roster - see applyAgentRoster. The lists here are only
+   what the board starts with before that answer arrives.
+
+   The arrays are refilled in place, never reassigned, so everything holding a
+   reference to them sees the current roster. */
 const SUPPORT_AGENTS=['SGU','ZIO','SFA','MEZ','SHE','JBA','RMD'];
 const CS_AGENTS=['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC','TNY','LGI'];
 const ALL_AGENTS=[...SUPPORT_AGENTS,...CS_AGENTS];
+// Agents who have left a roster. Never offered in a dropdown, but their old
+// tickets still count as theirs - in KPIs and anywhere else a ticket is
+// attributed.
+const FORMER_SUPPORT_AGENTS=new Set();
+const FORMER_CS_AGENTS=new Set();
 const CLIENT_TAG='CLIENT';
 const EMAIL_MAP=Object.fromEntries(ALL_AGENTS.map(t=>[t,t.toLowerCase()+'@quinta.im']));
+function isKnownSupportAgent(code){return SUPPORT_AGENTS.includes(code)||FORMER_SUPPORT_AGENTS.has(code);}
+function isKnownCSAgent(code){return CS_AGENTS.includes(code)||FORMER_CS_AGENTS.has(code);}
+function isKnownAgentCode(code){return isKnownSupportAgent(code)||isKnownCSAgent(code);}
+// Returns whether the roster changed.
+function applyAgentRoster(roster){
+  if(!roster||!Array.isArray(roster.support)||!Array.isArray(roster.cs))return false;
+  const clean=list=>[...new Set(list.map(c=>String(c||'').trim().toUpperCase()).filter(Boolean))];
+  const support=clean(roster.support),cs=clean(roster.cs);
+  // An empty roster is a server that could not read its users, not a team
+  // with nobody on it - keep what the board has.
+  if(!support.length&&!cs.length)return false;
+  const before=SUPPORT_AGENTS.join()+'|'+CS_AGENTS.join();
+  SUPPORT_AGENTS.splice(0,SUPPORT_AGENTS.length,...support);
+  CS_AGENTS.splice(0,CS_AGENTS.length,...cs);
+  ALL_AGENTS.splice(0,ALL_AGENTS.length,...new Set([...support,...cs]));
+  ALL_AGENTS.forEach(t=>{if(!EMAIL_MAP[t])EMAIL_MAP[t]=t.toLowerCase()+'@quinta.im';});
+  FORMER_SUPPORT_AGENTS.clear();FORMER_CS_AGENTS.clear();
+  clean(roster.former?.support||[]).filter(c=>!support.includes(c)).forEach(c=>FORMER_SUPPORT_AGENTS.add(c));
+  clean(roster.former?.cs||[]).filter(c=>!cs.includes(c)).forEach(c=>FORMER_CS_AGENTS.add(c));
+  return before!==SUPPORT_AGENTS.join()+'|'+CS_AGENTS.join();
+}
 const PALETTE=['var(--ag-0)','var(--ag-1)','var(--ag-2)','var(--ag-3)','var(--ag-4)','var(--ag-5)','var(--ag-6)','var(--ag-7)','var(--ag-8)','var(--ag-9)','var(--ag-10)','var(--ag-11)','var(--ag-12)','var(--ag-13)','var(--ag-14)','var(--ag-15)','var(--ag-16)','var(--ag-17)','var(--ag-18)','var(--ag-19)','var(--ag-20)','var(--ag-21)'];
 function agentColor(t){let h=0;for(const c of t)h=(h*31+c.charCodeAt(0))%PALETTE.length;return PALETTE[h];}
 const SEARCH_TOOL='mcp__5e170d94-d04a-4d6f-be72-371547a2bf8b__outlook_email_search';
@@ -9166,8 +9219,18 @@ function defaultSupportAgentForTicket(emailObj,id){
 }
 function normalizeEmailList(values){return (Array.isArray(values)?values:[]).map(v=>String(v||'').trim().toLowerCase()).filter(Boolean);}
 function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(NO_REPLY_SUBJECTS.some(p=>tl.includes(p)))return true;if(/\b(newsletter|webinar|digest|event reminder)\b/.test(tl))return true;if(/(microsoft teams meeting|join microsoft teams meeting|meeting invitation|accepted:|declined:|tentative:)/.test(tl))return true;return false;}
-function normalizeThreadSubject(subject){return String(subject||'').toLowerCase().replace(/^\s*((re|fw|fwd)\s*:\s*)+/gi,'').replace(/\s+/g,' ').trim();}
-function isReplyLikeSubject(subject){return /^\s*(re|fw|fwd)\s*:/i.test(String(subject||''));}
+/* Reply and forward prefixes as mail clients actually write them, not only the
+   English ones: AW/WG (German), TR (French), RV/RES (Spanish, Portuguese),
+   SV/VS (Nordic), R/RIF (Italian), Antw (Dutch), with an optional counter
+   ("Re[2]:") and after any external-mail tag a gateway puts first ("[EXT]",
+   "*External*"). Only "Re:"/"Fw:" used to count, so an "AW:" reply whose
+   conversationId Outlook had changed could not find its ticket and opened a
+   new one. */
+const THREAD_TAG_RE=/^\s*(?:(?:\[[^\]]{1,24}\]|\*[^*]{1,24}\*)\s*)+/i;
+const THREAD_PREFIX_RE=/^\s*((re|fw|fwd|aw|wg|tr|rv|res|sv|vs|r|rif|antw|odp|ynt)(\[\d+\])?\s*:\s*)+/i;
+function stripThreadTags(subject){return String(subject||'').replace(THREAD_TAG_RE,'');}
+function normalizeThreadSubject(subject){let s=String(subject||'');for(let i=0;i<4;i++){const next=stripThreadTags(s).replace(THREAD_PREFIX_RE,'');if(next===s)break;s=next;}return s.toLowerCase().replace(/\s+/g,' ').trim();}
+function isReplyLikeSubject(subject){return THREAD_PREFIX_RE.test(stripThreadTags(subject));}
 function buildTicketThreadKeys(ticket,{allowSubjectFallback=true,forceSubjectFallback=false,requireReplyLikeSubject=true}={}){if(!ticket||!ticket.id)return[];const email=ticket.email||{};const keys=[];const conversationId=String(email.conversationId||'').trim();if(conversationId)keys.push(`conv:${conversationId}`);if(!allowSubjectFallback)return [...new Set(keys)];const sender=String(email.sender||'').trim().toLowerCase();const recipients=normalizeEmailList(email.recipients);const normalizedSubject=normalizeThreadSubject(email.subject||'');const clientEmail=(ticketClientEmail[ticket.id]||getClientEmail(email)||'').toLowerCase();
   // forceSubjectFallback is used only by findExistingTicketForEmail's second
   // (fallback) pass, after strict conversationId matching has already come
@@ -9196,8 +9259,16 @@ function findExistingTicketForEmail(emailObj){const probe={id:'__probe__',email:
   // mismatched conversationId) while shrinking the odds of it reattaching a
   // reply to a long-closed, unrelated past ticket.
   const probeTs=Date.parse(emailObj?.receivedDateTime||'');
-  for(const ticket of allTickets){const existingKeys=buildTicketThreadKeys(ticket,{allowSubjectFallback:true,forceSubjectFallback:true,requireReplyLikeSubject:false});if(!existingKeys.some(key=>fallbackKeys.includes(key)))continue;if(Number.isFinite(probeTs)){const existingTs=Date.parse(ticket?.email?.receivedDateTime||ticketCreatedAt[ticket.id]||'');if(Number.isFinite(existingTs)&&Math.abs(probeTs-existingTs)>THREAD_FALLBACK_MAX_GAP_DAYS*86400000)continue;}return ticket;}return null;}
-function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId){if(!ticket||!ticket.id||!emailObj)return false;ticket.email={...ticket.email,...emailObj};const ce=getClientEmail(emailObj);if(ce)ticketClientEmail[ticket.id]=ce;const csFromSender=csAgentFromSenderEmail(emailObj.sender);if(csFromSender&&!ticketCSOwner[ticket.id])ticketCSOwner[ticket.id]=csFromSender;const st=SUBTYPE_BY_ID[subtypeId]||null;if(!ticketSubtype[ticket.id]&&st)ticketSubtype[ticket.id]=st.id;if(!ticketPriority[ticket.id]&&st)ticketPriority[ticket.id]=st.priority;ticketHasNewReply[ticket.id]=true;
+  for(const ticket of allTickets){const existingKeys=buildTicketThreadKeys(ticket,{allowSubjectFallback:true,forceSubjectFallback:true,requireReplyLikeSubject:false});if(!existingKeys.some(key=>fallbackKeys.includes(key)))continue;
+  // ...except against a resolved ticket. A client writing back weeks after a
+  // ticket was closed is exactly the case that used to open a second ticket,
+  // and a resolved match is never acted on silently any more: it becomes a
+  // re-open request someone accepts or turns down (queueReopenRequest).
+  if(Number.isFinite(probeTs)&&normalizeTicketStage(ticketState[ticket.id]||'new')!=='res'){const existingTs=Date.parse(ticket?.email?.receivedDateTime||ticketCreatedAt[ticket.id]||'');if(Number.isFinite(existingTs)&&Math.abs(probeTs-existingTs)>THREAD_FALLBACK_MAX_GAP_DAYS*86400000)continue;}return ticket;}return null;}
+function mergeEmailIntoExistingTicket(ticket,emailObj,subtypeId,opts={}){if(!ticket||!ticket.id||!emailObj)return false;ticket.email={...ticket.email,...emailObj};
+  // "Keep closed" on a re-open request: the reply is recorded on the ticket
+  // (so the next one on this thread still finds it) and nothing else moves.
+  if(opts.keepResolved&&normalizeTicketStage(ticketState[ticket.id]||'new')==='res'){const ce0=getClientEmail(emailObj);if(ce0)ticketClientEmail[ticket.id]=ce0;return true;}const ce=getClientEmail(emailObj);if(ce)ticketClientEmail[ticket.id]=ce;const csFromSender=csAgentFromSenderEmail(emailObj.sender);if(csFromSender&&!ticketCSOwner[ticket.id])ticketCSOwner[ticket.id]=csFromSender;const st=SUBTYPE_BY_ID[subtypeId]||null;if(!ticketSubtype[ticket.id]&&st)ticketSubtype[ticket.id]=st.id;if(!ticketPriority[ticket.id]&&st)ticketPriority[ticket.id]=st.priority;ticketHasNewReply[ticket.id]=true;
   // Only the client's reply restarts the clock. Our own messages in the loop -
   // an agent answering from their mailbox, a CC'd colleague - used to restart
   // it too, which is how an overdue open ticket went back to a full SLA the
@@ -9569,7 +9640,7 @@ let showMyResolved=false;
 let collapsedLanes=new Set();
 function normalizeAgentCode(value){
   const code=String(value||'').trim().toUpperCase();
-  return ALL_AGENTS.includes(code)||code==='YOU'||code==='ADMIN'?code:'';
+  return isKnownAgentCode(code)||code==='YOU'||code==='ADMIN'?code:'';
 }
 /* The same value, but without dropping an account that is not on the roster.
 
@@ -9966,7 +10037,7 @@ function buildStatePayload(reason){
     allTickets,
     seenIds:Object.keys(seen),
     ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssigneeBy,ticketHasNewReply,ticketResolutionMeta,ticketArchived,ticketPriority,ticketCategory,ticketSubtype,ticketAssignee,ticketAssignmentMode,manualSupportOverride,manualCSOverride,ticketCSOwner,ticketComments,ticketClientEmail,ticketCreatedAt,ticketCreatedBy,ticketNumbers,ticketNumberCounter,ticketJira,ticketDuplicateOf,ticketHubspotId,
-    ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt,wipLimits,savedViews,
+    ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt,ticketReopenRequests,wipLimits,savedViews,
     spamSenders:[...spamSenders],hsCache,domainCompanyCache,readMentions:[...readMentions],jiraAlerts,readJiraAlerts:[...readJiraAlerts],jiraStatusSnapshot,companyCustomProps,companyProfiles,companiesViewType,companyNetworkCache,companyFilters,coOwnerMappings,actionHistory,
     _meta:{clientSavedAt:now,clientVersion:stateVersion,clientId:LIVE_CLIENT_ID}
   };
@@ -10252,7 +10323,7 @@ function liveSyncTargets(){
   return {ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
     manualSupportOverride,manualCSOverride,ticketPriority,ticketCategory,ticketSubtype,
     ticketJira,ticketDuplicateOf,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
-    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt,ticketVelmaBug};
+    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt,ticketVelmaBug,ticketReopenRequests};
 }
 function setLiveIndicator(state,detail){
   const el=document.getElementById('live-indicator');
@@ -10445,6 +10516,8 @@ async function loadState(){
   if(s.ticketResolutionMeta&&typeof s.ticketResolutionMeta==='object')Object.assign(ticketResolutionMeta,s.ticketResolutionMeta);
   if(s.ticketArchived&&typeof s.ticketArchived==='object')Object.assign(ticketArchived,s.ticketArchived);
   if(s.ticketSendBackAlerts&&typeof s.ticketSendBackAlerts==='object')Object.assign(ticketSendBackAlerts,s.ticketSendBackAlerts);
+  // A decision from another tab beats a pending copy here, as on the server.
+  if(s.ticketReopenRequests&&typeof s.ticketReopenRequests==='object')Object.entries(s.ticketReopenRequests).forEach(([k,r])=>{const mine=ticketReopenRequests[k];if(r&&(!mine||mine.status==='pending'))ticketReopenRequests[k]=r;});
   if(s.ticketReopenedAt&&typeof s.ticketReopenedAt==='object')Object.entries(s.ticketReopenedAt).forEach(([k,v])=>{const at=Number(v||0);if(k&&at>Number(ticketReopenedAt[k]||0))ticketReopenedAt[k]=at;});
   if(s.ticketPriority)Object.assign(ticketPriority,s.ticketPriority);
   if(s.ticketCategory)Object.assign(ticketCategory,s.ticketCategory);if(s.ticketSubtype)Object.assign(ticketSubtype,s.ticketSubtype);
@@ -14366,15 +14439,15 @@ function ticketFilterAgentValues(ticket){
   const csOwner=agentIdentityCode(ensureTicketCSOwnerResolved(id,ticket.email)||ticketCSOwner[id]||'');
   return{assignee,csOwner};
 }
-function normalizeSupportAgent(value){const code=normalizeAgentCode(value);return SUPPORT_AGENTS.includes(code)?code:'';}
-function normalizeCSAgent(value){const code=normalizeAgentCode(value);return CS_AGENTS.includes(code)?code:'';}
+function normalizeSupportAgent(value){const code=normalizeAgentCode(value);return isKnownSupportAgent(code)?code:'';}
+function normalizeCSAgent(value){const code=normalizeAgentCode(value);return isKnownCSAgent(code)?code:'';}
 function currentUserCSAgent(){return normalizeCSAgent(currentUser());}
 function ticketMatchesAgentFilter(ticket,agentCode){
   if(agentCode==='all')return true;
   if(agentCode==='tagged')return taggedTickets.has(ticket.id);
   const {assignee,csOwner}=ticketFilterAgentValues(ticket);
-  if(SUPPORT_AGENTS.includes(agentCode))return assignee===agentCode;
-  if(CS_AGENTS.includes(agentCode))return csOwner===agentCode;
+  if(isKnownSupportAgent(agentCode))return assignee===agentCode;
+  if(isKnownCSAgent(agentCode))return csOwner===agentCode;
   return assignee===agentCode||csOwner===agentCode;
 }
 function renderSimpleKpiRows(rows,labelKey,valueKey){
@@ -14515,7 +14588,7 @@ async function openKpiDrilldown(key){
   const requestId=++kpiDrilldownRequestSeq;
   showKpiTicketsPopup(entry.title,[],{loading:true});
   try{
-    const params=new URLSearchParams({category:entry.category,range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false'});
+    const params=new URLSearchParams({category:entry.category,range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:String(new Date().getTimezoneOffset())});
     const res=await fetch('/api/tickets/kpis/drilldown?'+params.toString(),{credentials:'include'});
     const data=await res.json().catch(()=>({}));
     if(!res.ok)throw new Error(data?.error||'drilldown_fetch_failed');
@@ -14572,7 +14645,7 @@ async function renderKpiView(){
   if(kpiFetchInFlight)return;
   kpiFetchInFlight=true;
   try{
-    const params=new URLSearchParams({range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false'});
+    const params=new URLSearchParams({range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:String(new Date().getTimezoneOffset())});
     const res=await fetch('/api/tickets/kpis?'+params.toString(),{credentials:'include'});
     const data=await res.json().catch(()=>({}));
     if(!res.ok)throw new Error(data?.error||'kpi_fetch_failed');
@@ -14685,8 +14758,8 @@ function renderKpiViewLocal(){
   const companyForTicket=t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);return ce&&hsCache[ce]?.companyName?hsCache[ce].companyName:null;};
   const ticketMatchesTeam=t=>{
     const {assignee,csOwner}=ticketFilterAgentValues(t);
-    if(kpiTeamFilter==='cs')return CS_AGENTS.includes(csOwner);
-    if(kpiTeamFilter==='support')return SUPPORT_AGENTS.includes(assignee);
+    if(kpiTeamFilter==='cs')return isKnownCSAgent(csOwner);
+    if(kpiTeamFilter==='support')return isKnownSupportAgent(assignee);
     return true;
   };
   const ticketMatchesCompany=t=>{
@@ -14730,7 +14803,7 @@ function renderKpiViewLocal(){
   if (canViewAllTickets) {
     const teamAgents=kpiTeamFilter==='cs'?CS_AGENTS:(kpiTeamFilter==='support'?SUPPORT_AGENTS:ALL_AGENTS);
     const uniqAgents=new Set(teamAgents);
-    allTickets.forEach(t=>{const {assignee,csOwner}=ticketFilterAgentValues(t);const ag=kpiTeamFilter==='cs'?csOwner:assignee;if(!ag)return;if(kpiTeamFilter==='cs'&&!CS_AGENTS.includes(ag))return;if(kpiTeamFilter==='support'&&!SUPPORT_AGENTS.includes(ag))return;uniqAgents.add(ag);});
+    allTickets.forEach(t=>{const {assignee,csOwner}=ticketFilterAgentValues(t);const ag=kpiTeamFilter==='cs'?csOwner:assignee;if(!ag)return;if(kpiTeamFilter==='cs'&&!isKnownCSAgent(ag))return;if(kpiTeamFilter==='support'&&!isKnownSupportAgent(ag))return;uniqAgents.add(ag);});
     const options=['<option value="all">All</option>',...Array.from(uniqAgents).sort((a,b)=>a.localeCompare(b)).map(a=>`<option value="${esc(a)}">${esc(a)}</option>`)];
     agentFilterEl.innerHTML=options.join('');
     if(kpiAgentFilter!=='all'&&!uniqAgents.has(kpiAgentFilter))kpiAgentFilter='all';
@@ -15153,7 +15226,7 @@ function extractCompanyCoOwnerFromProps(p){if(!p||typeof p!=='object')return nul
 function resolveCSAgentFromCoOwner(raw){
   if(!raw)return null;
   const rawStr=String(raw).trim();
-  const isKnownAgent=code=>ALL_AGENTS.includes(code)||CS_AGENTS.includes(code)||SUPPORT_AGENTS.includes(code);
+  const isKnownAgent=code=>isKnownAgentCode(code);
   const acceptCode=code=>{
     const norm=String(code||'').replace(/[^A-Z]/gi,'').toUpperCase().slice(0,3);
     return norm.length===3?norm:null;
@@ -15528,6 +15601,34 @@ function updateWorkload(){
 function showToast(msg,cls=''){const t=document.getElementById('toast');t.textContent=msg;t.className='show'+(cls?' '+cls:'');clearTimeout(t._timer);t._timer=setTimeout(()=>{t.className='';},4500);}
 function startCountdown(){pollSecsLeft=POLL_SECS;const cd=document.getElementById('poll-cd');const tick=setInterval(()=>{pollSecsLeft--;cd.textContent=pollSecsLeft>0?' '+pollSecsLeft+'s':' checking';if(pollSecsLeft<=0)clearInterval(tick);},1000);}
 function rebuildTagged(){taggedTickets.clear();const me=currentUser();Object.entries(ticketComments).forEach(([id,cs])=>{if(cs.some(c=>Array.isArray(c.tags)&&c.tags.map(agentIdentityCode).includes(me)))taggedTickets.add(id);});document.getElementById('tagged-filter').style.display=taggedTickets.size?'':'none';updateMentionsBadge();}
+function renderAgentFilterOptions(){
+  const af=document.getElementById('agent-filter');
+  if(!af)return;
+  const selected=af.value||activeA;
+  af.innerHTML='<option value="all">All CS & Support</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><option value="tagged">Tagged me</option>';
+  // Someone just taken off a roster stays selected rather than silently
+  // widening the board to everyone.
+  if(selected&&selected!=='all'&&!af.querySelector(`option[value="${CSS.escape(selected)}"]`)&&!ALL_AGENTS.includes(selected)){
+    af.insertAdjacentHTML('beforeend',`<option value="${esc(selected)}">${esc(selected)} (former)</option>`);
+  }
+  if(selected)af.value=selected;
+}
+/* Picks up an admin's Manage Users changes without a reload: someone added to
+   CS or Support appears in every dropdown, someone removed or disabled leaves
+   them. The dropdowns that are built when they open read the arrays directly;
+   the board's agent filter is the one that is built once, so it is rebuilt. */
+async function refreshAgentRosterFromServer(){
+  try{
+    const res=await fetch('/api/roster',{credentials:'include'});
+    if(!res.ok)return;
+    if(!applyAgentRoster(await res.json()))return;
+    renderAgentFilterOptions();
+    if(typeof fillCreateTicketAgentSelect==='function')fillCreateTicketAgentSelect();
+    renderBoard();
+  }catch(_){}
+}
+setInterval(refreshAgentRosterFromServer,2*60*1000);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')refreshAgentRosterFromServer();});
 async function buildAgentUI(){
   let loggedUser = {
     username: 'admin',
@@ -15541,6 +15642,7 @@ async function buildAgentUI(){
     if (res.ok) {
       const data = await res.json();
       loggedUser = data.user || loggedUser;
+      applyAgentRoster(data.roster);
     }
   } catch (_) {}
   currentSessionUser=loggedUser||currentSessionUser;
@@ -15589,8 +15691,7 @@ async function buildAgentUI(){
     kpiAgentFilter = enforcedAgentFilter() || 'all';
   }
 
-  const af=document.getElementById('agent-filter');
-  af.innerHTML='<option value="all">All CS & Support</option><optgroup label="Support">'+SUPPORT_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><optgroup label="CS">'+CS_AGENTS.map(a=>`<option>${a}</option>`).join('')+'</optgroup><option value="tagged">Tagged me</option>';
+  renderAgentFilterOptions();
   syncRoleRestrictedControls();
 
   // Only the agents this person may hand a ticket to - for a support agent
@@ -18096,13 +18197,22 @@ function renderLaneBoard(visible){
 }
 
 function ticketIsMyResolved(t){
-  if(ticketCategory[t.id]==='Spam')return false;
+  if(String(ticketCategory[t.id]||'').toLowerCase()==='spam')return false;
+  // The KPI leaves duplicates out of every resolved figure; this count has to
+  // too, or an agent's badge and their KPI can never agree.
+  if(isDuplicateTicket(t.id))return false;
   if(normalizeTicketStage(ticketState[t.id]||'new')!=='res')return false;
   const me=supportIdentityCode();
   return !!me&&ticketFilterAgentValues(t).assignee===me;
 }
+// Anyone who resolves tickets under a support code - an admin who is also on
+// the support roster included. Gating it on the support team left those
+// admins with no way to find their own resolved tickets once they left the
+// board.
 function currentUserHasMyResolved(){
-  return !currentUserIsAdmin()&&currentUserTeam()==='support';
+  const me=supportIdentityCode();
+  if(currentUserIsAdmin())return SUPPORT_AGENTS.includes(me);
+  return currentUserTeam()==='support';
 }
 function updateMyResolvedBadge(){
   const badge=document.getElementById('my-resolved-count');
@@ -20989,8 +21099,121 @@ function addTickets(emails){
   // duplicate tickets with identical createdAt and the reply's id lower
   // than the original's, i.e. the reply was inserted first).
   const ordered=[...emails].sort((a,b)=>new Date(a?.receivedDateTime||0)-new Date(b?.receivedDateTime||0));
-  let n=0;let merged=0;ordered.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;const subtype=classifySubtype(e);const existingTicket=findExistingTicketForEmail(e);if(existingTicket){if(mergeEmailIntoExistingTicket(existingTicket,e,subtype))merged++;return;}const st=SUBTYPE_BY_ID[subtype]||null;const t={id:e.id,email:e,priority:st?.priority||classifyPriority(e)};const ce=getClientEmail(e);if(ce)ticketClientEmail[e.id]=ce;const csFromSender=csAgentFromSenderEmail(e.sender);if(csFromSender&&!ticketCSOwner[e.id])ticketCSOwner[e.id]=csFromSender;if(!ticketCreatedAt[e.id])ticketCreatedAt[e.id]=e.receivedDateTime||new Date().toISOString();if(!ticketState[e.id])ticketState[e.id]='new';else ticketState[e.id]=normalizeTicketStage(ticketState[e.id]);const effectiveEmail=ce||e.sender?.toLowerCase();if(effectiveEmail&&spamSenders.has(effectiveEmail)){ticketCategory[e.id]='Spam';}else if(!ticketCategory[e.id]){ticketCategory[e.id]=st?.type||classifyCategory(e);}if(!ticketSubtype[e.id]&&st)ticketSubtype[e.id]=st.id;if(st)ticketPriority[e.id]=st.priority;if(!ticketAssignee[e.id]&&ticketCategory[e.id]!=='Spam'){ensureSupportAssignmentForTicket(e.id,e);}allTickets.push(t);n++;});if(n>0||merged>0){allTickets.sort((a,b)=>new Date(b?.email?.receivedDateTime||0)-new Date(a?.email?.receivedDateTime||0));applyCompanyCSAssignments();syncUnsyncedTicketsToHubspot();}return{created:n,merged};}
-async function poll(){if(!hasCowork){startCountdown();return;}const res=await fetchMailboxWindow(buildPollAfterDateTime());const outcome=addTickets(extractEmails(res));document.getElementById('last-poll').textContent='Checked: '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(outcome.created>0||outcome.merged>0){saveState(outcome.merged>0?'mailbox_poll_thread_merge':'mailbox_poll_new_messages');const parts=[];if(outcome.merged>0)parts.push('New message'+(outcome.merged>1?'s':''));if(outcome.created>0)parts.push(`${outcome.created} new ticket${outcome.created>1?'s':''}`);if(outcome.merged>0)parts.push(`${outcome.merged} reply${outcome.merged>1?'ies':'y'} merged into existing ticket${outcome.merged>1?'s':''}`);showToast(parts.join(' · '));renderActiveView();enrichWithHubSpot();}
+  let n=0;let merged=0;let reopenAsks=0;ordered.filter(e=>e.id&&!seen[e.id]&&!isAutomatic(e)).forEach(e=>{seen[e.id]=true;const subtype=classifySubtype(e);const existingTicket=findExistingTicketForEmail(e);
+    if(existingTicket){
+      // A client writing on a resolved ticket: ask rather than re-open it (or,
+      // when the thread did not match, open a second ticket) on our own.
+      if(shouldAskBeforeReopen(existingTicket,e)){if(queueReopenRequest(existingTicket,e,subtype))reopenAsks++;return;}
+      if(mergeEmailIntoExistingTicket(existingTicket,e,subtype))merged++;return;
+    }
+    createTicketFromEmail(e,subtype);n++;});if(n>0||merged>0){allTickets.sort((a,b)=>new Date(b?.email?.receivedDateTime||0)-new Date(a?.email?.receivedDateTime||0));applyCompanyCSAssignments();syncUnsyncedTicketsToHubspot();}if(reopenAsks>0)renderReopenRequests();return{created:n,merged,reopenAsks};}
+function createTicketFromEmail(e,subtype){const st=SUBTYPE_BY_ID[subtype]||null;const t={id:e.id,email:e,priority:st?.priority||classifyPriority(e)};const ce=getClientEmail(e);if(ce)ticketClientEmail[e.id]=ce;const csFromSender=csAgentFromSenderEmail(e.sender);if(csFromSender&&!ticketCSOwner[e.id])ticketCSOwner[e.id]=csFromSender;if(!ticketCreatedAt[e.id])ticketCreatedAt[e.id]=e.receivedDateTime||new Date().toISOString();if(!ticketState[e.id])ticketState[e.id]='new';else ticketState[e.id]=normalizeTicketStage(ticketState[e.id]);const effectiveEmail=ce||e.sender?.toLowerCase();if(effectiveEmail&&spamSenders.has(effectiveEmail)){ticketCategory[e.id]='Spam';}else if(!ticketCategory[e.id]){ticketCategory[e.id]=st?.type||classifyCategory(e);}if(!ticketSubtype[e.id]&&st)ticketSubtype[e.id]=st.id;if(st)ticketPriority[e.id]=st.priority;if(!ticketAssignee[e.id]&&ticketCategory[e.id]!=='Spam'){ensureSupportAssignmentForTicket(e.id,e);}allTickets.push(t);return t;}
+
+/* Re-open requests. A client reply that lands on a resolved ticket used to
+   re-open it on the spot, and one whose thread did not match opened a second
+   ticket instead. Now it waits here, top right on every board that can see
+   the ticket, until someone decides: Re-open (the reply joins the ticket and it
+   comes back as Re-opened), Keep closed (the reply is recorded, the ticket
+   stays resolved), or New ticket (it really is a new request).
+
+   Keyed by the reply's message id, shared through the board state and live
+   sync. A decided entry stays (without the email) for 30 days so a tab that
+   polls the same message later cannot ask the question again, and the server
+   lets a decision win over a pending copy (mergeReopenRequests in server.js). */
+let ticketReopenRequests={};
+function shouldAskBeforeReopen(ticket,emailObj){
+  if(!ticket||!emailObj)return false;
+  if(normalizeTicketStage(ticketState[ticket.id]||'new')!=='res')return false;
+  if(String(ticketCategory[ticket.id]||'').toLowerCase()==='spam')return false;
+  return !isInternalEmailAddress(emailObj.sender);
+}
+function queueReopenRequest(ticket,emailObj,subtype){
+  const key=String(emailObj.id);
+  if(ticketReopenRequests[key])return false;
+  ticketReopenRequests[key]={
+    ticketId:String(ticket.id),status:'pending',subtype:subtype||null,
+    at:Date.parse(emailObj.receivedDateTime||'')||Date.now(),
+    from:String(emailObj.sender||'').toLowerCase(),
+    email:emailObj
+  };
+  return true;
+}
+function pendingReopenRequests(){
+  return Object.entries(ticketReopenRequests)
+    .filter(([,r])=>r&&r.status==='pending'&&r.email)
+    .map(([key,r])=>({key,...r,ticket:allTickets.find(t=>String(t.id)===String(r.ticketId))||null}))
+    .filter(r=>!r.ticket||ticketVisibleToCurrentUser(r.ticket))
+    .sort((a,b)=>a.at-b.at);
+}
+async function decideReopenRequest(key,decision){
+  const req=ticketReopenRequests[key];
+  if(!req||req.status!=='pending'||!req.email)return;
+  const ticket=allTickets.find(t=>String(t.id)===String(req.ticketId))||null;
+  const email=req.email;
+  let outcome=decision;
+  if(decision==='reopen'&&ticket){
+    // The ordinary merge is what re-opens a resolved ticket on a client reply.
+    mergeEmailIntoExistingTicket(ticket,email,req.subtype);
+  }else if(decision==='keep'&&ticket){
+    mergeEmailIntoExistingTicket(ticket,email,req.subtype,{keepResolved:true});
+  }else{
+    // New ticket - or the old ticket is gone, so there is nothing to re-open.
+    if(!allTickets.some(t=>String(t.id)===String(email.id)))createTicketFromEmail(email,req.subtype);
+    allTickets.sort((a,b)=>new Date(b?.email?.receivedDateTime||0)-new Date(a?.email?.receivedDateTime||0));
+    outcome='new';
+  }
+  ticketReopenRequests[key]={ticketId:req.ticketId,status:outcome,at:req.at,from:req.from,decidedBy:currentUser(),decidedAt:Date.now()};
+  renderReopenRequests();
+  renderActiveView();
+  await saveState('reopen_request_'+outcome);
+  const label=ticket?ticketDisplayNumber(ticket.id):'The ticket';
+  showToast(outcome==='reopen'?`${label} re-opened with the client's reply`:outcome==='keep'?`${label} kept resolved - reply added to it`:'Reply opened as a new ticket');
+}
+let reopenRequestsSignature='';
+function renderReopenRequests(){
+  const host=document.getElementById('reopen-requests');
+  if(!host)return;
+  const list=pendingReopenRequests();
+  const sig=list.map(r=>r.key).join('|');
+  if(sig===reopenRequestsSignature)return;
+  reopenRequestsSignature=sig;
+  if(!list.length){host.innerHTML='';return;}
+  const shown=list.slice(0,3);
+  host.innerHTML=shown.map(r=>{
+    const t=r.ticket;
+    const num=t?ticketDisplayNumber(t.id):'';
+    const subject=t?.email?.subject||r.email.subject||'(No subject)';
+    const preview=String(r.email.bodyPreview||r.email.summary||'').trim();
+    const when=new Date(r.at).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});
+    return `<div class="reopen-card" data-reopen-key="${esc(r.key)}">
+      <div class="reopen-head"><span class="reopen-kicker">Ticket could be re-opened</span>${t?'<button class="reopen-x" type="button" data-reopen-view title="Open the resolved ticket">View</button>':''}</div>
+      <div class="reopen-title">${esc(num)} ${esc(subject)}</div>
+      <div class="reopen-meta">Resolved ticket · reply from ${esc(r.from||'the client')} · ${esc(when)}</div>
+      ${preview?`<div class="reopen-preview">"${esc(preview.slice(0,160))}${preview.length>160?'…':''}"</div>`:''}
+      <div class="reopen-actions">
+        <button type="button" class="reopen-btn primary" data-reopen-decide="reopen">Re-open</button>
+        <button type="button" class="reopen-btn" data-reopen-decide="keep" title="Add the reply to the ticket and leave it resolved">Keep closed</button>
+        <button type="button" class="reopen-btn" data-reopen-decide="new" title="Open this reply as a separate ticket">New ticket</button>
+      </div>
+    </div>`;
+  }).join('')+(list.length>shown.length?`<div class="reopen-more">+${list.length-shown.length} more waiting</div>`:'');
+  host.querySelectorAll('.reopen-card').forEach(card=>{
+    const key=card.dataset.reopenKey;
+    card.querySelectorAll('[data-reopen-decide]').forEach(btn=>btn.addEventListener('click',()=>{
+      card.querySelectorAll('button').forEach(b=>{b.disabled=true;});
+      decideReopenRequest(key,btn.dataset.reopenDecide).catch(()=>{});
+    }));
+    card.querySelector('[data-reopen-view]')?.addEventListener('click',()=>{
+      const req=ticketReopenRequests[key];
+      const t=req&&allTickets.find(x=>String(x.id)===String(req.ticketId));
+      if(t)openEmailModal(t);
+    });
+  });
+}
+// Live patches and loads change the map from elsewhere; the signature check
+// makes this a no-op unless the pending set actually changed.
+setInterval(renderReopenRequests,3000);
+async function poll(){if(!hasCowork){startCountdown();return;}const res=await fetchMailboxWindow(buildPollAfterDateTime());const outcome=addTickets(extractEmails(res));document.getElementById('last-poll').textContent='Checked: '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});if(outcome.reopenAsks>0&&!(outcome.created>0||outcome.merged>0)){saveState('mailbox_poll_reopen_request');showToast('A resolved ticket got a reply - re-open it? (top right)');}if(outcome.created>0||outcome.merged>0){saveState(outcome.merged>0?'mailbox_poll_thread_merge':'mailbox_poll_new_messages');const parts=[];if(outcome.reopenAsks>0)parts.push(`${outcome.reopenAsks} resolved ticket${outcome.reopenAsks>1?'s':''} could be re-opened`);if(outcome.merged>0)parts.push('New message'+(outcome.merged>1?'s':''));if(outcome.created>0)parts.push(`${outcome.created} new ticket${outcome.created>1?'s':''}`);if(outcome.merged>0)parts.push(`${outcome.merged} reply${outcome.merged>1?'ies':'y'} merged into existing ticket${outcome.merged>1?'s':''}`);showToast(parts.join(' · '));renderActiveView();enrichWithHubSpot();}
   // Retry here too (not just at initial load) - a deep link clicked into an
   // already-open tab, or for a ticket not yet synced at bootstrap, would
   // otherwise never resolve since the three init-time calls only run once.

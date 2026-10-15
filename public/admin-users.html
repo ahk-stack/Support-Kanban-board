@@ -177,6 +177,24 @@
       return `${includeOwner ? '<option value="owner">Owner</option>' : ''}<option value="admin">Admin</option><option value="cs">CS</option><option value="support">Support</option>`;
     }
 
+    // The team is which dropdowns the person appears in on the board: the CS
+    // owner list, the support assignee list, or neither.
+    function teamOptionsHtml() {
+      return '<option value="">None</option><option value="cs">CS</option><option value="support">Support</option>';
+    }
+
+    function teamLabel(team) {
+      return { cs: 'CS team', support: 'Support team' }[team] || '';
+    }
+
+    // Picking CS or Support as the role puts them on that team too; an admin's
+    // team is left alone, since an admin can also work as an agent.
+    function followRoleWithTeam(roleSelect, teamSelect) {
+      roleSelect.addEventListener('change', () => {
+        if (roleSelect.value === 'cs' || roleSelect.value === 'support') teamSelect.value = roleSelect.value;
+      });
+    }
+
     function roleLabel(role) {
       const labels = { owner: 'Owner', admin: 'Admin', cs: 'CS', support: 'Support', agent: 'Support', viewer: 'Support' };
       return labels[role] || role || 'Support';
@@ -185,7 +203,7 @@
     function renderUsers() {
       const query = elements.searchInput.value.trim().toLowerCase();
       const visible = state.users.filter(user => {
-        const text = [user.username, user.displayName, user.email, user.role].filter(Boolean).join(' ').toLowerCase();
+        const text = [user.username, user.displayName, user.email, user.role, teamLabel(user.team)].filter(Boolean).join(' ').toLowerCase();
         return text.includes(query);
       });
       if (!visible.length) {
@@ -226,6 +244,14 @@
           role.style.color = '#92400e';
         }
         nameRow.append(name, role);
+        if (user.team) {
+          const team = document.createElement('span');
+          team.className = 'role';
+          team.style.background = user.team === 'cs' ? '#ecfdf5' : '#fff7ed';
+          team.style.color = user.team === 'cs' ? '#047857' : '#c2410c';
+          team.textContent = teamLabel(user.team);
+          nameRow.append(team);
+        }
 
         const subtitle = document.createElement('div');
         subtitle.className = 'subtitle';
@@ -258,8 +284,9 @@
           <div class="form-group"><label for="newEmail">Email</label><input id="newEmail" type="email" autocomplete="email" /></div>
           <div class="form-row">
             <div class="form-group"><label for="newRole">Role</label><select id="newRole">${roleOptionsHtml(currentUserIsOwner())}</select></div>
-            <div class="form-group"><label for="newPassword">Password</label><input id="newPassword" type="password" autocomplete="new-password" /></div>
+            <div class="form-group"><label for="newTeam">Team</label><select id="newTeam">${teamOptionsHtml()}</select></div>
           </div>
+          <div class="form-group"><label for="newPassword">Password</label><input id="newPassword" type="password" autocomplete="new-password" /></div>
         </div>
         <div class="button-row" style="justify-content:flex-end;gap:10px;margin-top:18px;">
           <button class="btn btn-secondary" id="cancelCreate" type="button">Cancel</button>
@@ -274,6 +301,9 @@
       const inputEmail = document.getElementById('newEmail');
       const inputRole = document.getElementById('newRole');
       const inputPassword = document.getElementById('newPassword');
+      const inputTeam = document.getElementById('newTeam');
+      inputTeam.value = ['cs', 'support'].includes(inputRole.value) ? inputRole.value : '';
+      followRoleWithTeam(inputRole, inputTeam);
       const createMessage = document.getElementById('createMessage');
       const submitCreate = document.getElementById('submitCreate');
       const cancelCreate = document.getElementById('cancelCreate');
@@ -294,6 +324,7 @@
         const displayName = inputDisplayName.value.trim() || null;
         const email = inputEmail.value.trim() || null;
         const role = inputRole.value;
+        const team = inputTeam.value;
 
         if (!username) {
           createMessage.textContent = 'Username is required.';
@@ -312,7 +343,7 @@
         try {
           await api('/api/admin/users', {
             method: 'POST',
-            body: { username, password, displayName, email, role }
+            body: { username, password, displayName, email, role, team }
           });
           createMessage.textContent = 'User created successfully.';
           createMessage.style.color = '#16a34a';
@@ -377,13 +408,14 @@
             <div class="form-group"><label for="inputRole">Role</label><select id="inputRole">${roleOptionsHtml(currentUserIsOwner() || isOwner(user))}</select></div>
             <div class="form-group"><label for="inputStatus">Status</label><select id="inputStatus"><option value="true">Active</option><option value="false">Disabled</option></select></div>
           </div>
+          <div class="form-group"><label for="inputTeam">Team (board dropdowns)</label><select id="inputTeam">${teamOptionsHtml()}</select></div>
           <div class="form-group"><label for="inputPassword">New password</label><input id="inputPassword" type="password" placeholder="Leave empty to keep current" autocomplete="new-password" /></div>
         </div>
         <div class="button-row">
           <button class="btn btn-primary" id="saveProfile" type="button">Save changes</button>
           <button class="btn btn-danger" id="deleteProfile" type="button">Delete user</button>
         </div>
-        <p class="help-text">Username, role, and email can be changed here. Upload a PNG/JPG/WEBP avatar if you want a profile photo.</p>
+        <p class="help-text">Team decides which board dropdowns this person is listed in: CS owners, Support assignees, or neither. Disabling or deleting a user takes them off it. Username, role, and email can be changed here. Upload a PNG/JPG/WEBP avatar if you want a profile photo.</p>
         <div class="message" id="profileMessage"></div>
       `;
 
@@ -401,12 +433,15 @@
       const inputRole = document.getElementById('inputRole');
       const inputStatus = document.getElementById('inputStatus');
       const inputPassword = document.getElementById('inputPassword');
+      const inputTeam = document.getElementById('inputTeam');
 
       inputRole.value = user.role;
+      inputTeam.value = user.team || '';
+      followRoleWithTeam(inputRole, inputTeam);
       inputStatus.value = String(user.isActive !== false);
       const ownerLocked = isOwner(user) && !currentUserIsOwner() && !currentUserIsSelectedUser(user);
       if (ownerLocked) {
-        [inputUsername, inputDisplayName, inputEmail, inputRole, inputStatus, inputPassword, uploadAvatar, removeAvatar, saveProfile, deleteProfile].forEach(el => {
+        [inputUsername, inputDisplayName, inputEmail, inputRole, inputTeam, inputStatus, inputPassword, uploadAvatar, removeAvatar, saveProfile, deleteProfile].forEach(el => {
           if (el) el.disabled = true;
         });
         profileMessage.textContent = 'Owner account: only an owner can change or delete this profile.';
@@ -469,6 +504,7 @@
           displayName: inputDisplayName.value.trim() || null,
           email: inputEmail.value.trim() || null,
           role: inputRole.value,
+          team: inputTeam.value,
           isActive: inputStatus.value === 'true'
         };
         if (inputPassword.value.trim()) payload.password = inputPassword.value.trim();

@@ -32,7 +32,6 @@ const VIEWS_DIR = path.join(__dirname, 'views');
 const AVATAR_UPLOAD_DIR = path.join(__dirname, 'public', 'uploads', 'avatars');
 const MAX_BACKUPS = Number(process.env.STATE_BACKUP_KEEP || 50);
 const BACKUP_MIN_INTERVAL_MS = Number(process.env.STATE_BACKUP_MIN_INTERVAL_MS || 60_000);
-const RESOLVED_RETENTION_MS = Number(process.env.RESOLVED_RETENTION_MS || 72 * 60 * 60 * 1000);
 // Shift tracking (drives shift-time SLA). Kept in its own file rather than in
 // board-state.json: it is server-authoritative (the client cannot be trusted to
 // report its own shift), and it must not take part in the board's
@@ -266,8 +265,21 @@ const CS_TEAMS_EMAIL_OVERRIDES = (() => {
     return {};
   }
 })();
-const SUPPORT_AGENT_CODES = new Set(['SGU','ZIO','SFA','MEZ','SHE','JBA','RMD']);
-const CS_AGENT_CODES = new Set(['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC','TNY','LGI']);
+/* The CS and Support rosters. They come from the users table (User.team, set
+   by admins in Manage Users) - see refreshAgentRoster. The lists below are only
+   what the board runs on until that first load, or if the database cannot be
+   read; they are also the "former agents" the client still recognises when it
+   attributes old tickets.
+
+   These two Sets are mutated in place, never reassigned, so every reader in
+   this file always sees the current roster. */
+const LEGACY_SUPPORT_AGENT_CODES = ['SGU','ZIO','SFA','MEZ','SHE','JBA','RMD'];
+const LEGACY_CS_AGENT_CODES = ['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC','TNY','LGI'];
+const SUPPORT_AGENT_CODES = new Set(LEGACY_SUPPORT_AGENT_CODES);
+const CS_AGENT_CODES = new Set(LEGACY_CS_AGENT_CODES);
+// Agents who were on a roster and no longer are (disabled, deleted, or moved
+// off it). Their old tickets keep their name; they are just not offered.
+const FORMER_AGENT_CODES = { support: new Set(), cs: new Set() };
 
 const APP_BUILD_VERSION = (
   process.env.RENDER_GIT_COMMIT ||
@@ -653,6 +665,7 @@ function sanitizeUser(user) {
     isActive: user.isActive !== false,
     displayName: user.displayName || null,
     email: user.email || null,
+    team: user.team || null,
     avatarUrl: avatarUrlForUserId(user.id),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt
@@ -739,6 +752,66 @@ function normalizeRole(role) {
   if (value === 'agent' || value === 'viewer') return 'support';
   return ['owner', 'admin', 'cs', 'support'].includes(value) ? value : null;
 }
+// '' means on no roster; undefined means the value was not recognised.
+function normalizeTeam(team) {
+  const value = String(team ?? '').trim().toLowerCase();
+  if (!value || value === 'none') return '';
+  return value === 'cs' || value === 'support' ? value : undefined;
+}
+// A user's agent code is their username when it is a trigram, otherwise the
+// local part of their email - the same order the board resolves it in.
+function userAgentCode(user) {
+  for (const candidate of [user?.username, String(user?.email || '').split('@')[0]]) {
+    const code = String(candidate || '').trim().toUpperCase();
+    if (/^[A-Z]{3}$/.test(code)) return code;
+  }
+  return String(user?.username || '').trim().toUpperCase();
+}
+
+/* Rebuild the rosters from the users table: every active user with a team.
+   Run at start-up and after every Manage Users change, so adding, moving,
+   disabling or deleting someone changes the dropdowns straight away.
+
+   If nobody has a team yet (the migration seeds it, so that means it has not
+   run) or the read fails, the rosters are left as they are rather than emptied
+   - an empty roster would unassign the whole board. */
+let agentRosterLoadedAt = 0;
+async function refreshAgentRoster() {
+  let users;
+  try {
+    users = await prisma.user.findMany({ where: { team: { in: ['cs', 'support'] } }, orderBy: { username: 'asc' }, select: { username: true, email: true, team: true, isActive: true } });
+  } catch (error) {
+    console.warn('Agent roster: could not read users, keeping the current roster:', error?.message || error);
+    return false;
+  }
+  if (!users.length) return false;
+  const next = { support: new Set(), cs: new Set() };
+  const inactive = { support: new Set(), cs: new Set() };
+  for (const user of users) {
+    const code = userAgentCode(user);
+    if (!code) continue;
+    (user.isActive === false ? inactive : next)[user.team].add(code);
+  }
+  for (const kind of ['support', 'cs']) {
+    const live = kind === 'support' ? SUPPORT_AGENT_CODES : CS_AGENT_CODES;
+    const legacy = kind === 'support' ? LEGACY_SUPPORT_AGENT_CODES : LEGACY_CS_AGENT_CODES;
+    const former = FORMER_AGENT_CODES[kind];
+    [...live, ...legacy, ...inactive[kind]].forEach(code => { if (!next[kind].has(code)) former.add(code); });
+    next[kind].forEach(code => former.delete(code));
+    live.clear();
+    next[kind].forEach(code => live.add(code));
+  }
+  agentRosterLoadedAt = Date.now();
+  return true;
+}
+function agentRosterPayload() {
+  return {
+    support: [...SUPPORT_AGENT_CODES],
+    cs: [...CS_AGENT_CODES],
+    former: { support: [...FORMER_AGENT_CODES.support], cs: [...FORMER_AGENT_CODES.cs] },
+    loadedAt: agentRosterLoadedAt || null
+  };
+}
 function normalizeBoardStatusForDb(stage) {
   const value = String(stage || 'new').trim().toLowerCase();
   if (value === 'new') return 'New';
@@ -815,33 +888,47 @@ function normalizeKpiRange(range) {
   return KPI_RANGE_ALIASES[key] || 'today';
 }
 function endOfPeriod(startOfNext) { return new Date(startOfNext.getTime() - 1); }
-function kpiDateBounds(range) {
+/* tzOffset is the browser's Date#getTimezoneOffset() (minutes, UTC minus
+   local). With it, "today" starts at the agent's midnight; without it, at the
+   server's - which in the cluster is UTC, so a Paris agent's Today began at
+   02:00 and the KPI disagreed with the board about what was resolved today. */
+function kpiDateBounds(range, tzOffset) {
+  const offsetRaw = tzOffset === undefined || tzOffset === null || tzOffset === '' ? NaN : Number(tzOffset);
+  const offsetMs = Number.isFinite(offsetRaw) && Math.abs(offsetRaw) <= 14 * 60 ? offsetRaw * 60_000 : null;
+  // Calendar fields of an instant, and the instant a calendar day starts, in
+  // the asker's timezone (or the server's when it is unknown).
+  const fields = (date) => {
+    if (offsetMs === null) return { y: date.getFullYear(), m: date.getMonth(), d: date.getDate(), wd: date.getDay() };
+    const wall = new Date(date.getTime() - offsetMs);
+    return { y: wall.getUTCFullYear(), m: wall.getUTCMonth(), d: wall.getUTCDate(), wd: wall.getUTCDay() };
+  };
+  const dayAt = (y, m, d) => (offsetMs === null ? new Date(y, m, d) : new Date(Date.UTC(y, m, d) + offsetMs));
   const now = new Date();
-  const dayStart = startOfLocalDay(now);
-  const dayMs = 24 * 60 * 60 * 1000;
-  const year = now.getFullYear();
-  const month = now.getMonth();
-  const mondayOffset = (dayStart.getDay() + 6) % 7;
-  const thisWeekStart = new Date(dayStart.getTime() - mondayOffset * dayMs);
+  const today = fields(now);
+  const dayStart = dayAt(today.y, today.m, today.d);
+  const year = today.y;
+  const month = today.m;
+  const mondayOffset = (today.wd + 6) % 7;
+  const thisWeekStart = dayAt(today.y, today.m, today.d - mondayOffset);
   const key = normalizeKpiRange(range);
 
   if (key === 'today') return { key, start: dayStart, end: now, label: 'Today' };
   if (key === 'this_week') return { key, start: thisWeekStart, end: now, label: 'This week' };
   if (key === 'last_week') {
-    return { key, start: new Date(thisWeekStart.getTime() - 7 * dayMs), end: endOfPeriod(thisWeekStart), label: 'Last week' };
+    return { key, start: dayAt(today.y, today.m, today.d - mondayOffset - 7), end: endOfPeriod(thisWeekStart), label: 'Last week' };
   }
-  if (key === 'this_month') return { key, start: new Date(year, month, 1), end: now, label: 'This month' };
+  if (key === 'this_month') return { key, start: dayAt(year, month, 1), end: now, label: 'This month' };
   if (key === 'last_month') {
-    return { key, start: new Date(year, month - 1, 1), end: endOfPeriod(new Date(year, month, 1)), label: 'Last month' };
+    return { key, start: dayAt(year, month - 1, 1), end: endOfPeriod(dayAt(year, month, 1)), label: 'Last month' };
   }
   if (key === 'this_quarter') {
-    return { key, start: new Date(year, quarterStartMonth(month), 1), end: now, label: 'This quarter' };
+    return { key, start: dayAt(year, quarterStartMonth(month), 1), end: now, label: 'This quarter' };
   }
   if (key === 'last_quarter') {
-    const thisQuarterStart = new Date(year, quarterStartMonth(month), 1);
+    const thisQuarterStart = dayAt(year, quarterStartMonth(month), 1);
     return {
       key,
-      start: new Date(thisQuarterStart.getFullYear(), thisQuarterStart.getMonth() - 3, 1),
+      start: dayAt(year, quarterStartMonth(month) - 3, 1),
       end: endOfPeriod(thisQuarterStart),
       label: 'Last quarter'
     };
@@ -850,7 +937,8 @@ function kpiDateBounds(range) {
   // known (the first seconds after a restart) it starts at the epoch, which
   // for a board with nothing older is the same answer.
   if (key === 'since_launch') {
-    return { key, start: kpiLaunchAt ? startOfLocalDay(kpiLaunchAt) : new Date(0), end: now, label: 'Since launch' };
+    const launch = kpiLaunchAt ? fields(kpiLaunchAt) : null;
+    return { key, start: launch ? dayAt(launch.y, launch.m, launch.d) : new Date(0), end: now, label: 'Since launch' };
   }
   return { key: 'today', start: dayStart, end: now, label: 'Today' };
 }
@@ -891,19 +979,6 @@ function kpiTicketInRange(ticket, bounds) {
     return isDateInBounds(ticket?.updatedAt, bounds);
   }
   return isDateInBounds(ticket?.createdAt, bounds);
-}
-function resolvedAtFromState(state, ticketId) {
-  const touched = Number(state?.ticketStageTouchedAt?.[ticketId] || 0);
-  if (touched > 0) return touched;
-  const created = Date.parse(state?.ticketCreatedAt?.[ticketId] || '');
-  return Number.isFinite(created) ? created : 0;
-}
-function isResolvedHiddenInState(state, ticketId, now = Date.now()) {
-  if (normalizeBoardStatusForDb(state?.ticketState?.[ticketId] || 'new') !== 'Resolved') return false;
-  const meta = (state?.ticketResolutionMeta && typeof state.ticketResolutionMeta === 'object') ? state.ticketResolutionMeta[ticketId] : null;
-  if (meta?.confirmedAt) return true;
-  const resolvedAt = resolvedAtFromState(state, ticketId);
-  return !!resolvedAt && now - resolvedAt >= RESOLVED_RETENTION_MS;
 }
 function safeDateForDb(value) {
   if (!value) return null;
@@ -2382,19 +2457,30 @@ async function safeWriteState(state, actor = null) {
   nextState.ticketSendBackAlerts = mergeTicketMap('ticketSendBackAlerts');
   // Same: only ever stamped, so a tab that missed the reopen must not erase it.
   nextState.ticketReopenedAt = mergeTicketMap('ticketReopenedAt');
+  // Re-open requests (a client reply on a resolved ticket, waiting for someone
+  // to re-open it, keep it closed or open it as new). Per reply: a decision
+  // always beats a pending copy, so a tab that has not heard the answer yet
+  // cannot put the question back. Decided ones are kept 30 days for that
+  // reason, then dropped.
+  nextState.ticketReopenRequests = (() => {
+    const asMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+    const out = { ...asMap(currentState.ticketReopenRequests) };
+    for (const [key, req] of Object.entries(asMap(nextState.ticketReopenRequests))) {
+      if (!req || typeof req !== 'object') continue;
+      const have = out[key];
+      if (!have || have.status === 'pending') out[key] = req;
+    }
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    for (const [key, req] of Object.entries(out)) {
+      if (!req || (req.status !== 'pending' && Number(req.decidedAt || req.at || 0) < cutoff)) delete out[key];
+    }
+    return out;
+  })();
 
-  const pruneResolvedHiddenTickets = (stateToPrune) => {
-    const nowForPrune = Date.now();
-    const hiddenIds = new Set(
-      (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : [])
-        .filter(t => t && t.id && isResolvedHiddenInState(stateToPrune, String(t.id), nowForPrune))
-        .map(t => String(t.id))
-    );
-    if (!hiddenIds.size) return stateToPrune;
-    stateToPrune.allTickets = (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : []).filter(t => !hiddenIds.has(String(t?.id || '')));
-    return stateToPrune;
-  };
-  pruneResolvedHiddenTickets(nextState);
+  // Every ticket stays in the saved board, resolved or not. Resolved tickets
+  // used to be cut from it once CS confirmed them or 72 hours had passed; the
+  // board only hides those (isResolvedTicketHidden in index.html), and "My
+  // resolved" is where a support agent finds every one they resolved.
 
   // The "Resolved" Teams DM is no longer tracked here at all - it moved to
   // an atomic, DB-level claim in upsertBoardTicketsToDatabase (a dedicated
@@ -2411,11 +2497,10 @@ async function safeWriteState(state, actor = null) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf', 'ticketVelmaBug', 'ticketSlaResetAt'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketReopenRequests', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf', 'ticketVelmaBug', 'ticketSlaResetAt'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
-  pruneResolvedHiddenTickets(finalState);
 
   fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
   fs.writeFileSync(DATA_PATH, JSON.stringify(finalState, null, 2), 'utf8');
@@ -3606,6 +3691,7 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
   const ticketDuplicateOf = state.ticketDuplicateOf || {};
   const ticketHubspotId = state.ticketHubspotId || {};
   const ticketComments = state.ticketComments || {};
+  const ticketStageTouchedAt = state.ticketStageTouchedAt || {};
   // When each ticket's SLA clock was last restarted by a reply. Written by the
   // board; mirrored into the row so the KPI dashboard measures the same thing
   // the badges do.
@@ -3637,13 +3723,16 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
     const category = String(ticketCategory[externalId] || ticketSubtype[externalId] || '').trim() || null;
     const rawAssignedAgent = String(ticketAssignee[externalId] || '').trim().toUpperCase();
     const rawCsAgent = String(ticketCSOwner[externalId] || '').trim().toUpperCase();
-    const assignedAgent = SUPPORT_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null;
-    const csAgent = CS_AGENT_CODES.has(rawCsAgent) ? rawCsAgent : (CS_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null);
+    const existingTicket = existingByExternalId.get(externalId) || null;
+    // An agent taken off the roster keeps the tickets they already held: the
+    // roster decides who can be given a ticket, not who used to have one.
+    const keepsAgent = (code, roster, held) => !!code && (roster.has(code) || code === String(held || '').trim().toUpperCase());
+    const assignedAgent = keepsAgent(rawAssignedAgent, SUPPORT_AGENT_CODES, existingTicket?.assignedAgent) ? rawAssignedAgent : null;
+    const csAgent = keepsAgent(rawCsAgent, CS_AGENT_CODES, existingTicket?.csAgent) ? rawCsAgent : (CS_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null);
     const createdAt = safeDateForDb(email.receivedDateTime || ticketCreatedAt[externalId]) || new Date();
     const slaResetAt = safeDateForDb(Number(ticketSlaResetAt[externalId] || 0) || null);
     const body = String(email.bodyPreview || email.preview || email.summary || email.body || email.text || '').trim() || null;
     const companyName = extractCompanyNameFromEmail(senderEmail);
-    const existingTicket = existingByExternalId.get(externalId) || null;
 
     // A board snapshot that carries no Jira key, HubSpot id or duplicate
     // marking for a ticket is stating "I have nothing to say about this",
@@ -3669,8 +3758,20 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
 
     const previousStatus = existingTicket?.status || null;
     const wasResolved = previousStatus === 'Resolved';
+    /* When the card was moved to Resolved on the board - the same moment the
+       board's Resolved column and "My resolved" go by - rather than when this
+       save reached the server. They used to differ by however long the save
+       took, and a ticket first written to the database already resolved got
+       the sync time, which put old resolutions into today's KPIs. A resolved
+       row still missing the date is backfilled here too (see fieldsUnchanged),
+       so the KPI no longer has to fall back to updatedAt, which every comment
+       or link moves. */
+    const boardResolvedAt = (() => {
+      const touched = Number(ticketStageTouchedAt[externalId] || 0);
+      return touched > 0 && touched <= Date.now() + 60_000 ? new Date(touched) : null;
+    })();
     const resolvedAtForDb = status === 'Resolved'
-      ? (wasResolved ? existingTicket?.resolvedAt || new Date() : new Date())
+      ? (wasResolved && existingTicket?.resolvedAt ? existingTicket.resolvedAt : (boardResolvedAt || new Date()))
       : null;
 
     const fieldsUnchanged = existingTicket
@@ -3678,6 +3779,7 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
       && existingTicket.senderEmail === (senderEmail || null)
       && existingTicket.companyName === companyName
       && existingTicket.status === status
+      && (status !== 'Resolved' || !!existingTicket.resolvedAt)
       && existingTicket.priority === priority
       && existingTicket.category === category
       && existingTicket.assignedAgent === assignedAgent
@@ -4399,7 +4501,12 @@ app.get('/api/support-agents/names', requireAuth, async (req, res) => {
 });
 
 app.get('/auth/me', requireAuth, (req, res) => {
-  res.json({ user: { id: req.session.userId, username: req.session.username, role: req.session.role, avatarUrl: avatarUrlForUserId(req.session.userId) } });
+  res.json({ user: { id: req.session.userId, username: req.session.username, role: req.session.role, avatarUrl: avatarUrlForUserId(req.session.userId) }, roster: agentRosterPayload() });
+});
+// The CS and Support rosters, for the board to refresh its dropdowns without
+// a reload when an admin changes someone in Manage Users.
+app.get('/api/roster', requireAuth, (req, res) => {
+  res.json(agentRosterPayload());
 });
 
 app.patch('/api/profile', requireAuth, async (req, res) => {
@@ -5546,9 +5653,15 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
     const role = normalizeRole(req.body?.role || 'support');
     const displayName = String(req.body?.displayName || '').trim() || null;
     const email = normalizeEmailForDb(req.body?.email || '') || null;
+    // No team given: a CS or Support account goes on the matching roster, an
+    // admin on neither.
+    const team = req.body?.team !== undefined
+      ? normalizeTeam(req.body.team)
+      : (role === 'cs' || role === 'support' ? role : '');
 
     if (!username || !password) return res.status(400).json({ error: 'username_and_password_required' });
     if (!role) return res.status(400).json({ error: 'invalid_role' });
+    if (team === undefined) return res.status(400).json({ error: 'invalid_team' });
     if (role === 'owner' && !isOwnerRole(req.session.role)) return res.status(403).json({ error: 'owner_required' });
     if (password.length < 8) return res.status(400).json({ error: 'password_too_short' });
 
@@ -5557,8 +5670,9 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
-      data: { username, passwordHash, role, displayName, email, isActive: true }
+      data: { username, passwordHash, role, displayName, email, team: team || null, isActive: true }
     });
+    await refreshAgentRoster();
     if (req.body?.avatarBase64) {
       try { saveUserAvatarFile(user.id, req.body.avatarBase64); } catch (avatarError) { console.warn('Avatar upload skipped:', avatarError.message || avatarError); }
     }
@@ -5593,6 +5707,11 @@ app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
       if ((role === 'owner' || existing.role === 'owner') && !requesterIsOwner) return res.status(403).json({ error: 'owner_required' });
       data.role = role;
     }
+    if (req.body?.team !== undefined) {
+      const team = normalizeTeam(req.body.team);
+      if (team === undefined) return res.status(400).json({ error: 'invalid_team' });
+      data.team = team || null;
+    }
     if (req.body?.displayName !== undefined) data.displayName = String(req.body.displayName || '').trim() || null;
     if (req.body?.email !== undefined) data.email = normalizeEmailForDb(req.body.email || '') || null;
     if (req.body?.isActive !== undefined) data.isActive = Boolean(req.body.isActive);
@@ -5612,6 +5731,7 @@ app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
 
     const user = await prisma.user.update({ where: { id }, data });
     invalidateAuthCache(user.id);
+    if (['team', 'isActive', 'username', 'email'].some(key => key in data)) await refreshAgentRoster();
     // The three changes that are meant to take something away. Without this the
     // person keeps whatever their live session already had until it expires.
     const revoked = data.isActive === false || data.passwordHash || (data.role && data.role !== existing.role);
@@ -5636,6 +5756,7 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
     if (isOwnerRole(existing.role) && id !== req.session.userId && !isOwnerRole(req.session.role)) return res.status(403).json({ error: 'owner_required' });
     removeUserAvatarFiles(id);
     await prisma.user.delete({ where: { id } });
+    await refreshAgentRoster();
     if (id === req.session.userId) {
       req.session.destroy(() => {});
     }
@@ -5807,7 +5928,7 @@ const KPI_TICKET_SELECT = {
   resolvedAt: true,
   slaResetAt: true
 };
-async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.range);
+async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.range, req.query.tzOffset);
   const username = actorAgentCode(req);
   /* The KPI dashboard is the one view where "see all tickets" does not carry
      over. A support agent may read the whole board - that is what the Only
@@ -9591,7 +9712,10 @@ const LIVE_SYNC_FIELDS = [
   'ticketSendBackAlerts',
   // A client reply that brings a closed ticket back has to show as Re-opened
   // on every board, not just the tab whose mail poll picked it up.
-  'ticketReopenedAt'
+  'ticketReopenedAt',
+  // The "could be re-opened" prompt has to appear on every board that can see
+  // the ticket, and leave all of them once one person has answered it.
+  'ticketReopenRequests'
 ];
 
 function sseFrame(rev, type, data) {
@@ -13944,6 +14068,9 @@ async function redistributeSguNewTicketsOnce() {
 
 const server = app.listen(PORT, () => {
   console.log(`Support Kanban secure web app on http://localhost:${PORT}`);
+  refreshAgentRoster().then(loaded => {
+    if (loaded) console.log(`Agent roster: ${SUPPORT_AGENT_CODES.size} support, ${CS_AGENT_CODES.size} CS (from users)`);
+  });
   resetWaitingOnContactSlaOnce().catch((error) => {
     console.error('Waiting on Contact SLA reset failed:', error?.message || error);
   });
