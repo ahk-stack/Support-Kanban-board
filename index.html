@@ -1964,6 +1964,24 @@ body > header {
   display: block;
 }
 
+/* Admin SLA freeze in the card footer, in the Velma chip's language: dashed
+   while it is an action (Hold), solid once the clock is frozen. */
+.sla-hold-btn,
+.sla-hold-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 3px 8px;
+  color: var(--amber-700);
+  white-space: nowrap;
+}
+.sla-hold-btn { background: var(--slate-50); border: 1px dashed var(--slate-300); cursor: pointer; }
+.sla-hold-btn:hover { border-color: var(--amber-700); }
+.sla-hold-badge { background: var(--amber-50); border: 1px solid var(--amber-700); }
+button.sla-hold-badge { cursor: pointer; }
+
 /* Velma bug link in the card footer: dashed while unlinked (an action), solid
    once linked (a fact you can click to change) - the Jira controls' language. */
 .velma-link-btn,
@@ -2365,6 +2383,9 @@ body > header {
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+  /* The card is user-select:none for dragging; its notes must stay copyable. */
+  user-select: text;
+  cursor: text;
 }
 
 .card-inline-empty {
@@ -3193,6 +3214,68 @@ textarea:focus {
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.note-link {
+  color: var(--indigo-600, #4f46e5);
+  text-decoration: underline;
+  word-break: break-all;
+  cursor: pointer;
+}
+
+.note-link-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  margin: 0 2px 0 3px;
+  padding: 2px 3px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--white);
+  color: var(--slate-500);
+  cursor: pointer;
+  line-height: 0;
+}
+
+.note-link-copy:hover {
+  color: var(--text);
+  border-color: var(--slate-400);
+}
+
+.comment-edited {
+  font-size: 11.5px;
+  color: var(--muted-light);
+  font-style: italic;
+}
+
+.comment-edit-btn {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--slate-500);
+  cursor: pointer;
+}
+
+.comment-edit-btn:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.comment-edit-input {
+  width: 100%;
+  min-height: 72px;
+}
+
+.comment-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
 }
 
 .no-comments {
@@ -8873,7 +8956,7 @@ th {
       <div class="form-field">
         <label id="velma-input-label">Velma bug ticket ID</label>
         <input id="velma-input" class="form-input" type="text" placeholder="The ID from the Velma bug sheet" style="font-size:16.5px;font-weight:700;letter-spacing:.5px;"/>
-        <div style="font-size:12px;color:var(--slate-400);margin-top:3px;">The row with this ID is looked up in the Velma bug sheet and linked to the ticket. The SLA goes on hold while the bug is open, and starts again by itself once its Status is DONE.</div>
+        <div style="font-size:12px;color:var(--slate-400);margin-top:3px;">The row with this ID is looked up in the Velma bug sheets and linked to the ticket. The SLA goes on hold while the bug is open, and starts again by itself once its Status is DONE.</div>
       </div>
     </div>
     <div class="modal-actions">
@@ -9403,6 +9486,9 @@ let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
    ticketJira - only /api/velma-bug/link writes it - and, like a Jira link, it
    puts the SLA on hold (getSLAStatus). */
 let ticketVelmaBug={};
+// ticketId -> { at, by }: an admin froze the SLA clock at `at`. Server-owned
+// (POST /api/tickets/:id/sla-hold); released, the clock resumes where it stopped.
+let ticketSlaHold={};
 // ticketId -> the ticket id this one duplicates. The same problem reaches the
 // helpdesk twice often enough (a resend, a reply Outlook threads under a fresh
 // conversation, a client writing from two addresses) that clearing the copy by
@@ -10233,6 +10319,30 @@ async function fetchMailboxWindow(afterDateTime){
   if(afterDateTime)args.afterDateTime=afterDateTime;
   return window.cowork.callMcpTool(SEARCH_TOOL,args);
 }
+/* When a database row's status and support assignee last actually changed:
+   the latest audit event for each (the server records one on every write of
+   either column), else the row's creation. statusAt/assignAt when the server
+   already worked them out (/api/tickets/status-summary).
+
+   Not row.updatedAt. That moves on any write - a cached email body, a Jira
+   link, a comment - so with it as the clock a row whose status was stale
+   (still New, for a ticket the board had resolved) won the moment anything
+   else touched it, and the ticket came back off Resolved on every board that
+   loaded it. That is what happened to a batch of old resolved tickets on
+   2026-10-15. The server's hydrate had already been fixed this way. */
+function dbRowFieldClocks(row){
+  const created=Date.parse(row?.createdAt||'')||0;
+  let statusAt=Number(row?.statusAt||0)||0;
+  let assignAt=Number(row?.assignAt||0)||0;
+  if(Array.isArray(row?.events)){
+    row.events.forEach(e=>{
+      const at=Date.parse(e?.createdAt||'')||0;
+      if(e?.eventType==='ticket_status_changed'&&at>statusAt)statusAt=at;
+      else if(e?.eventType==='ticket_assignedAgent_changed'&&at>assignAt)assignAt=at;
+    });
+  }
+  return{statusAt:statusAt||created,assignAt:assignAt||created};
+}
 function mergeDatabaseTickets(dbTickets){
   if(!Array.isArray(dbTickets)||!dbTickets.length)return 0;
   const byId=new Map(allTickets.filter(t=>t&&t.id).map(t=>[String(t.id),t]));
@@ -10259,21 +10369,21 @@ function mergeDatabaseTickets(dbTickets){
     byId.set(id,{...(current||{}),id,email:nextEmail,priority:row.priority||current?.priority||'Normal'});
     ensureTicketNumber(id);
     seen[id]=true;
-    const dbTouchedAt=Date.parse(row.updatedAt||row.createdAt||'')||Date.now();
+    const {statusAt:dbStatusAt,assignAt:dbAssignAt}=dbRowFieldClocks(row);
     const currentTouchedAt=Number(ticketStageTouchedAt[id]||0);
-    if(dbTouchedAt>=currentTouchedAt||!ticketState[id]){
+    if(dbStatusAt>=currentTouchedAt||!ticketState[id]){
       ticketState[id]=normalizeDbStatusForBoard(row.status||ticketState[id]||'new');
-      ticketStageTouchedAt[id]=dbTouchedAt;
+      ticketStageTouchedAt[id]=dbStatusAt;
     }else{
       ticketStageTouchedAt[id]=currentTouchedAt;
     }
     if(row.priority)ticketPriority[id]=row.priority;
     if(row.category)ticketCategory[id]=row.category;
-    // Gated on the DB row's own updatedAt, the same way the stage above is.
+    // Gated on the assignment's own clock, the same way the stage above is.
     // Unconditionally taking the DB value re-imposed whatever assignee was
     // last written to Postgres over a newer local assignment on every load.
-    if(row.assignedAgent&&dbTouchedAt>=Number(ticketAssigneeTouchedAt[id]||0)){
-      setTicketAssignee(id,normalizeSupportAgent(row.assignedAgent)||row.assignedAgent,dbTouchedAt);
+    if(row.assignedAgent&&dbAssignAt>=Number(ticketAssigneeTouchedAt[id]||0)){
+      setTicketAssignee(id,normalizeSupportAgent(row.assignedAgent)||row.assignedAgent,dbAssignAt);
     }
     if(row.csAgent)ticketCSOwner[id]=normalizeCSAgent(row.csAgent)||row.csAgent;
     if(row.assignedAgent||row.csAgent)ticketAssignmentMode[id]='support';
@@ -10290,6 +10400,7 @@ function mergeDatabaseTickets(dbTickets){
     // in exactly that window.
     if(row.duplicateOfExternalId)ticketDuplicateOf[id]=String(row.duplicateOfExternalId);
     if(row.velmaBugId&&!ticketVelmaBug[id])ticketVelmaBug[id]={id:String(row.velmaBugId),...(row.velmaBugRow&&typeof row.velmaBugRow==='object'?row.velmaBugRow:{})};
+    if(row.slaHoldAt&&!ticketSlaHold[id])ticketSlaHold[id]={at:new Date(row.slaHoldAt).getTime(),by:row.slaHoldBy||null};
     if(row.hubspotTicketId)ticketHubspotId[id]=row.hubspotTicketId;
     if(Array.isArray(row.comments)){
       ticketComments[id]=row.comments.map(c=>({author:c?.user?.displayName||c?.user?.username||'SYSTEM',text:c?.comment||'',comment:c?.comment||'',tags:Array.isArray(c?.tags)?c.tags:[],ts:c?.createdAt||Date.now(),createdAt:c?.createdAt||new Date().toISOString(),isInternal:c?.isInternal!==false}));
@@ -10323,7 +10434,7 @@ function liveSyncTargets(){
   return {ticketState,ticketStageTouchedAt,ticketAssigneeTouchedAt,ticketAssignee,ticketCSOwner,ticketAssignmentMode,
     manualSupportOverride,manualCSOverride,ticketPriority,ticketCategory,ticketSubtype,
     ticketJira,ticketDuplicateOf,ticketHubspotId,ticketArchived,ticketResolutionMeta,ticketHasNewReply,
-    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt,ticketVelmaBug,ticketReopenRequests};
+    ticketNumbers,ticketComments,ticketCreatedBy,ticketSnooze,ticketSlaResetAt,ticketSendBackAlerts,ticketReopenedAt,ticketVelmaBug,ticketSlaHold,ticketReopenRequests};
 }
 function setLiveIndicator(state,detail){
   const el=document.getElementById('live-indicator');
@@ -10332,8 +10443,21 @@ function setLiveIndicator(state,detail){
   el.className='live-indicator live-'+state;
   el.title=detail||('Live sync: '+state);
 }
+/* Real-time KPIs. Every board change reaches this tab as a live patch (or a
+   reload), and the server sends those only after the database - which the
+   KPIs are counted from - has been written. So an open KPI view re-pulls on
+   each one, debounced so a burst of saves is one request. Our own saves count
+   too: their echo is ignored as a board patch, but it is still the signal
+   that the database now has them. The 60-second timer stays as the backstop. */
+let kpiLiveRefreshTimer=null;
+function scheduleKpiLiveRefresh(){
+  if(viewMode!=='kpi'||document.visibilityState!=='visible')return;
+  clearTimeout(kpiLiveRefreshTimer);
+  kpiLiveRefreshTimer=setTimeout(()=>{if(viewMode==='kpi')void renderKpiView();},1500);
+}
 function applyBoardPatch(p){
   if(!p)return;
+  scheduleKpiLiveRefresh();
   // Our own save echoing back - applying it could clobber an edit the user
   // has made since, and it is already in our maps anyway.
   if(p.origin&&p.origin===LIVE_CLIENT_ID)return;
@@ -10417,10 +10541,70 @@ function applyBoardPatch(p){
     setLiveIndicator('active','Last update from '+p.actor+' at '+new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'}));
   }
 }
+/* Real-time check, every 60 seconds: the board against the database the KPIs
+   are counted from. For each ticket whose status differs, the newer one wins,
+   by the same clocks the server uses - a database status changed after the
+   board last moved the card is taken (an MCP or API update, another board);
+   a board move the database has not caught up with is pushed with a save.
+   So a resolved ticket cannot sit Resolved on the board and open in the KPIs,
+   or the other way round, for more than a minute.
+
+   One small request (status and clocks only). Skipped in a hidden tab, and
+   the push is throttled so a ticket the database keeps refusing cannot turn
+   every tab into a save loop. */
+const DB_RECONCILE_MS=60000;
+const DB_RECONCILE_PUSH_MIN_MS=5*60000;
+let dbReconcileLastAt=0,dbReconcileLastPushAt=0,dbReconcileInFlight=false;
+async function reconcileBoardWithDatabase(){
+  if(dbReconcileInFlight||document.visibilityState!=='visible')return;
+  dbReconcileInFlight=true;
+  try{
+    const res=await fetch('/api/tickets/status-summary',{credentials:'include'});
+    if(!res.ok)return;
+    const out=await res.json();
+    const rows=Array.isArray(out?.tickets)?out.tickets:[];
+    const onBoard=new Set(allTickets.map(t=>String(t.id)));
+    let adopted=0,boardAhead=0;
+    rows.forEach(r=>{
+      const id=String(r?.externalId||'');
+      if(!id||!onBoard.has(id))return;
+      const dbStage=normalizeDbStatusForBoard(r.status);
+      const boardStage=ticketState[id]?normalizeTicketStage(ticketState[id]):'';
+      if(boardStage===dbStage)return;
+      const statusAt=Number(r.statusAt||0);
+      if(!boardStage||statusAt>Number(ticketStageTouchedAt[id]||0)){
+        ticketState[id]=dbStage;
+        ticketStageTouchedAt[id]=statusAt||Date.now();
+        adopted++;
+      }else{
+        boardAhead++;
+      }
+    });
+    dbReconcileLastAt=Date.now();
+    if(adopted){
+      updateWorkload();updateArchiveBadge();
+      if(typeof updateMyResolvedBadge==='function')updateMyResolvedBadge();
+      renderActiveView();
+    }
+    if(boardAhead&&Date.now()-dbReconcileLastPushAt>=DB_RECONCILE_PUSH_MIN_MS){
+      dbReconcileLastPushAt=Date.now();
+      await saveState('db_reconcile_board_ahead');
+      // The KPIs read the database, so they are only right once the push lands.
+      if(viewMode==='kpi')void renderKpiView();
+    }
+    if(adopted||boardAhead)console.info(`[sync] board/database check: ${adopted} taken from the database, ${boardAhead} pushed from the board`);
+  }catch(_){
+  }finally{
+    dbReconcileInFlight=false;
+  }
+}
+setInterval(reconcileBoardWithDatabase,DB_RECONCILE_MS);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&Date.now()-dbReconcileLastAt>DB_RECONCILE_MS)void reconcileBoardWithDatabase();});
 async function reloadBoardFromServer(reason){
   // Used when a patch stream can't be trusted (replay gap, oversized diff).
   clearTimeout(liveReloadTimer);
   liveReloadTimer=setTimeout(async()=>{
+    scheduleKpiLiveRefresh();
     await loadState();
     const dbTickets=await apiGetTickets();
     if(dbTickets)mergeDatabaseTickets(dbTickets);
@@ -10546,6 +10730,10 @@ async function loadState(){
   if(s.ticketVelmaBug&&typeof s.ticketVelmaBug==='object'){
     Object.keys(ticketVelmaBug).forEach(k=>{delete ticketVelmaBug[k];});
     Object.entries(s.ticketVelmaBug).forEach(([k,v])=>{if(v&&v.id)ticketVelmaBug[k]=v;});
+  }
+  if(s.ticketSlaHold&&typeof s.ticketSlaHold==='object'){
+    Object.keys(ticketSlaHold).forEach(k=>{delete ticketSlaHold[k];});
+    Object.entries(s.ticketSlaHold).forEach(([k,v])=>{if(v&&v.at)ticketSlaHold[k]=v;});
   }
   if(s.ticketHubspotId)Object.assign(ticketHubspotId,s.ticketHubspotId);
   // Snoozes are shared board state, not a personal view: if one agent parks a
@@ -10713,25 +10901,49 @@ function isWeekendDay(d){const day=d.getDay();return day===0||day===6;}
    by an hour. */
 const BUSINESS_WINDOWS = [[8, 0, 12, 0], [14, 0, 17, 0]];
 const BUSINESS_MS_PER_DAY = BUSINESS_WINDOWS.reduce((total, [sh, sm, eh, em]) => total + ((eh * 60 + em) - (sh * 60 + sm)) * 60000, 0);
+/* Read in the SLA's time zone - the server's (slaTimeZone, from
+   /api/shift/state) - not the browser's. Counted in the viewer's own zone, an
+   agent abroad or on a PC set to another zone saw 08:00-12:00 land on the
+   wrong hours, and their badges disagreed with the dashboard. Offsets are
+   cached per hour, since they only change on the hour. */
+let slaTimeZone='Africa/Casablanca';
+let slaZoneFmt=null;
+let slaZoneOffsetCache=new Map();
+function setSlaTimeZone(tz){
+  const next=String(tz||'').trim();
+  if(!next||next===slaTimeZone)return;
+  try{new Intl.DateTimeFormat('en-US',{timeZone:next});}catch(_){return;}
+  slaTimeZone=next;slaZoneFmt=null;slaZoneOffsetCache=new Map();
+}
+function slaZoneOffsetMs(ms){
+  const hour=Math.floor(ms/3600000);
+  const cached=slaZoneOffsetCache.get(hour);
+  if(cached!==undefined)return cached;
+  let offset;
+  try{
+    if(!slaZoneFmt)slaZoneFmt=new Intl.DateTimeFormat('en-US',{timeZone:slaTimeZone,hourCycle:'h23',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',second:'numeric'});
+    const p={};
+    slaZoneFmt.formatToParts(new Date(hour*3600000)).forEach(x=>{p[x.type]=x.value;});
+    offset=Date.UTC(+p.year,+p.month-1,+p.day,(+p.hour)%24,+p.minute,+p.second)-hour*3600000;
+  }catch(_){offset=-new Date(ms).getTimezoneOffset()*60000;}
+  if(slaZoneOffsetCache.size>50000)slaZoneOffsetCache=new Map();
+  slaZoneOffsetCache.set(hour,offset);
+  return offset;
+}
+// A wall-clock time in the SLA zone, written as if it were UTC, to the instant.
+function slaZoneToUtc(wall){return wall-slaZoneOffsetMs(wall-slaZoneOffsetMs(wall));}
+function slaZoneDayStart(ms){return Math.floor((ms+slaZoneOffsetMs(ms))/86400000)*86400000;}
+function slaZoneIsWeekend(day){const d=new Date(day).getUTCDay();return d===0||d===6;}
 function businessMsInRange(from, to) {
   if (!(to > from)) return 0;
   let total = 0;
-  const cursor = new Date(from);
-  cursor.setHours(0, 0, 0, 0);
-  while (cursor.getTime() < to) {
-    const next = new Date(cursor);
-    next.setDate(next.getDate() + 1);
-    next.setHours(0, 0, 0, 0);
-    if (!isWeekendDay(cursor)) {
-      for (const [sh, sm, eh, em] of BUSINESS_WINDOWS) {
-        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
-        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
-        const start = Math.max(windowStart.getTime(), from);
-        const end = Math.min(windowEnd.getTime(), to);
-        if (end > start) total += end - start;
-      }
+  for (let day = slaZoneDayStart(from); slaZoneToUtc(day) < to; day += 86400000) {
+    if (slaZoneIsWeekend(day)) continue;
+    for (const [sh, sm, eh, em] of BUSINESS_WINDOWS) {
+      const start = Math.max(slaZoneToUtc(day + (sh * 60 + sm) * 60000), from);
+      const end = Math.min(slaZoneToUtc(day + (eh * 60 + em) * 60000), to);
+      if (end > start) total += end - start;
     }
-    cursor.setTime(next.getTime());
   }
   return total;
 }
@@ -10741,23 +10953,18 @@ function businessMsInRange(from, to) {
 function businessPointBefore(to, amount) {
   let left = amount;
   if (!(left > 0)) return to;
-  const cursor = new Date(to);
-  cursor.setHours(0, 0, 0, 0);
+  let day = slaZoneDayStart(to);
   // Ten years of days: far past any SLA, and a stop if the windows are empty.
-  for (let day = 0; day < 3660; day++) {
-    if (!isWeekendDay(cursor)) {
-      for (let i = BUSINESS_WINDOWS.length - 1; i >= 0; i--) {
-        const [sh, sm, eh, em] = BUSINESS_WINDOWS[i];
-        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
-        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
-        const end = Math.min(windowEnd.getTime(), to);
-        const start = windowStart.getTime();
-        if (!(end > start)) continue;
-        if (end - start >= left) return end - left;
-        left -= end - start;
-      }
+  for (let i = 0; i < 3660; i++, day -= 86400000) {
+    if (slaZoneIsWeekend(day)) continue;
+    for (let w = BUSINESS_WINDOWS.length - 1; w >= 0; w--) {
+      const [sh, sm, eh, em] = BUSINESS_WINDOWS[w];
+      const end = Math.min(slaZoneToUtc(day + (eh * 60 + em) * 60000), to);
+      const start = slaZoneToUtc(day + (sh * 60 + sm) * 60000);
+      if (!(end > start)) continue;
+      if (end - start >= left) return end - left;
+      left -= end - start;
     }
-    cursor.setDate(cursor.getDate() - 1);
   }
   return to - amount;
 }
@@ -10812,7 +11019,8 @@ function leavePeriodEnd(p,now){
 function shiftElapsedMs(fromMs,toMs,agentCode){
   const rec=shiftAgents[String(agentCode||'').toUpperCase()];
   if(!rec||!Array.isArray(rec.sessions))return 0;
-  const now=Date.now();
+  // The server's clock: a PC clock a few minutes out moved every badge.
+  const now=boardNow();
   const leaves=(rec.leaves||[]).map(p=>[Number(p.start||0),leavePeriodEnd(p,now)]);
   let total=0;
   rec.sessions.forEach(s=>{
@@ -10840,6 +11048,7 @@ async function refreshShiftState(){
     const out=await res.json();
     const serverNow=Number(out?.serverNow||0);
     if(serverNow>0)serverClockOffset=serverNow-Date.now();
+    setSlaTimeZone(out?.slaTimeZone);
     shiftAgents=out?.agents||{};
     shiftMe=out?.me||null;
     if(out&&'leave' in out)applyAgentLeave(out.leave);
@@ -10952,7 +11161,8 @@ function getSLAStatus(id){
   // The later of the two: a thread that has been replied to is measured from
   // the last reply, an untouched one from when it arrived.
   const createdMs=Math.max(new Date(createdAt).getTime(), Number(ticketSlaResetAt[id] || 0));
-  const wallElapsed=Date.now()-createdMs;
+  const slaNow=boardNow();
+  const wallElapsed=slaNow-createdMs;
   const resetAt=Number(ticketSlaResetAt[id]||0)>new Date(createdAt).getTime()?Number(ticketSlaResetAt[id]):0;
   const wallText=fmtDuration(wallElapsed)+(resetAt?' since the client\'s last reply':' since received');
   /* Linked to Jira, so the clock is off. The commitment is a response time
@@ -10967,6 +11177,14 @@ function getSLAStatus(id){
      stays false, so it drops out of the Overdue filter, the workload counts
      and the KPI figures on its own. Mirrors the jira_hold state in
      ticketSlaSnapshot, which is what the dashboard is computed from. */
+  /* Frozen by an admin: the clock stopped when they pressed Hold, and resumes
+     from there when they release it. Mirrors admin_hold in ticketSlaSnapshot. */
+  const adminHold=ticketSlaHold[id];
+  if(adminHold&&adminHold.at){
+    const frozenAt=Math.max(Number(adminHold.at),createdMs);
+    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+(resetAt?' since the client\'s last reply':' since received');
+    return{text:`SLA frozen${adminHold.by?' by '+adminHold.by:''}`,cls:'sla-warn',overdue:false,wallText:frozenWall,shiftMs:0,noClock:true,adminHold};
+  }
   const jiraHoldKey=canonicalJiraKey(ticketJira[id]);
   if(jiraHoldKey)return{text:`SLA on hold - ${jiraHoldKey}`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,jiraHold:jiraHoldKey};
   // Waiting on a Velma bug: the same hold, for the same reason - until the
@@ -11002,7 +11220,7 @@ function getSLAStatus(id){
   if(!shiftLoaded){
     return{text:'Loading shift data',cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true};
   }
-  const elapsed=shiftElapsedMs(createdMs,Date.now(),agent);
+  const elapsed=shiftElapsedMs(createdMs,slaNow,agent);
   const remaining=slaMs-elapsed;
   const shiftText=fmtDuration(elapsed)+' worked ('+agent+')';
   if(remaining<=0){
@@ -11017,6 +11235,11 @@ function slaTooltip(status){
   // A ticket on Jira hold has no countdown to explain, so the tooltip says
   // what stopped the clock and what would start it again, rather than listing
   // shift hours that are not being counted against anything.
+  if(status.adminHold){
+    return['SLA is frozen'+(status.adminHold.by?' by '+status.adminHold.by:'')+' since '+new Date(Number(status.adminHold.at)).toLocaleString('en-GB')+'.',
+      'Wall clock when frozen: '+(status.wallText||''),
+      'An admin releasing the hold resumes the timer where it stopped.'].join('\n');
+  }
   if(status.jiraHold){
     return['SLA is not counting: this ticket is linked to '+status.jiraHold+'.',
       'Wall clock: '+(status.wallText||''),
@@ -11723,6 +11946,20 @@ document.getElementById('velma-unlink').addEventListener('click',async()=>{
 });
 document.getElementById('velma-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('velma-save').click();});
 
+/* Admin freeze of a ticket's SLA clock. The server owns it: it stores the hold,
+   moves the restart point forward on release and pushes both to every board,
+   so this only updates the local copy straight away. */
+async function setTicketSlaHold(id,hold){
+  if(!currentUserIsAdmin())return;
+  if(!hold&&!confirm('Release the hold? The SLA timer resumes where it stopped.'))return;
+  const res=await fetch(`/api/tickets/${encodeURIComponent(id)}/sla-hold`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({hold})}).catch(()=>null);
+  const out=res?await res.json().catch(()=>({})):{};
+  if(!res||!res.ok){showToast(`SLA hold failed: ${out?.error||'network error'}`);return;}
+  if(out.hold)ticketSlaHold[id]=out.hold;else delete ticketSlaHold[id];
+  if(out.slaResetAt)ticketSlaResetAt[id]=Math.max(Number(ticketSlaResetAt[id]||0),Number(out.slaResetAt));
+  renderActiveView();
+  showToast(hold?'SLA frozen - the timer is stopped until an admin releases it':'Hold released - the SLA timer resumes where it stopped','ok');
+}
 /* Google access for the Velma bug sheet.
 
    The sheet is private, so the server reads it as somebody: a service account
@@ -13559,6 +13796,7 @@ function projectThreadHtml(slug){
     const working=t.status==='running';
     const head=working
       ?`<strong>Claude is working on it</strong>${t.claimedBy?` (${esc(String(t.claimedBy).replace(/^mcp:/,''))})`:''}`
+      :t.status==='collecting'?'<strong>The board is collecting the data for this run</strong>'
       :t.status==='queued'?'<strong>Waiting for Claude to pick this up</strong>':'<strong>Sending…</strong>';
     parts.push(`<div class="pj-result pj-running pj-progress">
     <span class="spinner"></span>
@@ -13598,7 +13836,9 @@ function projectRunsHtml(slug){
     // The newest result is the one someone opened the card to read, so it is
     // expanded unless they have since collapsed it themselves.
     const open=projectRunOpen[key]!==undefined?projectRunOpen[key]:idx===0;
-    const badge=run.status==='queued'
+    const badge=run.status==='collecting'
+      ?'<span class="pj-badge pj-badge-queued">Collecting data</span>'
+      :run.status==='queued'
       ?'<span class="pj-badge pj-badge-queued">Waiting for Claude</span>'
       :run.status==='running'
       ?'<span class="pj-badge pj-badge-running">Claude working</span>'
@@ -13624,7 +13864,9 @@ function projectRunsHtml(slug){
       ${open?`<div class="pj-run-panel">
         <div class="pj-run-meta">${chips}<span>${meta}</span>
           ${run.status==='done'?`<button class="btn-out pj-copy" type="button" data-pj-run-copy="${esc(key)}">Copy</button>`:''}</div>
-        ${run.status==='queued'
+        ${run.status==='collecting'
+          ?`<div class="pj-run-note"><span class="spinner"></span> The board is collecting the data this run needs. Claude gets it as soon as it lands.</div>`
+          :run.status==='queued'
           ?`<div class="pj-run-note">No Claude has taken this run yet.</div>${projectHandoffHtml(p,run.handoff)}`
           :run.status==='running'
           ?`<div class="pj-run-note"><span class="spinner"></span> ${run.claimedBy?esc(String(run.claimedBy).replace(/^mcp:/,''))+"'s ":''}Claude is working on this one. It updates here by itself.</div>`
@@ -13663,7 +13905,7 @@ async function loadProjectRuns(slug){
 let projectRunsRefreshTimer={};
 function scheduleProjectRunsRefresh(slug){
   clearTimeout(projectRunsRefreshTimer[slug]);
-  const running=(projectRuns[slug]?.rows||[]).some(r=>r.status==='running'||r.status==='queued');
+  const running=(projectRuns[slug]?.rows||[]).some(r=>r.status==='running'||r.status==='queued'||r.status==='collecting');
   if(!running||projectThread[slug]?.running)return;
   projectRunsRefreshTimer[slug]=setTimeout(()=>{
     if(projectOpen===slug&&!projectThread[slug]?.running)loadProjectRuns(slug);
@@ -13843,7 +14085,7 @@ async function startAndAwaitProjectRun(slug,p,url,body,t){
     const data=await res.json().catch(()=>({}));
     if(!res.ok||data.ok===false||!data.runId){t.error=data?.message||data?.error||`HTTP ${res.status}`;return null;}
     runId=data.runId;
-    t.runId=runId;t.status='queued';t.handoff=data.handoff||'';t.claimedBy='';
+    t.runId=runId;t.status=data.status||'queued';t.handoff=data.handoff||'';t.claimedBy='';
     renderProjectsView();
   }catch(error){
     t.error=String(error?.message||error);
@@ -14378,7 +14620,7 @@ function renderKpiAllTime(all){
   const n=v=>Number(v||0).toLocaleString('en-GB');
   el.innerHTML=`
     <div class="kpi-alltime-main">
-      <span class="kpi-alltime-label">Since the board went live on ${esc(since)}</span>
+      <span class="kpi-alltime-label">Since the board went live on ${esc(since)}${all.scope?` · ${esc(all.scope)}`:''}</span>
       <span class="kpi-alltime-value">${n(all.created)}<small>tickets</small></span>
     </div>
     <div class="kpi-alltime-stats">
@@ -14467,7 +14709,7 @@ function renderSimpleKpiRows(rows,labelKey,valueKey){
 let kpiAutoRefresh=true;
 let kpiLastLoadedAt=0;
 let kpiRefreshTimer=null,kpiFreshnessTimer=null;
-const KPI_REFRESH_MS=45000;
+const KPI_REFRESH_MS=60000;
 function kpiFreshnessText(){
   if(!kpiLastLoadedAt)return'Not loaded yet';
   const secs=Math.max(0,Math.round((Date.now()-kpiLastLoadedAt)/1000));
@@ -14511,6 +14753,9 @@ function fmtHours(h){
   if(n<100)return`${Math.round(n*10)/10}h`;
   return`${Math.round(n/SLA_HOURS_PER_WORKDAY*10)/10} working days`;
 }
+// The same, short enough for a card's big number: "29.4d" rather than a
+// three-line "29.4 working days".
+function fmtHoursShort(h){return fmtHours(h).replace(' working days','d');}
 // Every card carries the tickets behind its number so clicking one opens
 // them, rather than leaving the agent to go hunt through a filter to find
 // what's driving it. `category` cards fetch on demand from the server
@@ -14673,7 +14918,7 @@ async function renderKpiView(){
     const sla=data.sla||{};
     const flow=data.throughput||{};
     const dupNote=totals.duplicates?` · ${totals.duplicates} duplicate${totals.duplicates>1?'s':''} excluded`:'';
-    document.getElementById('kpi-range-label').textContent=`Live DB tickets: ${totals.tickets||0} current (range: ${totals.rangeTickets||0})${dupNote} · ${data.range?.label||'Range'} · ${start} to ${end} · ${teamLabel} · ${agentLabel}`;
+    document.getElementById('kpi-range-label').textContent=`${totals.tickets||0} tickets in scope, ${totals.rangeTickets||0} active in this range${dupNote} · ${data.range?.label||'Range'} · ${start} to ${end} · ${teamLabel} · ${agentLabel}`;
     kpiLastLoadedAt=Date.now();
     updateKpiFreshnessLabel();
     const compliance=sla.compliancePct;
@@ -14689,7 +14934,8 @@ async function renderKpiView(){
       kpiCard('Due for test',s.dft||0,{category:'dft',hint:'Open now'}),
       kpiCard('Waiting On Contact',s.wct||0,{category:'wct',hint:'Open now'}),
       kpiCard('Resolved',s.res||0,{category:'res',hint:'In this range'}),
-      kpiCard('Tickets with CS',totals.ticketsWithCs||0,{category:'ticketsWithCs'}),
+      kpiCard('Tickets with CS',totals.ticketsWithCs||0,{category:'ticketsWithCs',
+        hint:`of ${totals.rangeTickets||0} in this range`}),
       kpiCard('Jira Linked',totals.jiraLinked||0,{category:'jiraLinked'})
     ].join('');
     document.getElementById('kpi-sla-cards').innerHTML=[
@@ -14697,13 +14943,14 @@ async function renderKpiView(){
       kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left',category:'atRisk'}),
       kpiCard('SLA met',compliance===null||compliance===undefined?'-':`${compliance}%`,{
         tone:compliance===null||compliance===undefined?'':(compliance>=90?'good':compliance>=75?'warn':'bad'),
-        hint:`${sla.met||0} of ${(sla.met||0)+(sla.breached||0)} resolved in range`+(sla.noHistory?` - ${sla.noHistory} not measured (from before shift history was kept)`:''),category:'slaMeasured'}),
-      kpiCard('Avg resolve',fmtHours(sla.avgResolveShiftHours),{hint:`Median ${fmtHours(sla.medianResolveShiftHours)} - shift time`,category:'slaMeasured'}),
-      kpiCard('Oldest open',fmtHours(sla.oldestOpenHours),{hint:'Working hours since arrival (no nights or weekends)',category:'oldestOpen'}),
+        // on time + late + no SLA + before reset = the Resolved card, ticket for ticket.
+        hint:`${sla.met||0} on time · ${sla.breached||0} late`+(sla.unmeasured?` · ${sla.unmeasured} no SLA`:'')+(sla.reset?` · ${sla.reset} before SLA reset`:''),category:'slaMeasured'}),
+      kpiCard('Avg resolve',(sla.met||0)+(sla.breached||0)?fmtHoursShort(sla.avgResolveShiftHours):'-',{hint:`Median ${fmtHours(sla.medianResolveShiftHours)}`,category:'slaMeasured'}),
+      kpiCard('Oldest open',fmtHoursShort(sla.oldestOpenHours),{hint:'Working time',category:'oldestOpen'}),
       kpiCard('Created',flow.created||0,{hint:'In this range',category:'created'}),
-      kpiCard('Resolved',flow.resolved||0,{hint:`Net ${(flow.net||0)>0?'+':''}${flow.net||0} vs created`,tone:(flow.net||0)>0?'warn':'',category:'resolved'}),
+      kpiCard('Resolved',flow.resolved||0,{hint:(flow.net||0)>0?`Backlog +${flow.net}`:(flow.net||0)<0?`Backlog ${flow.net}`:'Backlog unchanged',tone:(flow.net||0)>0?'warn':'',category:'resolved'}),
       kpiCard('Reopened',flow.reopened||0,{tone:(flow.reopened||0)>0?'warn':'',hint:'Left Resolved again',category:'reopened'}),
-      kpiCard('Duplicates',totals.duplicates||0,{hint:`${totals.duplicatesResolvedInRange||0} resolved in range, not counted`,category:'duplicates'})
+      kpiCard('Duplicates',totals.duplicates||0,{hint:'Not counted',category:'duplicates'})
     ].join('');
     document.getElementById('kpi-overdue-rows').innerHTML=(data.overdueRows||[]).length
       ?data.overdueRows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
@@ -15438,18 +15685,34 @@ function resolveDefaultCSForTicket(id,emailObj){
   if(fromSibling)return fromSibling;
   return null;
 }
+/* Resolving a CS owner while a card is drawn used to change it in this tab
+   only: the board showed the owner and the database - which the KPI dashboard
+   reads - never got it, so "Tickets with CS" ran behind the board. A change
+   made here is now saved, a few seconds later and once for a whole render. */
+let csOwnerSyncTimer=null;
+function queueCSOwnerSync(){
+  if(csOwnerSyncTimer)return;
+  csOwnerSyncTimer=setTimeout(()=>{csOwnerSyncTimer=null;saveState('cs_owner_resolved');},5000);
+}
 function ensureTicketCSOwnerResolved(id,emailObj){
   if(manualCSOverride[id])return ticketCSOwner[id]||null;
+  // A closed ticket's owner is history, not something a render may rewrite.
+  if(ticketCSOwner[id]&&isArchivedTicket(id))return ticketCSOwner[id];
   const resolved=resolveDefaultCSForTicket(id,emailObj);
   if(resolved){
-    ticketCSOwner[id]=resolved;
+    if(ticketCSOwner[id]!==resolved){ticketCSOwner[id]=resolved;queueCSOwnerSync();}
     return resolved;
   }
   return ticketCSOwner[id]||null;
 }
 function ensureSupportAssignmentForTicket(id,emailObj,opts={}){if(!id||ticketCategory[id]==='Spam'||isArchivedTicket(id))return false;const currentAssignee=ticketAssignee[id]||'';const keepExistingSupport=!!opts.keepExistingSupport&&SUPPORT_AGENTS.includes(currentAssignee);const supportAgent=keepExistingSupport?currentAssignee:defaultSupportAgentForTicket(emailObj,id);const csOwner=resolveDefaultCSForTicket(id,emailObj);let changed=false;if(csOwner&&ticketCSOwner[id]!==csOwner&&!manualCSOverride[id]){ticketCSOwner[id]=csOwner;changed=true;}if(ticketAssignee[id]!==supportAgent||ticketAssignmentMode[id]!=='support'){setTicketAssignee(id,supportAgent);ticketAssignmentMode[id]='support';changed=true;}if(manualSupportOverride[id]===undefined){manualSupportOverride[id]=false;changed=true;}return changed;}
 function shouldRefreshHubspotCacheEntry(email){const ce=String(email||'').toLowerCase();if(!ce)return false;if(!(ce in hsCache))return true;const cached=hsCache[ce];const related=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&(ticketClientEmail[t.id]||getClientEmail(t.email))===ce);if(!related.length)return false;if(cached===null)return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);if(!cached||!cached.companyName||!cached.companyId||!cached.coOwner)return true;return related.some(t=>isSupportAssignedTicket(t.id)&&!ticketCSOwner[t.id]);}
-function applyCompanyCSAssignments(){let changed=0;let reassigned=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam'||isArchivedTicket(t.id))return;const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs&&!manualCSOverride[id]){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true})){changed++;reassigned++;}}});
+function applyCompanyCSAssignments(){let changed=0;let reassigned=0;allTickets.forEach(t=>{if(ticketCategory[t.id]==='Spam')return;
+  // Closed tickets keep the CS owner they were closed under. One closed with
+  // none is only given one, so the KPIs since launch count it under its CS
+  // instead of leaving it out of "Tickets with CS" for good.
+  if(isArchivedTicket(t.id)){const id=t.id;if(!ticketCSOwner[id]&&!manualCSOverride[id]){const cs=resolveDefaultCSForTicket(id,t.email);if(cs){ticketCSOwner[id]=cs;changed++;}}return;}
+  const id=t.id;const ce=ticketClientEmail[id]||getClientEmail(t.email);if(!ce)return;const cs=resolveDefaultCSForTicket(id,t.email);if(cs&&ticketCSOwner[id]!==cs&&!manualCSOverride[id]){ticketCSOwner[id]=cs;changed++;}if(manualSupportOverride[id])return;if(!SUPPORT_AGENTS.includes(ticketAssignee[id])||ticketAssignmentMode[id]!=='support'){if(ensureSupportAssignmentForTicket(id,t.email,{keepExistingSupport:true})){changed++;reassigned++;}}});
   // Retiring an agent from SUPPORT_AGENTS makes every ticket they hold fail the
   // roster test above, so all of them are reassigned - by every open session,
   // on every load. That is how an entire queue can silently land on one agent
@@ -16745,8 +17008,8 @@ function makeCard(ticket,isNew=false){
   const inlineDraft=String(inlineCommentDrafts[id]||'');
   const inlineTags=inlineSelectedTags(id);
   const inlineTagsHtml=[...SUPPORT_AGENTS,...CS_AGENTS].filter((v,i,a)=>a.indexOf(v)===i).map(tag=>`<button class="card-inline-tag${inlineTags.includes(tag)?' selected':''}" data-inline-tag="${esc(tag)}" style="${inlineTags.includes(tag)?`background:${agentColor(tag)};`:''}">@${esc(tag)}</button>`).join('');
-  const recentComments=comments.slice(-2).reverse();
-  const recentCommentsHtml=recentComments.length?recentComments.map(c=>{const tagHtml=(c.tags||[]).map(t=>`<span class="ctag" style="background:${t===CLIENT_TAG?'var(--slate-600)':agentColor(t)}">@${esc(t)}</span>`).join('');return`<div class="card-inline-comment"><div class="card-inline-head"><span class="card-inline-author">${esc(c.author||'SYSTEM')}</span><span class="card-inline-time">${fmtTime(c.ts)}</span>${tagHtml}</div><div class="card-inline-text">${esc(c.text||'')}</div></div>`;}).join(''):'<div class="card-inline-empty">No internal comments yet.</div>';
+  const recentComments=comments.map((c,ci)=>({c,ci})).slice(-2).reverse();
+  const recentCommentsHtml=recentComments.length?recentComments.map(({c,ci})=>{const tagHtml=(c.tags||[]).map(t=>`<span class="ctag" style="background:${t===CLIENT_TAG?'var(--slate-600)':agentColor(t)}">@${esc(t)}</span>`).join('');return`<div class="card-inline-comment"><div class="card-inline-head"><span class="card-inline-author">${esc(c.author||'SYSTEM')}</span><span class="card-inline-time">${fmtTime(c.ts)}</span>${c.editedAt?'<span class="comment-edited">(edited)</span>':''}${tagHtml}${canEditNote(c)?`<button type="button" class="comment-edit-btn" data-inline-edit="${ci}">Edit</button>`:''}</div><div class="card-inline-text">${noteTextHtml(c.text||'')}</div></div>`;}).join(''):'<div class="card-inline-empty">No internal comments yet.</div>';
   const inlineSectionHtml=inlineOpen?`<div class="card-inline-thread"><div class="card-inline-comments">${recentCommentsHtml}</div><div class="card-inline-compose"><textarea class="card-inline-textarea" data-inline-text="${id}" placeholder="Add an internal note or tag a teammate...">${esc(inlineDraft)}</textarea><div class="card-inline-tags">${inlineTagsHtml}</div><div class="card-inline-actions"><button class="btn-out" data-inline-modal="${id}" style="font-size:12px;padding:3px 8px;">Full thread</button><button class="btn-primary" data-inline-post="${id}" style="font-size:12px;padding:4px 10px;">Post comment</button></div></div></div>`:'';
   const subtype=ticketSubtype[id]||'';const catOpts=CATEGORIES.map(c=>`<option value="${esc(c)}"${c===cat?' selected':''}>${esc(c)}</option>`).join('');const subOpts=TICKET_SUBTYPES.filter(x=>x.type===cat).map(x=>`<option value="${x.id}"${x.id===subtype?' selected':''}>${x.id} – ${esc(x.label)}</option>`).join('');
   // Under "Other" the sub-category is typed rather than picked - see
@@ -16824,6 +17087,16 @@ function makeCard(ticket,isNew=false){
   const velmaBtn=velmaLink
     ?`<button class="velma-badge-card${velmaLink.done?' done':''}" data-velma-open="${id}" title="Velma bug ${esc(velmaLink.id)}${velmaLink.status?' - '+esc(velmaLink.status):''}${velmaLink.done?' - SLA running again':' - SLA on hold'} - click to change or remove">Velma ${esc(velmaLink.id)}${velmaStatusHtml}</button>`
     :`<button class="velma-link-btn" data-velma-open="${id}" title="Link to a Velma bug" aria-label="Link to a Velma bug">Velma</button>`;
+  // Admins freeze or release the SLA clock here; everyone else sees the chip
+  // while a ticket is frozen, so a stopped clock is never a mystery.
+  const slaHold=ticketSlaHold[id]||null;
+  const slaHoldTitle=slaHold?`SLA frozen${slaHold.by?' by '+esc(slaHold.by):''} since ${esc(new Date(Number(slaHold.at)).toLocaleString('en-GB'))}`:'';
+  const slaHoldBtn=normalizeTicketStage(ticketState[id]||'new')==='res'&&!slaHold?''
+    :currentUserIsAdmin()
+      ?(slaHold
+        ?`<button class="sla-hold-badge" data-sla-hold="${id}" data-hold="0" title="${slaHoldTitle} - click to release; the timer resumes where it stopped">Frozen</button>`
+        :`<button class="sla-hold-btn" data-sla-hold="${id}" data-hold="1" title="Freeze this ticket's SLA timer" aria-label="Hold the SLA">Hold</button>`)
+      :(slaHold?`<span class="sla-hold-badge" title="${slaHoldTitle}">Frozen</span>`:'');
   const velmaDetailsHtml=velmaLink?`<div class="velma-details${velmaLink.done?' done':''}"><div class="velma-details-head"><strong>Velma bug ${esc(velmaLink.id)}</strong>${velmaLink.status?`<span class="velma-status">${esc(velmaLink.status)}</span>`:''}${velmaLink.url?`<a href="${esc(velmaLink.url)}" target="_blank" rel="noopener">Open row</a>`:''}</div>${velmaLink.done?`<div class="velma-details-note">${esc(velmaDoneNote)}</div>`:''}${velmaFieldsHtml(velmaLink,4)}</div>`:'';
   const jiraLinkedQt=(jiraInfo?.linkedIssues||[]).filter(x=>String(x.key||'').startsWith('QT-'));
   const jiraLinkedHtml=jiraLinkedQt.length?jiraLinkedQt.slice(0,2).map(x=>`<span style="display:inline-flex;align-items:center;gap:4px;border:1px solid var(--indigo-200);border-radius:999px;padding:1px 7px;background:var(--indigo-50);color:var(--indigo-800);">${esc(x.key)} <span style="color:var(--slate-500);">${esc(x.status||'')}</span></span>`).join(' '):'<span style="color:var(--slate-400);">No QT linked</span>';
@@ -16908,6 +17181,7 @@ function makeCard(ticket,isNew=false){
         ${jiraBtn}
         ${jiraEditBtn}
         ${velmaBtn}
+        ${slaHoldBtn}
         ${trControlsHtml}
         ${canEditManual?`<button class="btn-out card-act" data-edit-manual="${id}" title="Edit this manual ticket">Edit</button>`:''}
         ${dupMasterId?'':`<button class="btn-out card-act" data-dup-open="${id}" title="Mark this ticket as a duplicate of another one">Duplicate</button>`}
@@ -16934,7 +17208,8 @@ function makeCard(ticket,isNew=false){
   // its own card mid-gesture leaves that armed drag with nothing to finish
   // against, and the board stops accepting clicks until a reload. Disarm the
   // drag for any gesture that starts on a control, and re-arm it after.
-  const armDrag=ev=>{div.draggable=!ev.target?.closest?.('button,select,a,textarea,input,label,.agent-assign-menu');};
+  // Note text is left out too, so it can be selected and copied.
+  const armDrag=ev=>{div.draggable=!ev.target?.closest?.('button,select,a,textarea,input,label,.agent-assign-menu,.card-inline-text');};
   const rearmDrag=()=>{div.draggable=true;};
   div.addEventListener('pointerdown',armDrag);
   div.addEventListener('mousedown',armDrag);
@@ -17057,6 +17332,7 @@ function makeCard(ticket,isNew=false){
   }
   div.querySelector('[data-jira-edit]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openJiraModal(id);});
   div.querySelector('[data-velma-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();openVelmaModal(id);});
+  div.querySelector('[data-sla-hold]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();setTicketSlaHold(id,ev.currentTarget.dataset.hold==='1');});
   div.querySelector('[data-jira-open]').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(jiraKey&&JIRA_URL){window.open(`${JIRA_URL}${encodeURIComponent(jiraKey)}`,'_blank');return;}openJiraModal(id);});
   div.querySelector('[data-hs-open]')?.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();const hsId=ticketHubspotId[id];if(!hsId){showToast('Ticket not synced to HubSpot yet');return;}window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(hsId)}`,'_blank');});
   div.querySelector('[data-hs-retry]')?.addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const rs=await syncTicketToHubspot(ticket);if(rs?.ok&&ticketHubspotId[id]){window.open(`https://app.hubspot.com/contacts/25445053/record/0-5/${encodeURIComponent(ticketHubspotId[id])}`,'_blank');showToast('Ticket synced to HubSpot','ok');}else{const reason=rs?.reason||'unknown';if(reason==='missing_company_mapping')showToast('Cannot sync yet: this ticket has no mapped HubSpot company.');else if(reason==='missing_client_email')showToast('Cannot sync yet: no client email found for this ticket.');else if(reason==='api_error')showToast(`HubSpot sync failed: ${rs?.error||'api error'}`);else if(reason==='network_error')showToast(`HubSpot sync network error: ${rs?.error||'unknown'}`);else showToast('Unable to sync this ticket yet.');}renderBoard();});
@@ -17089,6 +17365,10 @@ function makeCard(ticket,isNew=false){
   div.querySelector('[data-inline-toggle]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=!inlineOpen;if(inlineCommentOpen[id]){markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);}renderBoard();});
   div.querySelector('[data-inline-bell]')?.addEventListener('click',ev=>{ev.stopPropagation();inlineCommentOpen[id]=true;markAlertFeedReadForTicket(id,currentUser());clearNewReplyGlow(id);renderBoard();});
   div.querySelector('[data-inline-modal]')?.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket);});
+  div.querySelectorAll('[data-inline-edit]').forEach(btn=>btn.addEventListener('click',ev=>{ev.stopPropagation();clearNewReplyGlow(id);openComModal(ticket,{editIndex:Number(btn.dataset.inlineEdit)});}));
+  // Links in notes open in a new tab; the copy button next to each is handled
+  // by the page-wide [data-copy-text] listener. Neither should reach the card.
+  div.querySelector('.card-inline-comments')?.addEventListener('click',ev=>{if(ev.target.closest('.note-link'))ev.stopPropagation();});
   div.querySelector('[data-res-confirm]')?.addEventListener('click',ev=>{ev.stopPropagation();confirmTicketResolved(id);});
   div.querySelector('[data-res-sendback]')?.addEventListener('click',ev=>{ev.stopPropagation();sendResolvedTicketBack(id);});
   div.querySelector('[data-inline-text]')?.addEventListener('input',ev=>{inlineCommentDrafts[id]=ev.target.value;});
@@ -20882,8 +21162,91 @@ if(comTrState.undo||comTrState.lang){comTrState.undo=null;comTrState.lang=null;t
 // rather than patched into the DOM, so they survive this rewrite. A note posted
 // since the translation has no entry and shows as written.
 const trNotes=trTicketIsOn(id)?(trNotesCache.get(id)||{}):null;
-const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}el.innerHTML=cs.map((c,ci)=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';const shown=trNotes&&typeof trNotes[ci]==='string'?trNotes[ci]:c.text;const trMark=trNotes&&typeof trNotes[ci]==='string'&&trNotes[ci]!==c.text?' tr-seg':'';return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div><div class="comment-text${trMark}">${esc(shown)}</div></div></div>`;}).join('');el.scrollTop=el.scrollHeight;}
-function openComModal(ticket){const{email,id}=ticket;comTicketId=id;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee} · CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr} · ${agInfo} · ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');}
+const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');if(!cs.length){el.innerHTML='<div class="no-comments"> No comments yet.</div>';return;}
+// A live-sync redraw while a note is being edited must not throw the draft away.
+const editing=comEditing&&comEditing.ticketId===id?comEditing:null;
+const keepScroll=editing?el.scrollTop:null;
+el.innerHTML=cs.map((c,ci)=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';const shown=trNotes&&typeof trNotes[ci]==='string'?trNotes[ci]:c.text;const trMark=trNotes&&typeof trNotes[ci]==='string'&&trNotes[ci]!==c.text?' tr-seg':'';
+  const isEditing=editing&&editing.ci===ci;
+  const editedHtml=c.editedAt?`<span class="comment-edited" title="Edited ${esc(fmtTime(c.editedAt))}${c.editedBy?' by '+esc(c.editedBy):''}">(edited)</span>`:'';
+  const editBtn=!isEditing&&canEditNote(c)?`<button type="button" class="comment-edit-btn" data-com-edit="${ci}">Edit</button>`:'';
+  const body=isEditing
+    ?`<div class="comment-edit"><textarea class="compose-textarea comment-edit-input" data-com-edit-input="${ci}">${esc(editing.draft)}</textarea><div class="comment-edit-actions"><button type="button" class="btn-out" data-com-edit-cancel="${ci}">Cancel</button><button type="button" class="btn-primary" data-com-edit-save="${ci}">Save</button></div></div>`
+    :`<div class="comment-text${trMark}">${noteTextHtml(shown)}</div>`;
+  return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${editedHtml}${editBtn}${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div>${body}</div></div>`;}).join('');
+if(editing){el.scrollTop=keepScroll;const input=el.querySelector('[data-com-edit-input]');if(input&&editing.focus){editing.focus=false;input.focus();input.setSelectionRange(input.value.length,input.value.length);input.scrollIntoView({block:'nearest'});}}
+else el.scrollTop=el.scrollHeight;}
+/* Notes are plain text. Links in them are made clickable, with a copy button
+   beside each, so a URL someone pasted can be opened or passed on without
+   having to select it by hand. Everything else is escaped as before. */
+const NOTE_URL_RE=/\bhttps?:\/\/[^\s<>"']+|\bwww\.[^\s<>"']+/gi;
+const NOTE_COPY_SVG='<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 3.5V3a1.5 1.5 0 0 0-1.5-1.5h-6A1.5 1.5 0 0 0 2 3v6.5A1.5 1.5 0 0 0 3.5 11H4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>';
+function noteTextHtml(text){
+  const s=String(text||'');
+  let out='',last=0;
+  s.replace(NOTE_URL_RE,(match,offset)=>{
+    let url=match,trail='';
+    // Sentence punctuation after a link is not part of it; a closing bracket
+    // is, when the link opened one (Wikipedia-style URLs).
+    while(/[.,;:!?)\]}]$/.test(url)){
+      const ch=url.slice(-1);
+      if(ch===')'&&(url.match(/\(/g)||[]).length>=(url.match(/\)/g)||[]).length)break;
+      trail=ch+trail;url=url.slice(0,-1);
+    }
+    const href=/^www\./i.test(url)?'https://'+url:url;
+    out+=esc(s.slice(last,offset))
+      +`<a class="note-link" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`
+      +`<button type="button" class="note-link-copy" data-copy-text="${esc(href)}" title="Copy link" aria-label="Copy link">${NOTE_COPY_SVG}</button>`
+      +esc(trail);
+    last=offset+match.length;
+    return match;
+  });
+  return out+esc(s.slice(last));
+}
+// The author can correct their own note; admins can correct anyone's.
+function canEditNote(c){return !!c&&(currentUserIsAdmin()||(!!c.author&&agentIdentityCode(c.author)===agentIdentityCode(currentUser())));}
+// {ticketId, ci, draft, focus} while a note in the thread modal is being edited.
+let comEditing=null;
+function startNoteEdit(ticketId,ci){
+  const c=(ticketComments[ticketId]||[])[ci];
+  if(!canEditNote(c))return;
+  comEditing={ticketId,ci,draft:String(c.text||''),focus:true};
+  renderThread(ticketId);
+}
+function saveNoteEdit(){
+  if(!comEditing)return;
+  const{ticketId,ci,draft}=comEditing;
+  const c=(ticketComments[ticketId]||[])[ci];
+  if(!canEditNote(c)){comEditing=null;renderThread(ticketId);return;}
+  const text=String(draft||'').trim();
+  if(!text){showToast('A note cannot be empty','warn');return;}
+  comEditing=null;
+  if(text!==String(c.text||'').trim()){
+    c.text=text;
+    if('comment' in c)c.comment=text;
+    c.editedAt=Date.now();
+    c.editedBy=currentUser();
+    // The cached translation was of the old wording.
+    const tr=trNotesCache.get(ticketId);if(tr)delete tr[ci];
+    saveState('ticket_comment_edited');
+    renderBoard();
+    showToast('Note updated','ok');
+  }
+  renderThread(ticketId);
+}
+document.getElementById('com-thread').addEventListener('click',ev=>{
+  const edit=ev.target.closest('[data-com-edit]');
+  if(edit&&comTicketId){startNoteEdit(comTicketId,Number(edit.dataset.comEdit));return;}
+  if(ev.target.closest('[data-com-edit-cancel]')){const id=comEditing?.ticketId;comEditing=null;if(id)renderThread(id);return;}
+  if(ev.target.closest('[data-com-edit-save]'))saveNoteEdit();
+});
+document.getElementById('com-thread').addEventListener('input',ev=>{if(ev.target.matches('[data-com-edit-input]')&&comEditing)comEditing.draft=ev.target.value;});
+document.getElementById('com-thread').addEventListener('keydown',ev=>{
+  if(!ev.target.matches('[data-com-edit-input]'))return;
+  if(ev.key==='Enter'&&(ev.ctrlKey||ev.metaKey)){ev.preventDefault();saveNoteEdit();}
+  else if(ev.key==='Escape'){ev.preventDefault();ev.stopPropagation();const id=comEditing?.ticketId;comEditing=null;if(id)renderThread(id);}
+});
+function openComModal(ticket,opts){const{email,id}=ticket;comTicketId=id;comEditing=null;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee} · CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr} · ${agInfo} · ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');if(opts&&Number.isInteger(opts.editIndex))startNoteEdit(id,opts.editIndex);}
 function postTicketComment(ticketId,text,tags){if(!text||!ticketId)return false;if(!ticketComments[ticketId])ticketComments[ticketId]=[];const author=currentUser();const normalizedTags=[...new Set((Array.isArray(tags)?tags:[]).map(t=>t===CLIENT_TAG?CLIENT_TAG:agentIdentityCode(t)).filter(Boolean))];ticketComments[ticketId].push({author,text,tags:normalizedTags,ts:Date.now()});saveState('ticket_comment_added');renderBoard();if(comTicketId===ticketId)renderThread(ticketId);const at=normalizedTags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast(`Bell alert sent to: ${at.join(', ')}`,'ok');else showToast('Comment posted','ok');return true;}
 function addInternalComment(ticketId,text,tags){if(!postTicketComment(ticketId,text,tags))return;if(comTicketId===ticketId)renderThread(ticketId);}
 document.getElementById('com-post').addEventListener('click',()=>{const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;const tags=[...selectedTags];if(!postTicketComment(comTicketId,text,tags))return;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));if(comTicketId)renderThread(comTicketId);});

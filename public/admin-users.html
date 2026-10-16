@@ -124,6 +124,38 @@
         </div>
       </aside>
     </div>
+
+    <section class="panel" id="repairPanel" style="margin-top:22px;">
+      <div class="panel-header">
+        <div>
+          <h2>Restore wrongly re-opened tickets</h2>
+          <p>Finds resolved tickets that were moved out of Resolved in the chosen window without the client writing back, and puts them back to Resolved. Preview first - nothing changes until you press Restore.</p>
+        </div>
+      </div>
+      <div class="form-row" style="max-width:640px;">
+        <div class="form-group"><label for="repairSince">From</label><input id="repairSince" type="datetime-local" /></div>
+        <div class="form-group"><label for="repairUntil">To</label><input id="repairUntil" type="datetime-local" /></div>
+      </div>
+      <div class="button-row" style="margin-top:14px;">
+        <button class="btn btn-secondary" id="repairPreview" type="button">Preview</button>
+        <button class="btn btn-primary" id="repairApply" type="button" disabled>Restore</button>
+      </div>
+      <div class="message" id="repairMessage"></div>
+      <div id="repairList" class="help-text"></div>
+    </section>
+
+    <section class="panel" id="slaBaselinePanel" style="margin-top:22px;">
+      <div class="panel-header">
+        <div>
+          <h2>Start the SLA live from the baseline</h2>
+          <p>Tickets resolved before the baseline already count as met. This restarts the SLA clock of every ticket still open from the baseline, so the backlog is measured live from there too. Runs once - pressing it again only says when it ran.</p>
+        </div>
+      </div>
+      <div class="button-row" style="margin-top:14px;">
+        <button class="btn btn-primary" id="slaBaselineRun" type="button">Restart open SLA clocks</button>
+      </div>
+      <div class="message" id="slaBaselineMessage"></div>
+    </section>
   </div>
 
   <script>
@@ -600,6 +632,58 @@
     });
 
     loadUsers();
+
+    // Restore wrongly re-opened tickets (POST /api/admin/repair/resolved-flips).
+    (() => {
+      const sinceEl = document.getElementById('repairSince');
+      const untilEl = document.getElementById('repairUntil');
+      const previewBtn = document.getElementById('repairPreview');
+      const applyBtn = document.getElementById('repairApply');
+      const msg = document.getElementById('repairMessage');
+      const list = document.getElementById('repairList');
+      const toLocalInput = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+      sinceEl.value = toLocalInput(new Date(Date.now() - 24 * 60 * 60 * 1000));
+      untilEl.value = toLocalInput(new Date());
+      const windowBody = () => ({ since: new Date(sinceEl.value).toISOString(), until: new Date(untilEl.value).toISOString() });
+      const show = (out) => {
+        const rows = (out.candidates || []).map(c => `<li><strong>${escapeHtml(c.ticketNumber || '')}</strong> ${escapeHtml(c.subject || '')} - now ${escapeHtml(c.status || '')}, moved ${escapeHtml(new Date(c.flippedAt).toLocaleString())}${c.flippedBy ? ' by ' + escapeHtml(c.flippedBy) : ''}</li>`).join('');
+        const skipped = (out.skipped || []).length ? `<p>${out.skipped.length} left alone (the client wrote back, or the ticket moved again since).</p>` : '';
+        list.innerHTML = (rows ? `<ul>${rows}</ul>` : '<p>Nothing to restore in this window.</p>') + skipped;
+      };
+      previewBtn.addEventListener('click', async () => {
+        msg.textContent = 'Looking...'; msg.style.color = '#475569'; list.innerHTML = ''; applyBtn.disabled = true;
+        try {
+          const out = await api('/api/admin/repair/resolved-flips', { method: 'POST', body: windowBody() });
+          msg.textContent = `${out.count} ticket(s) would be put back to Resolved.`;
+          show(out);
+          applyBtn.disabled = !out.count;
+        } catch (error) { msg.textContent = error.message; msg.style.color = '#b91c1c'; }
+      });
+      applyBtn.addEventListener('click', async () => {
+        if (!confirm('Put these tickets back to Resolved?')) return;
+        applyBtn.disabled = true; msg.textContent = 'Restoring...'; msg.style.color = '#475569';
+        try {
+          const out = await api('/api/admin/repair/resolved-flips', { method: 'POST', body: { ...windowBody(), apply: true } });
+          msg.textContent = `${out.restored} ticket(s) restored to Resolved. Open boards reload automatically.`;
+          msg.style.color = '#16a34a';
+          show(out);
+        } catch (error) { msg.textContent = error.message; msg.style.color = '#b91c1c'; applyBtn.disabled = false; }
+      });
+    })();
+
+    // Restart open SLA clocks at the baseline (POST /api/admin/sla/restart-at-baseline).
+    document.getElementById('slaBaselineRun').addEventListener('click', async (ev) => {
+      const msg = document.getElementById('slaBaselineMessage');
+      if (!confirm('Restart the SLA clock of every open ticket from the baseline? This runs once.')) return;
+      ev.target.disabled = true; msg.textContent = 'Restarting...'; msg.style.color = '#475569';
+      try {
+        const out = await api('/api/admin/sla/restart-at-baseline', { method: 'POST', body: {} });
+        msg.textContent = out.alreadyDone
+          ? `Already done on ${new Date(out.at).toLocaleString()}: ${out.message || ''}`
+          : `SLA clock restarted from ${new Date(out.baselineAt).toLocaleString()} for ${out.board} open ticket(s) on the board (${out.database} in the database).`;
+        msg.style.color = '#16a34a';
+      } catch (error) { msg.textContent = error.message; msg.style.color = '#b91c1c'; ev.target.disabled = false; }
+    });
   </script>
 </body>
 </html>

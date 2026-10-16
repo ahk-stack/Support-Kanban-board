@@ -585,19 +585,54 @@ the work, on a Claude account the team already has:
 **Ask a follow-up** queues another run carrying the conversation so far.
 
 Projects reach the board the same way: an admin opens the project in Claude and
-asks it to register itself (**Add from Claude** copies the line to paste). There
-is no free API that lists claude.ai Projects, so Claude pushes them rather than
-the board pulling them.
+says **push to kanban prod** (or **push to kanban preprod**). The connector's
+own instructions tell Claude what that means: find or reuse the board entry with
+`list_board_projects`, then `register_project` with the project's name, its
+instructions verbatim and its input fields. The connector token must be an
+admin's. There is no free API that lists claude.ai Projects, so Claude pushes
+them rather than the board pulling them.
 
-### The runner PC (optional)
+### Data the board collects itself (Q-data audit)
 
-`scripts/project-runner.ps1` turns Run into a hands-off button. Leave it running
-on an always-on Windows PC with Claude Code signed in and the board connector
-added (`claude mcp add --scope user ...`; setup steps are at the top of the
-script). It checks the queue over plain HTTP every 20 seconds, so an empty queue
-costs nothing, and starts `claude -p` only when a run is waiting. Runs count
-against the Claude account signed in on that PC. Without a runner, runs wait
-for someone to paste the hand-off line.
+An audit starts by pulling the hotel's corpus from the n8n audit gateway with
+`AUDIT_API_KEY`. That call is made **by the board server**, not by Claude: a
+Claude handed the key and told to post it to an outside URL is refused by its
+own safety check, and the key has no business leaving the server anyway.
+
+When `AUDIT_API_KEY` is set and a project's slug or name matches
+`AUDIT_PROJECT_PATTERN` and it has a Team ID field, Run puts the run in
+*Collecting data*, POSTs `{"team_id": <n>}` to `AUDIT_GATEWAY_URL` with
+`Authorization: Bearer <AUDIT_API_KEY>`, stores the answer, and only then
+queues the run. `claim_project_run` hands the corpus to Claude as `collected`
+(inline when small, otherwise paged through `get_project_run_data`). A gateway
+error fails the run with the reason, before any Claude is involved. The stored
+corpus is deleted once the run is answered.
+
+| Variable | Default | |
+|---|---|---|
+| `AUDIT_API_KEY` | *(unset: no collection)* | Secret. Server env only. |
+| `AUDIT_GATEWAY_URL` | `https://n8n-staging.quicktext.im/webhook/qdata-audit-api` | |
+| `AUDIT_PROJECT_PATTERN` | `audit` | Regex, case-insensitive, on slug + name. |
+| `AUDIT_COLLECT_TIMEOUT_SECONDS` | `300` | |
+| `BOARD_LABEL` | `preprod` if `APP_BASE_URL` says so, else `prod` in production | Set it on every deployment: it names the board in hand-off lines and connector instructions, so a Claude with both connectors uses the right one. |
+
+### The runner PC
+
+`scripts/project-runner.ps1` turns Run into a hands-off button for **both**
+boards. On an always-on Windows PC with Claude Code signed in to the team
+account (its claude.ai connectors, Quinta MCP and skills come along), run once:
+
+    .\scripts\project-runner.ps1 -Install -ProdToken <prod token> -PreprodToken <preprod token>
+
+That registers a scheduled task that starts the runner hidden at every logon
+and restarts it if it dies; log in `%LOCALAPPDATA%\kanban-runner\runner.log`.
+It checks each board's queue over plain HTTP every 20 seconds, so an empty
+queue costs nothing, and starts `claude -p` only when a run is waiting, with
+only that board's connector enabled. Bash is not allowed: nothing a run needs
+should require a secret on the runner. Runs count against the Claude account
+signed in on that PC, and use that account's skill versions - update skills
+(e.g. `q-data-audit`) there. Without a runner, runs wait for someone to paste
+the hand-off line.
 
 ### Why the catalogue lives here and not in Claude
 
@@ -847,7 +882,12 @@ still holds the ticket on its own. **Account > Google account > Check linked bug
 now** runs the same check immediately.
 
 Optional: `VELMA_BUG_SHEET_ID` and `VELMA_BUG_SHEET_GID` (default to the current
-sheet and tab); `VELMA_BUG_ID_COLUMN` - the header of the ID column, if the
+sheet and tab); `VELMA_BUG_EXTRA_SHEETS` - more sheets to look bugs up in, as
+`<spreadsheet id>:<gid>` comma separated (defaults to the second Velma bug sheet,
+`1NEMGFrVtEPJUqdfUX53lfKxAD3J87E_YikYj0y41_JA:1291300537`; set it empty for none).
+Sheets are searched in order and the first match wins; a link keeps its sheet.
+The Google account or service account must be able to open every sheet; one it
+cannot open is skipped and logged. `VELMA_BUG_ID_COLUMN` - the header of the ID column, if the
 automatic guess (a header such as `ID`, `Bug ID`, `Ticket ID`) picks the wrong one;
 `VELMA_BUG_STATUS_COLUMN` - the header of the status dropdown, if it is not called
 `Status`; `VELMA_DONE_STATUSES` - comma-separated values that count as done

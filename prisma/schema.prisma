@@ -122,6 +122,10 @@ model Ticket {
   // link was made: { row, url, fields: { header: value } }.
   velmaBugId              String?
   velmaBugRow             Json?
+  // An admin froze this ticket's SLA clock (the Hold button on the card):
+  // when, and who. Cleared on release, when the clock resumes where it stopped.
+  slaHoldAt               DateTime?
+  slaHoldBy               String?
   body                    String?
   emailRaw                Json?
   // The message body as Outlook returned it, captured the first time the
