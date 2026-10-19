@@ -14686,7 +14686,19 @@ function currentUserCSAgent(){return normalizeCSAgent(currentUser());}
    board treats every privileged login as one identity - so currentUserCSAgent()
    is empty for them. Anything asking "is the person doing this a CS agent" and
    meaning the human rather than the permission level reads this instead. */
-function currentUserOwnCSAgent(){return currentUserCSAgent()||normalizeCSAgent(resolveUserAgentCode(currentSessionUser));}
+function currentUserOwnCSAgent(){
+  const mine=currentUserCSAgent();
+  if(mine)return mine;
+  // Every candidate is tried for a CS code of its own: resolveUserAgentCode
+  // stops at the first recognised code, and 'admin' is one, so an account
+  // named admin with a CS e-mail would never get as far as the e-mail.
+  const user=currentSessionUser||{};
+  for(const candidate of [user.username,user.displayName,String(user.email||'').split('@')[0]]){
+    const cs=normalizeCSAgent(candidate)||normalizeCSAgent(DEFAULT_COOWNER_NAME_MAPPINGS[String(candidate||'').trim().toLowerCase()]);
+    if(cs)return cs;
+  }
+  return '';
+}
 function ticketMatchesAgentFilter(ticket,agentCode){
   if(agentCode==='all')return true;
   if(agentCode==='tagged')return taggedTickets.has(ticket.id);
