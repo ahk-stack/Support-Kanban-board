@@ -8375,10 +8375,7 @@ th {
     <div id="kpi-range-label" style="font-size:14px;color:var(--legacy-666);">Loading</div>
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--legacy-666);">
       <span id="kpi-freshness">-</span>
-      <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;" title="Re-pull the figures every 45 seconds, and whenever the board changes">
-        <input type="checkbox" id="kpi-autorefresh" checked style="cursor:pointer;"> Auto-refresh
-      </label>
-      <button class="btn-out" id="kpi-refresh-now" type="button" style="font-size:13px;padding:3px 9px;">Refresh</button>
+      <button class="btn-out" id="kpi-refresh-now" type="button" style="font-size:13px;padding:3px 9px;" title="Pulls again - the figures themselves only change at 00:00, 09:00, 12:00 and 16:00">Refresh</button>
     </div>
   </div>
   <!-- Admins only: every ticket since the board went live. Filled by the KPI
@@ -9755,7 +9752,7 @@ function resolveUserAgentCode(user){
   for(const candidate of candidates){
     const code=normalizeAgentCode(candidate);
     if(code)return code;
-    const mapped=COOWNER_NAME_MAP[String(candidate||'').trim().toLowerCase()];
+    const mapped=DEFAULT_COOWNER_NAME_MAPPINGS[String(candidate||'').trim().toLowerCase()];
     if(mapped&&normalizeAgentCode(mapped))return mapped;
   }
   return '';
@@ -10036,7 +10033,9 @@ async function apiSaveState(payload){
       const refused=Array.isArray(out?.refused)?out.refused:[];
       if(refused.length){
         const fields=[...new Set(refused.map(r=>String(r?.field||'')))];
-        const what=fields.includes('ticketAssignee')&&fields.length===1
+        const what=fields.includes('ticketSnooze')&&fields.length===1
+          ?`At most ${SNOOZE_MAX_PER_AGENT} snoozed tickets per support agent - that snooze was not saved`
+          :fields.includes('ticketAssignee')&&fields.length===1
           ?'Support assignment is CS-only - that change was not saved'
           :fields.includes('ticketCSOwner')&&fields.length===1
             ?'Changing the CS owner is admin-only - that change was not saved'
@@ -10443,21 +10442,8 @@ function setLiveIndicator(state,detail){
   el.className='live-indicator live-'+state;
   el.title=detail||('Live sync: '+state);
 }
-/* Real-time KPIs. Every board change reaches this tab as a live patch (or a
-   reload), and the server sends those only after the database - which the
-   KPIs are counted from - has been written. So an open KPI view re-pulls on
-   each one, debounced so a burst of saves is one request. Our own saves count
-   too: their echo is ignored as a board patch, but it is still the signal
-   that the database now has them. The 60-second timer stays as the backstop. */
-let kpiLiveRefreshTimer=null;
-function scheduleKpiLiveRefresh(){
-  if(viewMode!=='kpi'||document.visibilityState!=='visible')return;
-  clearTimeout(kpiLiveRefreshTimer);
-  kpiLiveRefreshTimer=setTimeout(()=>{if(viewMode==='kpi')void renderKpiView();},1500);
-}
 function applyBoardPatch(p){
   if(!p)return;
-  scheduleKpiLiveRefresh();
   // Our own save echoing back - applying it could clobber an edit the user
   // has made since, and it is already in our maps anyway.
   if(p.origin&&p.origin===LIVE_CLIENT_ID)return;
@@ -10589,8 +10575,6 @@ async function reconcileBoardWithDatabase(){
     if(boardAhead&&Date.now()-dbReconcileLastPushAt>=DB_RECONCILE_PUSH_MIN_MS){
       dbReconcileLastPushAt=Date.now();
       await saveState('db_reconcile_board_ahead');
-      // The KPIs read the database, so they are only right once the push lands.
-      if(viewMode==='kpi')void renderKpiView();
     }
     if(adopted||boardAhead)console.info(`[sync] board/database check: ${adopted} taken from the database, ${boardAhead} pushed from the board`);
   }catch(_){
@@ -10604,7 +10588,6 @@ async function reloadBoardFromServer(reason){
   // Used when a patch stream can't be trusted (replay gap, oversized diff).
   clearTimeout(liveReloadTimer);
   liveReloadTimer=setTimeout(async()=>{
-    scheduleKpiLiveRefresh();
     await loadState();
     const dbTickets=await apiGetTickets();
     if(dbTickets)mergeDatabaseTickets(dbTickets);
@@ -10883,7 +10866,7 @@ function fillCreateTicketCSSelect(){
     const off=isAgentOff(a);
     return `<option value="${esc(a)}"${off?' disabled':''}>${esc(a)}${off?` - ${esc(agentLeaveText(a))}`:''}</option>`;
   }).join('')+'</optgroup>';
-  const mine=currentUserCSAgent();
+  const mine=currentUserOwnCSAgent();
   ctCS.value=(mine&&!isAgentOff(mine))?mine:'';
 }
 const SHIFT_HEARTBEAT_MS=60000;
@@ -11185,6 +11168,15 @@ function getSLAStatus(id){
     const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+(resetAt?' since the client\'s last reply':' since received');
     return{text:`SLA frozen${adminHold.by?' by '+adminHold.by:''}`,cls:'sla-warn',overdue:false,wallText:frozenWall,shiftMs:0,noClock:true,adminHold};
   }
+  /* Snoozed: held from the moment it was snoozed. When the snooze ends the
+     server moves the restart point forward (applySnoozeRules), so the clock
+     resumes where it stopped. Mirrors snooze_hold in ticketSlaSnapshot. */
+  if(isSnoozed(id,slaNow)){
+    const snoozeHold=snoozeEntry(id);
+    const frozenAt=Math.min(slaNow,Math.max(Number(snoozeHold.at)||slaNow,createdMs));
+    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+(resetAt?' since the client\'s last reply':' since received');
+    return{text:'SLA on hold - snoozed',cls:'sla-warn',overdue:false,wallText:frozenWall,shiftMs:0,noClock:true,snoozeHold};
+  }
   const jiraHoldKey=canonicalJiraKey(ticketJira[id]);
   if(jiraHoldKey)return{text:`SLA on hold - ${jiraHoldKey}`,cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true,jiraHold:jiraHoldKey};
   // Waiting on a Velma bug: the same hold, for the same reason - until the
@@ -11249,6 +11241,11 @@ function slaTooltip(status){
     return['SLA is not counting: this ticket is linked to Velma bug '+status.velmaHold+'.',
       'Wall clock: '+(status.wallText||''),
       'Unlinking the bug resumes the clock where it stopped.'].join('\n');
+  }
+  if(status.snoozeHold){
+    return['SLA is on hold: this ticket is snoozed until '+new Date(Number(status.snoozeHold.until)).toLocaleString('en-GB')+'.',
+      'Wall clock when snoozed: '+(status.wallText||''),
+      'When the snooze ends the timer resumes where it stopped.'].join('\n');
   }
   if(status.leaveHold){
     return['SLA is on hold: '+status.leaveHold+' is off'+(agentLeaveText(status.leaveHold).replace(/^Off/,'')||'')+'.',
@@ -14684,6 +14681,12 @@ function ticketFilterAgentValues(ticket){
 function normalizeSupportAgent(value){const code=normalizeAgentCode(value);return isKnownSupportAgent(code)?code:'';}
 function normalizeCSAgent(value){const code=normalizeAgentCode(value);return isKnownCSAgent(code)?code:'';}
 function currentUserCSAgent(){return normalizeCSAgent(currentUser());}
+/* The CS agent this login IS, even when it is signed in as an admin. An admin
+   account that is also a CS agent (VGU) reports currentUser() as 'ADMIN' - the
+   board treats every privileged login as one identity - so currentUserCSAgent()
+   is empty for them. Anything asking "is the person doing this a CS agent" and
+   meaning the human rather than the permission level reads this instead. */
+function currentUserOwnCSAgent(){return currentUserCSAgent()||normalizeCSAgent(resolveUserAgentCode(currentSessionUser));}
 function ticketMatchesAgentFilter(ticket,agentCode){
   if(agentCode==='all')return true;
   if(agentCode==='tagged')return taggedTickets.has(ticket.id);
@@ -14697,49 +14700,54 @@ function renderSimpleKpiRows(rows,labelKey,valueKey){
   return rows?.length?`<div style="display:flex;flex-direction:column;gap:8px;">${rows.map(r=>{const label=r[labelKey]||'Unknown';const value=Number(r[valueKey]||0);return `<div><div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:4px;"><span style="font-weight:700;">${esc(label)}</span><span>${value}</span></div><div style="height:12px;background:var(--slate-100);border-radius:999px;overflow:hidden;"><div style="height:12px;width:${Math.round((value/max)*100)}%;background:var(--teal-700);"></div></div></div>`;}).join('')}</div>`:'<div style="font-size:14px;color:var(--legacy-666);">No data in this range.</div>';
 }
 // ---------------------------------------------------------------------------
-// KPI freshness
+// KPI checkpoints
 //
-// The dashboard used to render once and then sit there: figures drifted out of
-// date while it was open, and nothing on screen said how old they were. It now
-// re-pulls on a timer, whenever a live board patch lands (debounced, because a
-// busy board patches often), and when the tab is brought back to the front -
-// but only while the KPI view is actually showing, so a board-only session
-// isn't polling the database for a screen no one is looking at.
+// The dashboard is not live. The server reads its figures from a snapshot of
+// the tickets taken at 00:00, 09:00, 12:00 and 16:00 (the SLA's time zone), so
+// a change made in between shows up at the next checkpoint. This view pulls
+// once when it is opened or a filter changes, and then once per checkpoint -
+// not on a timer, not on every board patch.
 // ---------------------------------------------------------------------------
-let kpiAutoRefresh=true;
 let kpiLastLoadedAt=0;
+// From the last response: {checkpointAt, asOf, nextUpdateAt, checkpointHours}.
+let kpiSnapshotInfo=null;
+// The filters the figures on screen were pulled for.
+let kpiLoadedKey='';
 let kpiRefreshTimer=null,kpiFreshnessTimer=null;
-const KPI_REFRESH_MS=60000;
+function kpiNextUpdateMs(){return kpiSnapshotInfo?.nextUpdateAt?new Date(kpiSnapshotInfo.nextUpdateAt).getTime():0;}
+function kpiZoneTime(iso){
+  try{return new Date(iso).toLocaleTimeString('en-GB',{timeZone:slaTimeZone,hour:'2-digit',minute:'2-digit'});}
+  catch(_){return new Date(iso).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});}
+}
 function kpiFreshnessText(){
-  if(!kpiLastLoadedAt)return'Not loaded yet';
-  const secs=Math.max(0,Math.round((Date.now()-kpiLastLoadedAt)/1000));
-  if(secs<10)return'Updated just now';
-  if(secs<90)return`Updated ${secs}s ago`;
-  return`Updated ${Math.round(secs/60)}m ago`;
+  if(!kpiLastLoadedAt||!kpiSnapshotInfo)return'Not loaded yet';
+  return`Figures as of ${kpiZoneTime(kpiSnapshotInfo.asOf)} · next update ${kpiZoneTime(kpiSnapshotInfo.nextUpdateAt)}`;
 }
 function updateKpiFreshnessLabel(){
   const el=document.getElementById('kpi-freshness');
-  if(el)el.textContent=kpiFreshnessText();
+  if(el){
+    el.textContent=kpiFreshnessText();
+    el.title='The KPI figures update at '+(kpiSnapshotInfo?.checkpointHours||[0,9,12,16]).map(h=>String(h).padStart(2,'0')+':00').join(', ')+'. Changes made in between show at the next update.';
+  }
 }
+// Pulls a few seconds after the next checkpoint, by the server's clock.
 function startKpiAutoRefresh(){
   stopKpiAutoRefresh();
-  kpiFreshnessTimer=setInterval(updateKpiFreshnessLabel,5000);
-  if(!kpiAutoRefresh)return;
-  kpiRefreshTimer=setInterval(()=>{
-    // A hidden tab refreshing on a timer is pure load for nobody's benefit;
-    // the visibility handler pulls a fresh set the moment it comes back.
+  const next=kpiNextUpdateMs();
+  if(!next)return;
+  kpiRefreshTimer=setTimeout(()=>{
+    kpiRefreshTimer=null;
+    // A hidden tab pulls when it comes back to the front instead.
     if(viewMode!=='kpi'||document.visibilityState!=='visible')return;
-    void renderKpiView();
-  },KPI_REFRESH_MS);
+    void renderKpiView({force:true});
+  },Math.min(Math.max(1000,next-boardNow()+3000),2**31-1));
 }
 function stopKpiAutoRefresh(){
-  clearInterval(kpiRefreshTimer);kpiRefreshTimer=null;
+  clearTimeout(kpiRefreshTimer);kpiRefreshTimer=null;
   clearInterval(kpiFreshnessTimer);kpiFreshnessTimer=null;
 }
-// A live patch from another agent already re-renders the active view, which
-// for this one means a fresh pull. On a busy board those patches arrive in
-// bursts, so overlapping pulls are collapsed rather than queued: the guard in
-// renderKpiView drops a request while one is already in flight.
+// Overlapping pulls (a filter changed twice quickly) are collapsed rather
+// than queued: the guard in renderKpiView drops a request while one is in flight.
 let kpiFetchInFlight=false;
 // Every figure this formats is SLA time - working hours, seven to a day
 // (08:00-12:00 and 14:00-17:00) - so a "day" here is seven of them, not
@@ -14867,7 +14875,7 @@ document.getElementById('kpi-status-cards').addEventListener('keydown',e=>{
   e.preventDefault();
   openKpiDrilldown(card.dataset.kpiDrilldown);
 });
-async function renderKpiView(){
+async function renderKpiView(opts){
   /* Admin, not currentUserCanViewAllTickets(). A support agent reading the
      whole board still reads only their own numbers here: the board is the work
      queue, the dashboard is a measure of a person. The server pins the figures
@@ -14886,11 +14894,14 @@ async function renderKpiView(){
   document.getElementById('kpi-team-filter').value=kpiTeamFilter;
   // Only announce loading on the first pull - a timed refresh that blanked the
   // header every 45 seconds would read as the dashboard breaking.
-  if(!kpiLastLoadedAt)document.getElementById('kpi-range-label').textContent='Loading live KPI stats...';
+  const params=new URLSearchParams({range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:String(new Date().getTimezoneOffset())});
+  // The figures on screen stand until the next checkpoint: a board patch or a
+  // return to this view does not pull again unless a filter changed.
+  if(!opts?.force&&kpiLastLoadedAt&&kpiLoadedKey===params.toString()&&boardNow()<kpiNextUpdateMs())return;
+  if(!kpiLastLoadedAt)document.getElementById('kpi-range-label').textContent='Loading KPI stats...';
   if(kpiFetchInFlight)return;
   kpiFetchInFlight=true;
   try{
-    const params=new URLSearchParams({range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:String(new Date().getTimezoneOffset())});
     const res=await fetch('/api/tickets/kpis?'+params.toString(),{credentials:'include'});
     const data=await res.json().catch(()=>({}));
     if(!res.ok)throw new Error(data?.error||'kpi_fetch_failed');
@@ -14920,7 +14931,10 @@ async function renderKpiView(){
     const dupNote=totals.duplicates?` · ${totals.duplicates} duplicate${totals.duplicates>1?'s':''} excluded`:'';
     document.getElementById('kpi-range-label').textContent=`${totals.tickets||0} tickets in scope, ${totals.rangeTickets||0} active in this range${dupNote} · ${data.range?.label||'Range'} · ${start} to ${end} · ${teamLabel} · ${agentLabel}`;
     kpiLastLoadedAt=Date.now();
+    kpiSnapshotInfo=data.snapshot||null;
+    kpiLoadedKey=params.toString();
     updateKpiFreshnessLabel();
+    if(viewMode==='kpi')startKpiAutoRefresh();
     const compliance=sla.compliancePct;
     const overdueDrilldownRows=(data.overdueRows||[]).map(r=>({id:r.externalId,ticketNumber:r.ticketNumber,subject:r.subject,company:r.company,agent:r.agent,priority:r.priority,statusLabel:COL_NAMES[r.status]||r.status,detail:fmtHours(r.overdueHours)+' overdue'}));
     resetKpiDrilldownStore();
@@ -14989,7 +15003,8 @@ async function renderKpiView(){
       return`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="padding:8px 10px;font-weight:700;">${esc(r.agent)}</td><td style="padding:8px 10px;">${r.total}</td><td style="padding:8px 10px;">${r.new}</td><td style="padding:8px 10px;">${r.inp}</td><td style="padding:8px 10px;">${r.wus||0}</td><td style="padding:8px 10px;">${r.dft||0}</td><td style="padding:8px 10px;">${r.wct||0}</td><td style="padding:8px 10px;">${r.res}</td><td style="padding:8px 10px;${(r.overdue||0)>0?'color:var(--red-600);font-weight:700;':''}">${r.overdue||0}</td><td style="padding:8px 10px;${(r.atRisk||0)>0?'color:var(--amber-700);':''}">${r.atRisk||0}</td><td style="padding:8px 10px;${compColor}">${comp}</td><td style="padding:8px 10px;">${esc(fmtHours(r.avgResolveShiftHours))}</td></tr>`;
     }).join(''):'<tr><td colspan="12" style="padding:12px 10px;color:var(--legacy-666);">No tickets in this time range.</td></tr>';
   }catch(error){
-    document.getElementById('kpi-range-label').textContent=`Live KPI failed (${String(error?.message||error)}). Showing loaded board data.`;
+    kpiLoadedKey='';
+    document.getElementById('kpi-range-label').textContent=`KPI load failed (${String(error?.message||error)}). Showing loaded board data.`;
     renderKpiViewLocal();
   }finally{
     kpiFetchInFlight=false;
@@ -15443,16 +15458,11 @@ document.getElementById('qt-detect-clear').addEventListener('click',()=>{
   document.getElementById('qt-detect-urls').value='';
   qtDetectRows=[];qtDetectRender();qtDetectSetStatus('Paste URLs to begin.');
 });
-document.getElementById('kpi-refresh-now').addEventListener('click',()=>{if(viewMode==='kpi')void renderKpiView();});
-document.getElementById('kpi-autorefresh').addEventListener('change',e=>{
-  kpiAutoRefresh=!!e.target.checked;
-  startKpiAutoRefresh();
-  if(kpiAutoRefresh&&viewMode==='kpi')void renderKpiView();
-});
+document.getElementById('kpi-refresh-now').addEventListener('click',()=>{if(viewMode==='kpi')void renderKpiView({force:true});});
 // Coming back to a dashboard left open on another monitor should not show
 // figures from whenever it was last looked at.
 document.addEventListener('visibilitychange',()=>{
-  if(document.visibilityState==='visible'&&viewMode==='kpi'&&kpiAutoRefresh)void renderKpiView();
+  if(document.visibilityState==='visible'&&viewMode==='kpi')void renderKpiView();
 });
 document.getElementById('kpi-time-filter').addEventListener('change',e=>{kpiTimeFilter=normalizeKpiRange(e.target.value);saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();});
 document.getElementById('kpi-team-filter').addEventListener('change',e=>{kpiTeamFilter=e.target.value||'all';kpiAgentFilter='all';saveLastWorkspaceSession();if(viewMode==='kpi')renderKpiView();});
@@ -17481,10 +17491,32 @@ function snoozeOptions(){
   );
   return opts;
 }
-function snoozeTicket(id,until,note){
+/* At most SNOOZE_MAX_PER_AGENT snoozed tickets per support agent, counted on
+   the ticket's assignee. The server enforces it (applySnoozeRules); this is
+   the same check up front, so the agent is told before the save. */
+const SNOOZE_MAX_PER_AGENT=5;
+function snoozeLimitAgent(id){
+  const agent=normalizeSupportAgent(ticketAssignee[id]||'');
+  return agent&&SUPPORT_AGENTS.includes(agent)?agent:'';
+}
+function snoozedCountFor(agent,exceptId){
+  return Object.keys(ticketSnooze).filter(x=>x!==exceptId&&isSnoozed(x)&&snoozeLimitAgent(x)===agent).length;
+}
+function snoozeLimitMessage(agent){
+  return `${agent===normalizeAgentCode(currentUser())?'You already have':agent+' already has'} ${SNOOZE_MAX_PER_AGENT} snoozed tickets - wake one before snoozing another`;
+}
+// opts.quiet: the caller reports a refusal itself (bulk snooze).
+function snoozeTicket(id,until,note,opts){
   const ms=Number(until)||0;
   if(!(ms>boardNow()))return false;
-  ticketSnooze[id]={until:ms,by:currentUser(),note:String(note||''),at:boardNow()};
+  const agent=snoozeLimitAgent(id);
+  if(agent&&!isSnoozed(id)&&snoozedCountFor(agent,id)>=SNOOZE_MAX_PER_AGENT){
+    if(!opts?.quiet)showToast(snoozeLimitMessage(agent),'warn');
+    return false;
+  }
+  // Re-snoozing keeps the original start, so the SLA hold stays one hold.
+  const at=isSnoozed(id)?(Number(ticketSnooze[id].at)||boardNow()):boardNow();
+  ticketSnooze[id]={until:ms,by:currentUser(),note:String(note||''),at};
   return true;
 }
 function unsnoozeTicket(id){
@@ -18067,8 +18099,10 @@ async function bulkSnooze(until){
   const ids=selectionList();
   if(!ids.length)return;
   const before=captureTicketState(ids,['snooze']);
-  ids.forEach(id=>snoozeTicket(id,until));
-  pushUndo(`Snoozed ${ids.length} ticket${ids.length===1?'':'s'}`,()=>restoreTicketState(before,['snooze']));
+  const done=ids.filter(id=>snoozeTicket(id,until,'',{quiet:true}));
+  if(done.length<ids.length)showToast(`${ids.length-done.length} not snoozed - at most ${SNOOZE_MAX_PER_AGENT} snoozed tickets per support agent`,'warn');
+  if(!done.length){clearSelection();renderActiveView();return;}
+  pushUndo(`Snoozed ${done.length} ticket${done.length===1?'':'s'}`,()=>restoreTicketState(before,['snooze']));
   clearSelection();renderActiveView();
   await saveState('bulk_snooze');
 }

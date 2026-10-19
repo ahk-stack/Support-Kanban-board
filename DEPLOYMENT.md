@@ -801,6 +801,43 @@ A ticket sitting in **Waiting on Contact** that gets a genuine client reply
 moves itself to **Waiting on Us** and starts counting again - that stage move
 already existed; what is new is that the clock restarts with it.
 
+### The SLA baseline and the KPI checkpoints
+
+Every agent starts from **100%** at the baseline, `SLA_BASELINE_AT` (default
+2026-10-16 08:00 +01:00; empty turns it off). A ticket resolved before it counts
+as met. On its first start with the baseline the server also restarts, at the
+baseline, the clock of every ticket still open then, so the backlog is
+measured from there too. That runs once per database (a `SyncLog` row of type
+`sla_baseline_restart_v1` records it); the Manage Users button only reports when
+it ran.
+
+From the baseline on, the SLA is measured live, and the **KPI dashboard updates
+at 00:00, 09:00, 12:00 and 16:00** in the SLA's time zone. At each checkpoint the
+server takes one snapshot of the tickets, and every KPI figure and drilldown
+comes from it, with SLA positions judged as of that moment, until the next
+checkpoint. A change made in between reaches the dashboard at the next one, and
+everyone sees the same figures. The KPI page pulls once per checkpoint, not on a
+timer or on board changes; its header says what time the figures are from and
+when they next update. The snapshot is kept in memory, so a server that starts
+between checkpoints takes one at start-up, and the header shows that time.
+
+### Snoozed tickets
+
+A snoozed ticket's SLA is **held**: the badge reads "SLA on hold - snoozed" and
+the KPI dashboard counts it as `snoozeHold`, out of overdue and at risk. When
+the snooze ends (woken by hand, by a client reply, by moving the ticket, or by
+running out), the restart point moves forward so the clock resumes with the
+working time it had when the ticket was snoozed, like the admin hold.
+Re-snoozing a ticket that is already snoozed keeps it as one hold. A snooze
+that runs out while no board is open is ended by the server within a minute.
+
+A support agent can have at most **5** snoozed tickets at once
+(`SNOOZE_MAX_PER_AGENT`), counted on the ticket's assignee, whoever pressed
+Snooze. The board refuses the sixth up front, and the server drops it from any
+save that gets through anyway. Snoozes already there when the limit shipped are
+left alone; no new one is accepted until that agent is back under 5.
+Unassigned tickets, and tickets held by CS, are not limited.
+
 ## One-time SLA reset for Waiting on Contact
 
 On its first start after this deploy, the server restarts the SLA clock of every

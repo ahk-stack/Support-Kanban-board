@@ -2163,7 +2163,8 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 /* The SLA baseline. Everything resolved before this moment is counted as met
    (the board's SLA history from launch was not measured reliably), and every
    ticket still open at it had its clock restarted from it
-   (restartOpenSlaClocksAtBaselineOnce). From here on, every figure is live.
+   (restartOpenSlaClocksAtBaselineOnce). From here on the SLA is measured
+   live, and the KPI dashboard reports it at each checkpoint (KPI checkpoints).
    SLA_BASELINE_AT overrides; empty turns it off. */
 const SLA_BASELINE_AT = (() => {
   const raw = String(process.env.SLA_BASELINE_AT ?? '2026-10-16T08:00:00+01:00').trim();
@@ -2199,6 +2200,15 @@ function liveTicketSlaSnapshot(ticket, now = Date.now()) {
     : now, held ? Math.max(holdMs, createdMs) : Infinity);
   if (held && !resolved) {
     return { ...base, state: 'admin_hold', ageMs: businessMsInRange(createdMs, endMs), wallMs: Math.max(0, endMs - createdMs), heldBy: ticket.slaHoldBy || null };
+  }
+  // Snoozed: held the same way, from the moment it was snoozed. When the
+  // snooze ends the restart point moves forward (applySnoozeRules), so the
+  // clock resumes where it stopped. ticket.snooze is the board's entry, laid
+  // on the row by the KPI snapshot.
+  const snoozeAt = Number(ticket?.snooze?.at || 0);
+  if (!resolved && snoozeAt && Number(ticket.snooze.until) > now) {
+    const frozenAt = Math.min(now, Math.max(snoozeAt, createdMs));
+    return { ...base, state: 'snooze_hold', ageMs: businessMsInRange(createdMs, frozenAt), wallMs: Math.max(0, frozenAt - createdMs) };
   }
   const wallMs = Math.max(0, (Number.isFinite(endMs) ? endMs : now) - createdMs);
   // The ticket's age in the hours the SLA runs: no nights, lunch or weekends.
@@ -2620,6 +2630,10 @@ async function safeWriteState(state, actor = null) {
       if (Number(at || 0) > Number(mergedSlaReset[ticketId] || 0)) mergedSlaReset[ticketId] = Number(at);
     });
   nextState.ticketSlaResetAt = mergedSlaReset;
+  // After the restart points are merged, so the end of a snooze moves them on
+  // from the latest one. A stale save keeps the stored snoozes (ticketSnooze
+  // is not one of its reconciled fields), so there is nothing to apply.
+  if (!isStale) refusedChanges.push(...applySnoozeRules(currentState, nextState));
 
   nextState.ticketHubspotId = mergeTicketMap('ticketHubspotId');
   nextState.manualCSOverride = mergeTicketMap('manualCSOverride');
@@ -5430,6 +5444,100 @@ function slaResumePointAfterHold(state, externalId, since, now) {
   return businessPointBefore(now, businessMsInRange(base, since));
 }
 
+/* Snoozes. The board writes them, but two rules are kept here, where every
+   save passes, rather than trusted to each tab:
+   - a support agent has at most SNOOZE_MAX_PER_AGENT snoozed tickets at once,
+     counted on the ticket's assignee whoever pressed Snooze. A snooze over the
+     limit is dropped from the save and reported back as refused; snoozes that
+     were already there when the limit came in are left alone.
+   - a snoozed ticket's SLA is held: it counts as snooze_hold while snoozed,
+     and when the snooze ends - cleared, replaced, or run out - the restart
+     point moves forward so the clock resumes with exactly the working time it
+     had when the ticket was snoozed, like the admin hold. */
+const SNOOZE_MAX_PER_AGENT = Math.max(1, Number(process.env.SNOOZE_MAX_PER_AGENT || 5) || 5);
+function snoozeIsActive(entry, now) { return !!entry && Number(entry.at) > 0 && Number(entry.until) > now; }
+// The support agent a snoozed ticket counts against, or null for a ticket with
+// none (unassigned, or held by someone outside the support team).
+function snoozeLimitAgent(state, id) {
+  const code = String(state.ticketAssignee?.[id] || '').trim().toUpperCase();
+  return SUPPORT_AGENT_CODES.has(code) ? code : null;
+}
+// The restart point a snooze held since `since` and ended at `endedAt` leaves.
+function snoozeResumePoint(state, id, since, endedAt) {
+  const resumeAt = slaResumePointAfterHold(state, id, since, endedAt);
+  return resumeAt && resumeAt > Number(state.ticketSlaResetAt?.[id] || 0) ? resumeAt : null;
+}
+// Applied to a save's merged state, after ticketSlaResetAt is merged. Mutates
+// nextState.ticketSnooze and nextState.ticketSlaResetAt; returns what it refused.
+function applySnoozeRules(currentState, nextState, now = Date.now()) {
+  const prev = (currentState.ticketSnooze && typeof currentState.ticketSnooze === 'object') ? currentState.ticketSnooze : {};
+  const next = { ...((nextState.ticketSnooze && typeof nextState.ticketSnooze === 'object') ? nextState.ticketSnooze : {}) };
+  nextState.ticketSlaResetAt = (nextState.ticketSlaResetAt && typeof nextState.ticketSlaResetAt === 'object') ? nextState.ticketSlaResetAt : {};
+  // A snooze that ran out stays out: a tab that has not swept it yet must not
+  // bring it back.
+  for (const [id, entry] of Object.entries(next)) if (!snoozeIsActive(entry, now)) delete next[id];
+
+  // Every snooze that ended since the last save gives its held time back.
+  for (const [id, entry] of Object.entries(prev)) {
+    const since = Number(entry?.at || 0);
+    if (!since) continue;
+    const after = next[id];
+    const replaced = !!after && Number(after.at) !== since;
+    if (after && !replaced) continue;
+    const endedAt = Math.min(now, Number(entry.until) || now, replaced ? (Number(after.at) || now) : now);
+    const resumeAt = snoozeResumePoint(nextState, id, since, endedAt);
+    if (resumeAt) nextState.ticketSlaResetAt[id] = resumeAt;
+  }
+
+  // The limit, on snoozes this save adds. Kept ones count first; new ones are
+  // let in oldest first while there is room.
+  const counts = new Map();
+  const added = [];
+  for (const [id, entry] of Object.entries(next)) {
+    const agent = snoozeLimitAgent(nextState, id);
+    if (!agent) continue;
+    const kept = prev[id] && Number(prev[id].at) === Number(entry.at) && snoozeIsActive(prev[id], now);
+    if (kept) counts.set(agent, (counts.get(agent) || 0) + 1);
+    else added.push({ id, entry, agent });
+  }
+  const refused = [];
+  added.sort((a, b) => Number(a.entry.at) - Number(b.entry.at));
+  for (const { id, agent } of added) {
+    const count = counts.get(agent) || 0;
+    if (count >= SNOOZE_MAX_PER_AGENT) {
+      delete next[id];
+      refused.push({ field: 'ticketSnooze', id, claims: [agent], limit: SNOOZE_MAX_PER_AGENT });
+    } else counts.set(agent, count + 1);
+  }
+  nextState.ticketSnooze = next;
+  if (refused.length) console.warn(`[snooze] refused ${refused.length} snooze(s) over the limit of ${SNOOZE_MAX_PER_AGENT}: ${refused.slice(0, 5).map(r => `${r.id} (${r.claims[0]})`).join(', ')}`);
+  return refused;
+}
+// A snooze that runs out while no board is open still has to give its held
+// time back, and leave the board, without waiting for someone to save.
+async function releaseExpiredSnoozes() {
+  const state = safeReadState();
+  const now = Date.now();
+  const entries = [];
+  const resumed = [];
+  for (const [id, entry] of Object.entries(state.ticketSnooze || {})) {
+    if (!entry || Number(entry.until) > now) continue;
+    entries.push({ field: 'ticketSnooze', id, value: null });
+    const since = Number(entry.at || 0);
+    const resumeAt = since ? snoozeResumePoint(state, id, since, Math.min(now, Number(entry.until) || now)) : null;
+    if (resumeAt) {
+      entries.push({ field: 'ticketSlaResetAt', id, value: resumeAt });
+      resumed.push({ id, resumeAt });
+    }
+  }
+  if (!entries.length) return;
+  writeServerFieldsIntoState(entries);
+  for (const { id, resumeAt } of resumed) {
+    await prisma.ticket.updateMany({ where: { externalId: id }, data: { slaResetAt: new Date(resumeAt) } })
+      .catch(error => console.error('Snooze SLA resume write failed:', error?.message || error));
+  }
+}
+
 // Write several server-owned values into the board state in one synchronous
 // read-modify-write, so no board save can land in between, and push them to
 // every open board. Each entry is { field, id, value }; null removes.
@@ -5586,8 +5694,9 @@ app.post('/api/tickets/:externalId/sla-hold', requireAdmin, async (req, res) => 
    from SLA_BASELINE_AT, so the backlog is measured live from there instead
    of carrying time from before it. The restart point only ever moves
    forward, so a ticket replied to after the baseline keeps its later point.
-   Run by an admin (POST /api/admin/sla/restart-at-baseline, the button in
-   Manage Users), once per database - a SyncLog row records it. */
+   Runs by itself at start-up, once per database - a SyncLog row records it.
+   POST /api/admin/sla/restart-at-baseline (the button in Manage Users) runs
+   it too, or reports when it ran. */
 const SLA_BASELINE_SYNC_TYPE = 'sla_baseline_restart_v1';
 async function restartOpenSlaClocksAtBaselineOnce() {
   if (!SLA_BASELINE_AT) return { ok: false, error: 'no_baseline' };
@@ -5625,9 +5734,45 @@ async function restartOpenSlaClocksAtBaselineOnce() {
   console.log(`SLA baseline: clock restarted for ${ids.length} open ticket(s) on the board, ${rows.count} row(s) in the database.`);
   return { ok: true, board: ids.length, database: rows.count, baselineAt: new Date(SLA_BASELINE_AT).toISOString() };
 }
+/* One-off: a fresh SLA for #13661 and #20500, from the moment this runs.
+   Found by their board number, in the state and in the database. Once per
+   database, recorded as a SyncLog row, like the baseline restart above. */
+const SLA_MANUAL_RESET_SYNC_TYPE = 'sla_manual_reset_13661_20500_v1';
+const SLA_MANUAL_RESET_NUMBERS = [13661, 20500];
+async function resetSlaOfNamedTicketsOnce() {
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_MANUAL_RESET_SYNC_TYPE, status: 'success' } });
+  if (done) return;
+  const now = Date.now();
+  const state = safeReadState();
+  const numbers = (state.ticketNumbers && typeof state.ticketNumbers === 'object') ? state.ticketNumbers : {};
+  const rows = await prisma.ticket.findMany({ where: { displayNumber: { in: SLA_MANUAL_RESET_NUMBERS } }, select: { externalId: true } });
+  const ids = [...new Set([
+    ...Object.keys(numbers).filter(id => SLA_MANUAL_RESET_NUMBERS.includes(Number(numbers[id]))),
+    ...rows.map(row => row.externalId).filter(Boolean)
+  ])];
+  if (ids.length) writeServerFieldsIntoState(ids.map(id => ({ field: 'ticketSlaResetAt', id, value: now })));
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_MANUAL_RESET_SYNC_TYPE,
+      status: 'success',
+      message: `SLA reset for ${ids.length} ticket(s) (#${SLA_MANUAL_RESET_NUMBERS.join(', #')}).`,
+      metadata: { at: new Date(now).toISOString(), tickets: ids }
+    }
+  }).catch((error) => console.error('SLA manual reset marker write failed:', error?.message || error));
+  if (ids.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: ids } }, data: { slaResetAt: new Date(now) } })
+      .catch((error) => console.error('SLA manual reset database update failed:', error?.message || error));
+  }
+  console.log(`SLA reset for ${ids.length} ticket(s) of #${SLA_MANUAL_RESET_NUMBERS.join(', #')}.`);
+}
 app.post('/api/admin/sla/restart-at-baseline', requireAdmin, async (req, res) => {
   try {
-    return res.json(await restartOpenSlaClocksAtBaselineOnce());
+    const out = await restartOpenSlaClocksAtBaselineOnce();
+    // The restarted clocks are the starting point, so the dashboard shows them
+    // now rather than at the next checkpoint.
+    if (out.ok && !out.alreadyDone) await takeKpiSnapshot(kpiCheckpointAtOrBefore());
+    return res.json(out);
   } catch (error) {
     console.error('SLA baseline restart failed:', error);
     return res.status(500).json({ error: String(error.message || error) });
@@ -6419,6 +6564,91 @@ const KPI_TICKET_SELECT = {
   resolvedAt: true,
   slaResetAt: true
 };
+/* KPI checkpoints. The dashboard is not live: it is read from a snapshot of
+   the tickets taken at 00:00, 09:00, 12:00 and 16:00 in the server's zone (the
+   SLA's zone), and SLA positions are judged as of that snapshot. A change made
+   between two checkpoints reaches the dashboard at the next one, and everyone
+   looking at it sees the same figures. The snapshot lives in memory; a server
+   that starts between checkpoints takes one at start-up and says so (asOf). */
+const KPI_CHECKPOINT_HOURS = [0, 9, 12, 16];
+// The most recent checkpoint at or before `ms`.
+function kpiCheckpointAtOrBefore(ms = Date.now()) {
+  const d = new Date(ms);
+  const hour = [...KPI_CHECKPOINT_HOURS].reverse().find(h => h <= d.getHours()) ?? 0;
+  d.setHours(hour, 0, 0, 0);
+  return d.getTime();
+}
+function kpiNextCheckpointAfter(ms = Date.now()) {
+  const d = new Date(ms);
+  const hour = KPI_CHECKPOINT_HOURS.find(h => h > d.getHours());
+  if (hour === undefined) { d.setDate(d.getDate() + 1); d.setHours(KPI_CHECKPOINT_HOURS[0], 0, 0, 0); }
+  else d.setHours(hour, 0, 0, 0);
+  return d.getTime();
+}
+// { checkpoint, takenAt, tickets, spam } read once per checkpoint: the
+// tickets the dashboard counts, and the spam the admin banner counts. Split by
+// the same database filters the dashboard's queries used, so a ticket with no
+// category falls on the same side as it did there.
+let kpiSnapshot = null;
+let kpiSnapshotLoading = null;
+async function takeKpiSnapshot(checkpoint) {
+  const [tickets, spam] = await Promise.all([
+    prisma.ticket.findMany({ where: { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }] }, select: KPI_TICKET_SELECT, orderBy: [{ createdAt: 'desc' }] }),
+    prisma.ticket.findMany({ where: { category: { equals: 'Spam', mode: 'insensitive' } }, select: KPI_TICKET_SELECT })
+  ]);
+  // Snoozes live in the board state, not on the row.
+  const snoozes = safeReadState().ticketSnooze || {};
+  for (const t of tickets) {
+    const entry = snoozes[t.externalId];
+    if (entry && Number(entry.at) > 0) t.snooze = { at: Number(entry.at), until: Number(entry.until) || 0 };
+  }
+  kpiSnapshot = { checkpoint, takenAt: Date.now(), tickets, spam };
+  console.log(`KPI snapshot for ${new Date(checkpoint).toISOString()}: ${tickets.length} ticket(s), ${spam.length} spam.`);
+  return kpiSnapshot;
+}
+async function currentKpiSnapshot() {
+  const checkpoint = kpiCheckpointAtOrBefore();
+  if (kpiSnapshot && kpiSnapshot.checkpoint >= checkpoint) return kpiSnapshot;
+  if (!kpiSnapshotLoading) {
+    kpiSnapshotLoading = takeKpiSnapshot(checkpoint).finally(() => { kpiSnapshotLoading = null; });
+  }
+  return kpiSnapshotLoading;
+}
+// Taken on the hour whether anyone is looking or not, so the figures are the
+// tickets as they stood at the checkpoint rather than at the first view after it.
+function scheduleKpiSnapshots() {
+  const wait = Math.max(1000, kpiNextCheckpointAfter() - Date.now() + 500);
+  setTimeout(() => {
+    currentKpiSnapshot()
+      .catch(error => console.error('KPI snapshot failed:', error?.message || error))
+      .finally(scheduleKpiSnapshots);
+  }, Math.min(wait, 2 ** 31 - 1)).unref?.();
+}
+function kpiSnapshotInfo(snapshot) {
+  return {
+    checkpointAt: new Date(snapshot.checkpoint).toISOString(),
+    asOf: new Date(snapshot.takenAt).toISOString(),
+    nextUpdateAt: new Date(kpiNextCheckpointAfter(snapshot.takenAt)).toISOString(),
+    checkpointHours: KPI_CHECKPOINT_HOURS
+  };
+}
+// The rest of the tests the KPI queries used to put to the database, run
+// against the snapshot.
+function kpiTicketMatchesBase(t, { launchStart, company, jiraOnly }) {
+  if (launchStart && !(t.createdAt && new Date(t.createdAt) >= launchStart)) return false;
+  if (company && company !== 'all' && t.companyName !== company) return false;
+  if (jiraOnly && !t.jiraTicketKey) return false;
+  return true;
+}
+function kpiTicketMatchesAccess(t, access) {
+  if (!access) return true;
+  if (access.csAgent) return t.csAgent === access.csAgent;
+  if (access.assignedAgent) return t.assignedAgent === access.assignedAgent;
+  if (access.csAgentIn) return access.csAgentIn.has(t.csAgent);
+  if (access.assignedAgentIn) return access.assignedAgentIn.has(t.assignedAgent);
+  if (access.either) return t.csAgent === access.either || t.assignedAgent === access.either;
+  return true;
+}
 async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.range, req.query.tzOffset);
   const username = actorAgentCode(req);
   /* The KPI dashboard is the one view where "see all tickets" does not carry
@@ -6448,37 +6678,35 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   if (company && company !== 'all') baseWhere.companyName = company;
   if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
 
+  // accessWhere is still put to the database, by the queries over ticket
+  // events; access is the same rule for the snapshot.
   const accessWhere = {};
-  if (myTeam === 'cs') accessWhere.csAgent = username;
-  else if (myTeam === 'support') accessWhere.assignedAgent = username;
+  let access = null;
+  if (myTeam === 'cs') { accessWhere.csAgent = username; access = { csAgent: username }; }
+  else if (myTeam === 'support') { accessWhere.assignedAgent = username; access = { assignedAgent: username }; }
   else if (agent && agent !== 'ALL') {
-    if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
-    else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
-    else accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }];
+    if (CS_AGENT_CODES.has(agent)) { accessWhere.csAgent = agent; access = { csAgent: agent }; }
+    else if (SUPPORT_AGENT_CODES.has(agent)) { accessWhere.assignedAgent = agent; access = { assignedAgent: agent }; }
+    else { accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }]; access = { either: agent }; }
   } else if (team === 'cs') {
     accessWhere.csAgent = { in: Array.from(CS_AGENT_CODES) };
+    access = { csAgentIn: new Set(CS_AGENT_CODES) };
   } else if (team === 'support') {
     accessWhere.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
+    access = { assignedAgentIn: new Set(SUPPORT_AGENT_CODES) };
   }
-  const rangeWhere = {
-    OR: [
-      { createdAt: { gte: bounds.start, lte: bounds.end } },
-      { updatedAt: { gte: bounds.start, lte: bounds.end } },
-      { resolvedAt: { gte: bounds.start, lte: bounds.end } }
-    ]
+  const inBounds = value => {
+    if (!value) return false;
+    const d = new Date(value);
+    return d >= bounds.start && d <= bounds.end;
   };
-  const statusWhere = { AND: [baseWhere, accessWhere] };
-  const where = { AND: [baseWhere, accessWhere, rangeWhere] };
 
-  const tickets = await prisma.ticket.findMany({
-    where,
-    select: KPI_TICKET_SELECT,
-    orderBy: [{ createdAt: 'desc' }]
-  });
-  const statusTickets = await prisma.ticket.findMany({
-    where: statusWhere,
-    select: KPI_TICKET_SELECT
-  });
+  const snapshot = await currentKpiSnapshot();
+  const baseFilter = { launchStart, company, jiraOnly };
+  const statusTickets = snapshot.tickets.filter(t => kpiTicketMatchesBase(t, baseFilter) && kpiTicketMatchesAccess(t, access));
+  const tickets = statusTickets.filter(t => inBounds(t.createdAt) || inBounds(t.updatedAt) || inBounds(t.resolvedAt));
+  // The admin banner's spam figure, from the same snapshot.
+  const spamCount = snapshot.spam.filter(t => kpiTicketMatchesBase(t, baseFilter) && kpiTicketMatchesAccess(t, access)).length;
   const scopedTicketsAll = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
 
   // Duplicates are held back from every figure that counts work. They are
@@ -6499,7 +6727,7 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   // The one agent the figures are pinned to, if any - whose SLA reset applies
   // to the headline SLA met.
   const slaAgent = (myTeam === 'cs' || myTeam === 'support') ? username : (agent && agent !== 'ALL' ? agent : null);
-  return { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
+  return { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount };
 }
 function kpiDrilldownRow(t, detail) {
   return {
@@ -6516,7 +6744,7 @@ function kpiDrilldownRow(t, detail) {
 }
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
+    const { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount } = await loadKpiWorkingSet(req);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -6599,7 +6827,8 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     //   resolved - of the work finished inside the selected range, how much
     //              landed inside its target. This is the compliance figure.
     // ---------------------------------------------------------------------
-    const now = Date.now();
+    // As of the checkpoint snapshot, not this request - see KPI checkpoints.
+    const now = snapshot.takenAt;
     const openWorkTickets = workTickets.filter(t => normalizeDbStatusForBoard(t.status) !== 'res');
     /* snake_case state -> camelCase tally, spelled out because they are not
        the same word. This used to be `if (snapshot.state in backlog)`, and
@@ -6611,9 +6840,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     const BACKLOG_KEY_BY_STATE = {
       overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
       no_clock: 'noClock', jira_hold: 'jiraHold', velma_hold: 'velmaHold', contact_hold: 'contactHold',
-      leave_hold: 'leaveHold', admin_hold: 'adminHold'
+      leave_hold: 'leaveHold', admin_hold: 'adminHold', snooze_hold: 'snoozeHold'
     };
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0, leaveHold: 0, adminHold: 0 };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0, leaveHold: 0, adminHold: 0, snoozeHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
@@ -6703,7 +6932,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         eventType: 'ticket_status_changed',
         oldValue: 'Resolved',
         NOT: [{ newValue: 'Resolved' }],
-        createdAt: { gte: bounds.start, lte: bounds.end },
+        createdAt: { gte: bounds.start, lte: new Date(Math.min(bounds.end.getTime(), snapshot.takenAt)) },
         // Scoped through the ticket so this obeys the same team/agent/company
         // filter as every other figure on the dashboard rather than quietly
         // reporting a board-wide total next to filtered ones.
@@ -6739,11 +6968,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const since = kpiLaunchAt || await refreshKpiLaunchAt();
       const created = workTickets.length;
       const resolved = workTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length;
-      const spamWhere = { ...accessWhere, category: { equals: 'Spam', mode: 'insensitive' } };
-      if (baseWhere.createdAt) spamWhere.createdAt = baseWhere.createdAt;
-      if (baseWhere.companyName) spamWhere.companyName = baseWhere.companyName;
-      if (baseWhere.jiraTicketKey) spamWhere.jiraTicketKey = baseWhere.jiraTicketKey;
-      const spam = await prisma.ticket.count({ where: spamWhere }).catch(() => 0);
+      const spam = spamCount;
       const scope = [
         agent && agent !== 'ALL' ? agent : team === 'cs' ? 'CS only' : team === 'support' ? 'Support only' : '',
         company && company !== 'all' ? company : '',
@@ -6754,7 +6979,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
 
     return res.json({
       ok: true,
-      generatedAt: new Date().toISOString(),
+      generatedAt: new Date(snapshot.takenAt).toISOString(),
+      // When these figures were read and when they next change.
+      snapshot: kpiSnapshotInfo(snapshot),
       allTime,
       // bounds.key, not the raw query value: if the client sent a range this
       // build no longer offers, the heading has to name the period the figures
@@ -6787,6 +7014,8 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         jiraHold: backlog.jiraHold,
         // Open tickets an admin has frozen.
         adminHold: backlog.adminHold,
+        // Open tickets that are snoozed, so held.
+        snoozeHold: backlog.snoozeHold,
         // Resolved before this moment counts as met; measured live after it.
         baselineAt: SLA_BASELINE_AT ? new Date(SLA_BASELINE_AT).toISOString() : null,
         // Same, for tickets waiting on a Velma bug.
@@ -6870,8 +7099,8 @@ const KPI_STATUS_CATEGORIES = new Set(['new', 'inp', 'wus', 'dft', 'wct', 'res']
 app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
   try {
     const category = String(req.query.category || '').trim();
-    const { bounds, team, slaAgent, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen } = await loadKpiWorkingSet(req);
-    const now = Date.now();
+    const { bounds, team, slaAgent, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, snapshot } = await loadKpiWorkingSet(req);
+    const now = snapshot.takenAt;
     let rows;
 
     if (KPI_STATUS_CATEGORIES.has(category)) {
@@ -6929,7 +7158,7 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
           eventType: 'ticket_status_changed',
           oldValue: 'Resolved',
           NOT: [{ newValue: 'Resolved' }],
-          createdAt: { gte: bounds.start, lte: bounds.end },
+          createdAt: { gte: bounds.start, lte: new Date(Math.min(bounds.end.getTime(), snapshot.takenAt)) },
           ticket: { AND: [baseWhere, accessWhere, { duplicateOfExternalId: null }] }
         },
         select: { ticket: { select: KPI_TICKET_SELECT } },
@@ -14817,6 +15046,19 @@ const server = app.listen(PORT, () => {
   redistributeSguNewTicketsOnce().catch((error) => {
     console.error('SGU redistribution failed:', error?.message || error);
   });
+  // Every agent starts from 100% at the baseline: what was resolved before it
+  // counts as met, and what was still open is measured from it. Once per
+  // database, so it no longer waits on an admin pressing the button. The first
+  // KPI snapshot comes after it, so it sees the restarted clocks.
+  // Snoozes that run out give their held SLA time back even with no board open.
+  setInterval(() => { releaseExpiredSnoozes().catch(error => console.error('Snooze release failed:', error?.message || error)); }, 60000).unref?.();
+  restartOpenSlaClocksAtBaselineOnce()
+    .catch((error) => console.error('SLA baseline restart failed:', error?.message || error))
+    .then(() => resetSlaOfNamedTicketsOnce())
+    .catch((error) => console.error('SLA manual reset failed:', error?.message || error))
+    .then(() => currentKpiSnapshot())
+    .catch((error) => console.error('KPI snapshot failed:', error?.message || error))
+    .finally(scheduleKpiSnapshots);
   if (SESSION_SECRET === 'change-this-session-secret') {
     console.log('WARNING: Set SESSION_SECRET before production use.');
   }
