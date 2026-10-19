@@ -1,0 +1,106 @@
+{
+  "patches": [
+    {
+      "date": "2026-10-19",
+      "title": "Patch Notes",
+      "notes": [
+        { "type": "new", "text": "Patch notes! Every board update now shows up here in the Feedback bubble, so you always know what changed." },
+        { "type": "fixed", "commit": "0967403", "text": "A manual ticket created by an admin who is also a CS agent now gets them as its CS owner instead of Unassigned." },
+        { "type": "fixed", "commit": "519646d", "text": "The board recognises your CS code wherever it appears on your account, not just in the first field it checks." },
+        { "type": "improved", "commit": "85c8adc", "text": "CS owner changes are sturdier: only agents on the CS roster can be picked, \"No CS\" sticks when chosen on purpose, and changing the CS owner no longer undoes a newer Support reassignment." },
+        { "type": "new", "text": "Select a whole column in one click: tick the box next to a column's count to select every ticket showing in it, then use the selection bar to act on all of them. Tick it again to unselect." }
+      ]
+    },
+    {
+      "date": "2026-10-16",
+      "title": "Snooze & SLA",
+      "notes": [
+        { "type": "new", "commit": "21d0594", "text": "New SLA baseline. The board clock now follows the server's time zone, and admins can put a ticket's SLA on hold." },
+        { "type": "new", "commit": "368e984", "text": "Links in ticket notes are clickable and easy to copy, and notes can be edited after posting." },
+        { "type": "improved", "commit": "29a5da8", "text": "KPIs refresh four times a day: 00:00, 09:00, 12:00 and 16:00. Open SLA clocks reset to the baseline on their own." },
+        { "type": "new", "commit": "f495691", "text": "Snoozed tickets now pause their SLA. Support agents can keep up to 5 tickets snoozed at once." },
+        { "type": "maintenance", "commit": "a43f1c8", "text": "Reset the SLA on two tickets that were being timed wrongly." },
+        { "type": "fixed", "commit": "3f792b4", "text": "Corrected an agent's resolved count in the KPIs, and the board no longer guesses a ticket's CS owner." }
+      ]
+    },
+    {
+      "date": "2026-10-15",
+      "title": "KPI Sync",
+      "notes": [
+        { "type": "new", "commit": "19887f6", "text": "Admins can set who is on the CS and Support teams. The board asks before reopening a resolved ticket." },
+        { "type": "fixed", "commit": "834b0bf", "text": "Resolved tickets no longer reopen on their own from stale data, and KPIs stay in sync in real time." },
+        { "type": "improved", "commit": "d1d4e27", "text": "SLA history rebuilt back to launch day, so every KPI lines up." },
+        { "type": "improved", "commit": "e130ee4", "text": "Velma bugs are also looked up in a second sheet, and one agent's SLA met % was corrected." }
+      ]
+    },
+    {
+      "date": "2026-10-14",
+      "title": "New Recruits",
+      "notes": [
+        { "type": "new", "commit": "e9cb686", "text": "Admins can change a ticket's CS owner straight from its card." },
+        { "type": "new", "commit": "a1a8a42", "text": "Welcome Terry Nyborg (TNY) and Levan Giunashvili (LGI) to the CS team!" }
+      ]
+    },
+    {
+      "date": "2026-10-12",
+      "title": "Weekends Off",
+      "notes": [
+        { "type": "improved", "commit": "df493e7", "text": "The SLA pauses on weekends, outside working hours and during agent leave, on every screen." },
+        { "type": "improved", "commit": "dd744c6", "text": "The Velma sheet can be read without a Google sign-in." },
+        { "type": "new", "commit": "f72a977", "text": "Google sign-in for the Velma sheet is back as an option, and there is a public Privacy page." },
+        { "type": "fixed", "commit": "375ed7c", "text": "Shift history survives updates, and an unknown SLA is no longer counted as met." }
+      ]
+    },
+    {
+      "date": "2026-10-09",
+      "title": "My Resolved",
+      "notes": [
+        { "type": "new", "commit": "1d2a578", "text": "New My resolved view. Projects run through Claude with no API key, and emails are no longer copied to your clipboard by themselves." }
+      ]
+    },
+    {
+      "date": "2026-10-07",
+      "title": "Snooze Fixes",
+      "notes": [
+        { "type": "fixed", "commit": "cd6b852", "text": "Snoozed tickets no longer wake up straight away, and there are more snooze options. Everyone can edit manual tickets, and the CS owner can be picked on create." },
+        { "type": "improved", "commit": "76669b1", "text": "Agents no longer need to sign in to Google to use Velma." },
+        { "type": "new", "commit": "7809a00", "text": "Admins can upload a service account key, so the Velma sheet loads without anyone signing in." }
+      ]
+    },
+    {
+      "date": "2026-10-05",
+      "title": "Fresh Look",
+      "notes": [
+        { "type": "maintenance", "commit": "5a14099", "text": "Behind-the-scenes tooling for the anti-churn service." },
+        { "type": "new", "commit": "de05de4", "text": "A fresh new look: violet-black chrome, stage colours and calmer cards. Garbled characters are fixed too." },
+        { "type": "new", "commit": "2ba42e6", "text": "The SLA resumes when a linked bug is marked DONE, and untagged tickets are shared out by priority." },
+        { "type": "fixed", "commit": "5d2ac0b", "text": "Filter dropdown arrows no longer repeat across the control on hover." },
+        { "type": "new", "commit": "a2becef", "text": "Mark a teammate as off with a return date, and no tickets are assigned to them until they are back." },
+        { "type": "fixed", "commit": "36646de", "text": "The Resolved KPI card counts only the selected date range, not all time." },
+        { "type": "new", "commit": "d626826", "text": "Admins see every ticket since the board went live, with a new Since launch KPI range." },
+        { "type": "improved", "commit": "b34829f", "text": "Google sign-in can be switched on from the board and opens in a new tab." }
+      ]
+    },
+    {
+      "date": "2026-10-02",
+      "title": "Velma Links",
+      "notes": [
+        { "type": "new", "commit": "9f7f756", "text": "Link a ticket to a Velma bug. Tickets waiting on the contact get their SLA reset, and a ticket goes to the agent named in the email." }
+      ]
+    },
+    {
+      "date": "2026-09-28",
+      "title": "Jira & Replies",
+      "notes": [
+        { "type": "improved", "commit": "e5985db", "text": "The SLA pauses while a ticket is in Jira and resets only on client replies. Closed tickets reopen when the client writes back, ticket numbers are never duplicated, and the board is easier to read." }
+      ]
+    },
+    {
+      "date": "2026-09-25",
+      "title": "Team Flow",
+      "notes": [
+        { "type": "new", "commit": "d6d9d88", "text": "The SLA freezes on Waiting on Contact, Support is alerted when CS sends a ticket back, and new tickets are shared across the team." }
+      ]
+    }
+  ]
+}

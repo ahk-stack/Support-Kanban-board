@@ -6645,6 +6645,27 @@ input.ticket-number-filter:focus {
 
 .col-header.wip-over { box-shadow: inset 0 -2px 0 var(--st-inp); }
 
+/* Select-all box for a column, drawn like the cards' own select box so it reads
+   as "the same thing, for all of them". */
+.col-select {
+  position: relative; flex: 0 0 16px; width: 16px; height: 16px; padding: 0;
+  border: 1.5px solid color-mix(in srgb, var(--stage) 45%, var(--border-strong));
+  border-radius: 5px; background: var(--surface); cursor: pointer;
+  transition: background .12s ease, border-color .12s ease;
+}
+.col-select:hover { border-color: var(--primary); }
+.col-select:focus-visible { outline: 2px solid var(--focus-ring, var(--primary)); outline-offset: 2px; }
+.col-select[aria-checked="true"],
+.col-select[aria-checked="mixed"] { background: var(--primary); border-color: var(--primary); }
+.col-select[aria-checked="true"]::after {
+  content: ""; position: absolute; left: 4.5px; top: 1px;
+  width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.col-select[aria-checked="mixed"]::after {
+  content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 2px;
+  margin-top: -1px; border-radius: 2px; background: #fff;
+}
+
 .col-body {
   background: transparent;
   backdrop-filter: none;
@@ -7470,6 +7491,127 @@ body:has(.selection-bar.show) #toast { bottom: 90px; }
 .fb-cat.active { background: var(--accent-grad); }
 
 .fb-chat { border-radius: 18px; border-color: var(--border); }
+
+/* ---- Patch notes, in the feedback bubble ----------------------------------------
+   Styled after a game launcher's patch notes on purpose: a banner per patch with a
+   version and a name, coloured tags per line, and a NEW ribbon on what you have not
+   seen. Release notes that look like a changelog file do not get read; these are
+   meant to be skimmed in five seconds on the way to doing something else. */
+.fb-launcher-badge {
+  position: absolute; top: -7px; right: -6px;
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #f43f5e; color: #fff; border: 2px solid var(--surface);
+  font-size: 11px; font-weight: 800; letter-spacing: .02em; line-height: 1;
+  box-shadow: 0 4px 10px rgba(244, 63, 94, .45);
+  animation: pn-pulse 2.2s ease-in-out infinite;
+}
+.fb-launcher-badge[hidden] { display: none; }
+@keyframes pn-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+
+.fb-tabs {
+  display: flex; gap: 4px; padding: 6px 8px 0;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.fb-tab {
+  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 6px 9px; border: 0; border-bottom: 2px solid transparent; background: none;
+  font-size: 13px; font-weight: 650; color: var(--muted); cursor: pointer;
+  transition: color .12s ease, border-color .12s ease;
+}
+.fb-tab:hover { color: var(--text); }
+.fb-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+.fb-tab-count {
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #f43f5e; color: #fff; font-size: 10.5px; font-weight: 800;
+}
+.fb-tab-count[hidden] { display: none; }
+
+/* One view at a time: the chat's own parts step aside for the notes. */
+.pn-view { display: none; }
+.fb-chat.pn-mode .pn-view { display: block; }
+.fb-chat.pn-mode .fb-log,
+.fb-chat.pn-mode .fb-cats,
+.fb-chat.pn-mode .fb-chips,
+.fb-chat.pn-mode .fb-files,
+.fb-chat.pn-mode .fb-compose,
+.fb-chat.pn-mode .fb-foot { display: none; }
+.fb-chat.pn-mode { width: min(410px, calc(100vw - 32px)); }
+
+.pn-view {
+  max-height: min(62vh, 560px); overflow-y: auto; padding: 12px;
+  background: var(--surface-soft);
+}
+.pn-view::-webkit-scrollbar { width: 8px; }
+.pn-view::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 8px; }
+.pn-empty { padding: 28px 12px; text-align: center; color: var(--muted); font-size: 13.5px; }
+
+.pn-patch {
+  margin-bottom: 10px; border-radius: 14px; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--border);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .05);
+  animation: fb-rise .26s ease both;
+}
+.pn-patch > summary { list-style: none; cursor: pointer; }
+.pn-patch > summary::-webkit-details-marker { display: none; }
+
+/* The banner. The latest patch gets the hero treatment; older ones are a compact
+   strip you can open. */
+.pn-banner { position: relative; display: block; padding: 11px 14px 11px; }
+.pn-banner::after {
+  content: "\25BE"; position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+  font-size: 12px; color: var(--muted-light); transition: transform .15s ease;
+}
+.pn-patch[open] > .pn-banner::after { transform: translateY(-50%) rotate(180deg); }
+.pn-ver {
+  display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: .12em;
+  color: var(--primary); font-variant-numeric: tabular-nums;
+}
+.pn-ribbon {
+  display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 4px;
+  background: #f43f5e; color: #fff; font-size: 9.5px; font-weight: 900; letter-spacing: .12em;
+  vertical-align: 1px;
+}
+.pn-title { display: block; margin: 2px 0 1px; font-size: 15.5px; font-weight: 800; letter-spacing: -.01em; color: var(--text); padding-right: 18px; }
+.pn-date { display: block; font-size: 12px; color: var(--muted); }
+
+.pn-patch.pn-hero { border: 0; box-shadow: 0 10px 26px rgba(109, 94, 252, .22); }
+.pn-hero > .pn-banner {
+  padding: 16px 16px 14px; color: #fff;
+  background:
+    radial-gradient(120% 140% at 100% 0%, rgba(255, 255, 255, .22) 0%, transparent 46%),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, .05) 0 2px, transparent 2px 9px),
+    var(--accent-grad);
+}
+.pn-hero > .pn-banner::after { color: rgba(255, 255, 255, .75); }
+.pn-hero .pn-ver { color: rgba(255, 255, 255, .82); }
+.pn-hero .pn-ribbon { background: #fff; color: #e11d48; }
+.pn-hero .pn-title { font-size: 20px; color: #fff; text-shadow: 0 1px 8px rgba(0, 0, 0, .18); }
+.pn-hero .pn-date { color: rgba(255, 255, 255, .8); }
+.pn-tally { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+.pn-tally span {
+  padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700;
+  background: rgba(255, 255, 255, .18); border: 1px solid rgba(255, 255, 255, .28); color: #fff;
+}
+
+.pn-list { list-style: none; margin: 0; padding: 4px 12px 10px; }
+.pn-note {
+  display: grid; grid-template-columns: 70px 1fr; gap: 10px; align-items: start;
+  padding: 8px 0; border-top: 1px dashed var(--border);
+  font-size: 13.5px; line-height: 1.5; color: var(--text);
+}
+.pn-note:first-child { border-top: 0; }
+.pn-tag {
+  margin-top: 1px; padding: 2px 0; border-radius: 5px; text-align: center;
+  font-size: 9.5px; font-weight: 900; letter-spacing: .07em; white-space: nowrap;
+}
+.pn-tag-new { background: var(--success-soft); color: var(--success); }
+.pn-tag-improved { background: var(--info-soft); color: var(--info); }
+.pn-tag-fixed { background: var(--warning-soft); color: var(--warning); }
+.pn-tag-maintenance { background: var(--surface-muted); color: var(--muted); }
+.pn-foot { padding: 4px 4px 2px; text-align: center; font-size: 11.5px; color: var(--muted-light); font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .fb-launcher-badge, .pn-patch { animation: none; } }
 
 /* ---- Secondary views -------------------------------------------------------------- */
 
@@ -8580,6 +8722,7 @@ th {
         title="Tell the platform team something about the board">
   <span class="fb-launcher-icon" aria-hidden="true">&#128172;</span>
   <span class="fb-launcher-label">Feedback</span>
+  <span class="fb-launcher-badge" id="fb-launcher-badge" hidden></span>
 </button>
 <section class="fb-chat" id="fb-chat" role="dialog" aria-label="Send feedback to the platform team">
   <header class="fb-chat-head">
@@ -8592,6 +8735,11 @@ th {
             title="Send a test report to check that Teams and email delivery work">Test</button>
     <button class="fb-chat-close" id="fb-close" type="button" aria-label="Close">&times;</button>
   </header>
+  <nav class="fb-tabs" role="tablist" aria-label="Feedback or patch notes">
+    <button class="fb-tab active" id="fb-tab-chat" type="button" role="tab" aria-selected="true">&#128172; Feedback</button>
+    <button class="fb-tab" id="fb-tab-pn" type="button" role="tab" aria-selected="false">&#128220; Patch notes <span class="fb-tab-count" id="fb-tab-count" hidden></span></button>
+  </nav>
+  <div class="pn-view" id="pn-view" role="tabpanel" aria-label="Patch notes"></div>
   <div class="fb-log" id="fb-log" aria-live="polite"></div>
   <div class="fb-cats" id="fb-cats" role="group" aria-label="What kind of feedback"></div>
   <div class="fb-chips" id="fb-chips" role="group" aria-label="What travels with this report, and openers"></div>
@@ -15585,9 +15733,10 @@ function resolveCSAgentFromCoOwner(raw){
       (first.slice(0,3)||'')
     ].map(acceptCode).filter(Boolean);
     for(const cand of candidates){if(isKnownAgent(cand))return cand;}
-    return candidates[0]||null;
   }
-  return acceptCode(rawStr.slice(0,3));
+  // No known agent in the co-owner: no owner. Guessing a trigram from the
+  // name's letters used to make up CS agents who are not on the roster.
+  return null;
 }
 function displayCSOwner(raw){
   const rawStr=String(raw||'').trim();
@@ -15712,6 +15861,9 @@ function resolveProfileCSOwner(companyId,companyName){
   }
   return null;
 }
+/* Only owners a person chose count. An owner that was itself inferred from
+   another ticket would otherwise pass from ticket to ticket with nothing in
+   any email or HubSpot record behind it. */
 function resolveSiblingCSOwner(ticketId,clientEmail,companyId,companyName){
   const scores={};
   const bump=(code,weight)=>{
@@ -15720,6 +15872,7 @@ function resolveSiblingCSOwner(ticketId,clientEmail,companyId,companyName){
   };
   allTickets.forEach(ticket=>{
     if(!ticket?.id||ticket.id===ticketId)return;
+    if(manualCSOverride[ticket.id]!==true)return;
     const candidate=normalizeAgentCode(ticketCSOwner[ticket.id]);
     if(!CS_AGENTS.includes(candidate))return;
     const otherClient=ticketClientEmail[ticket.id]||getClientEmail(ticket.email);
@@ -15976,6 +16129,7 @@ async function buildAgentUI(){
   };
 
   await loadBuildVersion();
+  pnLoad();
 
   try {
     const res = await fetch('/auth/me', { credentials: 'include' });
@@ -17907,13 +18061,43 @@ function ticketLaneKey(t){
   return domain?domain.toLowerCase():'Unknown';
 }
 
-function renderColumnHeader(col,count,headerEl){
+/* Select a whole column at once. The box in the header is checked when every
+   card in the column is selected, a dash when some are, and empty when none;
+   pressing it selects them all, or unselects them all when they already are.
+   It works on the cards the column is showing, so the filters decide what
+   "all" means, the same way the A shortcut does for the whole board. */
+function colSelectButtonHtml(col,ids){
+  if(!ids.length)return '';
+  const picked=ids.filter(id=>selectedTickets.has(id)).length;
+  const state=picked===0?'false':picked===ids.length?'true':'mixed';
+  const label=`${state==='true'?'Unselect':'Select'} all ${ids.length} in ${COL_NAMES[col]||col}`;
+  return `<button class="col-select" type="button" data-col-select="${esc(col)}" role="checkbox" aria-checked="${state}" title="${esc(label)}" aria-label="${esc(label)}"></button>`;
+}
+function toggleColumnSelection(columnEl){
+  const ids=[...(columnEl?.querySelectorAll('.card[data-id]')||[])].map(el=>el.dataset.id);
+  if(!ids.length)return;
+  const all=ids.every(id=>selectedTickets.has(id));
+  ids.forEach(id=>all?selectedTickets.delete(id):selectedTickets.add(id));
+  lastSelectedId=all?null:ids[ids.length-1];
+  renderActiveView();
+}
+document.addEventListener('click',ev=>{
+  const btn=ev.target.closest?.('[data-col-select]');
+  if(!btn)return;
+  ev.preventDefault();ev.stopPropagation();
+  toggleColumnSelection(btn.closest('.column'));
+});
+
+function renderColumnHeader(col,count,headerEl,ids=[]){
   if(!headerEl)return;
   const limit=columnWipLimit(col);
   const over=limit&&count>limit;
   headerEl.classList.toggle('wip-over',!!over);
   const badge=headerEl.querySelector('.col-badge');
   if(badge)badge.textContent=limit?`${count}/${limit}`:count;
+  headerEl.querySelector('.col-select')?.remove();
+  const select=colSelectButtonHtml(col,ids);
+  if(select)(badge||headerEl.lastElementChild||headerEl).insertAdjacentHTML(badge?'afterend':'beforeend',select);
   headerEl.title=limit
     ?(over?`Over the WIP limit: ${count} in this column, limit ${limit}. Nothing is blocked - this is a nudge.`:`${count} of a ${limit} WIP limit`)
     :'';
@@ -18509,7 +18693,7 @@ function renderBoard(){
       el.innerHTML='';
       if(!tickets.length)el.innerHTML=`<div class="empty"><div class="empty-icon">${COL_EMPTY_ICONS[col]}</div>No tickets</div>`;
       else tickets.forEach(t=>{const card=safeCard(t);if(card)el.appendChild(card);});
-      renderColumnHeader(col,tickets.length,column.querySelector('.col-header'));
+      renderColumnHeader(col,tickets.length,column.querySelector('.col-header'),tickets.map(t=>t.id));
     });
   }
 
@@ -18560,7 +18744,7 @@ function renderLaneBoard(visible){
         const column=document.createElement('div');
         column.className='column col-'+col+' swimlane-col';
         const limit=columnWipLimit(col);
-        column.innerHTML=`<div class="col-header${limit&&colTickets.length>limit?' wip-over':''}">${esc(COL_NAMES[col])} <span class="col-badge">${colTickets.length}</span></div>`;
+        column.innerHTML=`<div class="col-header${limit&&colTickets.length>limit?' wip-over':''}">${esc(COL_NAMES[col])} <span class="col-badge">${colTickets.length}</span>${colSelectButtonHtml(col,colTickets.map(t=>t.id))}</div>`;
         const bodyEl=document.createElement('div');
         bodyEl.className='col-body';
         bodyEl.dataset.col=col;
@@ -20395,6 +20579,11 @@ function fbToggleChat(force) {
   launcher?.setAttribute('aria-expanded', String(fbOpen));
   if (!fbOpen) return;
 
+  // Unread patch notes open the bubble on them, once; otherwise it opens on
+  // whichever tab was last in use.
+  if (pnUnreadCount() > 0) pnSetView(true);
+  else if (pnView) { pnRender(); return; }
+
   if (!fbGreeted) {
     fbGreeted = true;
     fbIncludeTicket = true;
@@ -20412,7 +20601,7 @@ function fbToggleChat(force) {
     fbUpdateCount();
     fbGrow();
   }
-  setTimeout(() => document.getElementById('fb-message')?.focus(), 60);
+  if (!pnView) setTimeout(() => document.getElementById('fb-message')?.focus(), 60);
 }
 
 /* The ticket card, drawn wherever it is needed - in the log as the bot showing
@@ -20770,6 +20959,148 @@ async function sendFeedbackTest(){
     btn.textContent = label;
   }
 }
+
+/* ===========================================================================
+   Patch notes, in the same bubble
+   ---------------------------------------------------------------------------
+   /api/patch-notes serves patch-notes.json: a patch per day, one plain line
+   per commit. What has been seen is remembered per browser as the number of
+   notes read in each patch, keyed by its date - so a second push on the same
+   day lights the badge again for just the new lines. A browser that has never
+   seen any counts only the latest patch as new; greeting somebody with thirty
+   unread notes from before they arrived would teach them to ignore the badge.
+   =========================================================================== */
+const PN_SEEN_KEY = 'kanban.patchnotes.seen';
+const PN_TYPES = [
+  ['new', 'NEW'],
+  ['improved', 'IMPROVED'],
+  ['fixed', 'FIXED'],
+  ['maintenance', 'SYSTEM']
+];
+const PN_TALLY = { new: 'new', improved: 'improved', fixed: 'fixed', maintenance: 'under the hood' };
+let pnPatches = [];
+let pnBuild = '';
+let pnView = false;
+let pnFresh = new Set();   // dates shown as NEW for as long as the bubble stays open
+
+function pnReadSeen() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PN_SEEN_KEY) || 'null');
+    return raw && typeof raw === 'object' ? raw : null;
+  } catch (_) { return null; }
+}
+
+function pnUnreadByDate() {
+  const seen = pnReadSeen();
+  const out = {};
+  pnPatches.forEach((p, i) => {
+    const read = seen ? Number(seen[p.date] || 0) : (i === 0 ? 0 : p.notes.length);
+    if (p.notes.length > read) out[p.date] = p.notes.length - read;
+  });
+  return out;
+}
+
+function pnUnreadCount() {
+  return Object.values(pnUnreadByDate()).reduce((n, v) => n + v, 0);
+}
+
+function pnMarkSeen() {
+  const seen = {};
+  pnPatches.forEach(p => { seen[p.date] = p.notes.length; });
+  try { localStorage.setItem(PN_SEEN_KEY, JSON.stringify(seen)); } catch (_) {}
+  pnRenderBadge();
+}
+
+function pnRenderBadge() {
+  const n = pnUnreadCount();
+  const label = n > 9 ? '9+' : String(n);
+  const badge = document.getElementById('fb-launcher-badge');
+  const tab = document.getElementById('fb-tab-count');
+  if (badge) { badge.hidden = !n; badge.textContent = label; badge.title = `${n} new on the board`; }
+  if (tab) { tab.hidden = !n; tab.textContent = label; }
+  document.getElementById('fb-launcher')?.setAttribute('title',
+    n ? `${n} new update${n === 1 ? '' : 's'} on the board - see the patch notes` : 'Tell the platform team something about the board');
+}
+
+function pnVersion(date) {
+  return 'PATCH ' + String(date).slice(2).replace(/-/g, '.');
+}
+
+function pnLongDate(date) {
+  try {
+    return new Date(date + 'T12:00:00').toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  } catch (_) { return date; }
+}
+
+function pnRender() {
+  const box = document.getElementById('pn-view');
+  if (!box) return;
+  if (!pnPatches.length) {
+    box.innerHTML = '<div class="pn-empty">No patch notes yet.</div>';
+    return;
+  }
+  box.innerHTML = pnPatches.map((p, i) => {
+    const hero = i === 0;
+    const fresh = pnFresh.has(p.date);
+    const counts = {};
+    p.notes.forEach(n => { counts[n.type] = (counts[n.type] || 0) + 1; });
+    const tally = hero
+      ? `<span class="pn-tally">${PN_TYPES.filter(([k]) => counts[k]).map(([k]) => `<span>${counts[k]} ${esc(PN_TALLY[k])}</span>`).join('')}</span>`
+      : '';
+    const notes = PN_TYPES.flatMap(([key, label]) => p.notes.filter(n => n.type === key).map(n =>
+      `<li class="pn-note"><span class="pn-tag pn-tag-${key}">${label}</span><span>${esc(n.text)}</span></li>`));
+    return `<details class="pn-patch${hero ? ' pn-hero' : ''}"${hero || fresh ? ' open' : ''} style="animation-delay:${Math.min(i, 6) * 40}ms">
+      <summary class="pn-banner">
+        <span class="pn-ver">${esc(pnVersion(p.date))}</span>${fresh ? '<span class="pn-ribbon">NEW</span>' : ''}
+        <span class="pn-title">${esc(p.title || 'Board update')}</span>
+        <span class="pn-date">${esc(pnLongDate(p.date))}</span>
+        ${tally}
+      </summary>
+      <ul class="pn-list">${notes.join('')}</ul>
+    </details>`;
+  }).join('') + (pnBuild ? `<div class="pn-foot">Build ${esc(pnBuild)}</div>` : '');
+}
+
+function pnSetView(on) {
+  // Snapshot what is new before it is marked read, so the ribbons stay up
+  // while the person is actually looking at them.
+  if (on && !pnView) pnFresh = new Set(Object.keys(pnUnreadByDate()));
+  pnView = !!on;
+  document.getElementById('fb-chat')?.classList.toggle('pn-mode', pnView);
+  const chatTab = document.getElementById('fb-tab-chat');
+  const pnTab = document.getElementById('fb-tab-pn');
+  chatTab?.classList.toggle('active', !pnView);
+  pnTab?.classList.toggle('active', pnView);
+  chatTab?.setAttribute('aria-selected', String(!pnView));
+  pnTab?.setAttribute('aria-selected', String(pnView));
+  if (pnView) {
+    pnRender();
+    pnMarkSeen();
+    const view = document.getElementById('pn-view');
+    if (view) view.scrollTop = 0;
+  }
+}
+
+async function pnLoad() {
+  try {
+    const res = await fetch('/api/patch-notes', { credentials: 'include' });
+    if (!res.ok) return;
+    const data = await res.json();
+    pnPatches = Array.isArray(data?.patches) ? data.patches : [];
+    pnBuild = String(data?.build || '');
+    pnRenderBadge();
+    if (pnView && fbOpen) pnRender();
+  } catch (_) {}
+}
+
+document.getElementById('fb-tab-pn')?.addEventListener('click', () => pnSetView(true));
+document.getElementById('fb-tab-chat')?.addEventListener('click', () => {
+  pnSetView(false);
+  fbToggleChat(true);
+});
+// A deploy lands while the board is open all day; checking now and then is how
+// the badge finds out without anyone reloading.
+setInterval(() => { if (!document.hidden) pnLoad(); }, 15 * 60 * 1000);
 
 document.getElementById('feedback-btn')?.addEventListener('click', openFeedbackModal);
 document.getElementById('fb-launcher')?.addEventListener('click', ()=>fbToggleChat());

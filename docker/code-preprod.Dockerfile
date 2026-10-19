@@ -65,7 +65,7 @@ COPY public ./public
 # Server-rendered pages (/profile, /audit/tickets). Deliberately not under
 # public/, so they are not reachable through the /assets static mount.
 COPY views ./views
-COPY index.html ./
+COPY index.html patch-notes.json ./
 
 # nodejs (uid 1001) must own /app: it reads prisma.config.ts and Prisma's
 # config loader writes a temporary esbuild bundle into the working dir at
