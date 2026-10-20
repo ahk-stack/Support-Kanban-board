@@ -8,7 +8,8 @@
         { "type": "fixed", "commit": "0967403", "text": "A manual ticket created by an admin who is also a CS agent now gets them as its CS owner instead of Unassigned." },
         { "type": "fixed", "commit": "519646d", "text": "The board recognises your CS code wherever it appears on your account, not just in the first field it checks." },
         { "type": "improved", "commit": "85c8adc", "text": "CS owner changes are sturdier: only agents on the CS roster can be picked, \"No CS\" sticks when chosen on purpose, and changing the CS owner no longer undoes a newer Support reassignment." },
-        { "type": "new", "text": "Select a whole column in one click: tick the box next to a column's count to select every ticket showing in it, then use the selection bar to act on all of them. Tick it again to unselect." }
+        { "type": "new", "text": "Select a whole column in one click: tick the box next to a column's count to select every ticket showing in it, then use the selection bar to act on all of them. Tick it again to unselect." },
+        { "type": "improved", "text": "Tidier Feedback bubble header: the admin delivery Test button is gone." }
       ]
     },
     {

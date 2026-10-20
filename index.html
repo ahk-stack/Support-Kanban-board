@@ -5715,11 +5715,6 @@ th {
 .fb-chat-title { font-size: 15.5px; font-weight: 800; letter-spacing: -.01em; }
 .fb-chat-sub { font-size: 12.5px; opacity: .85; margin-top: 1px; }
 .fb-chat-head > div:first-of-type { flex: 1; min-width: 0; }
-.fb-test-btn {
-  font-size: 12px; padding: 3px 9px;
-  background: rgba(255, 255, 255, .14); border-color: rgba(255, 255, 255, .4); color: #fff;
-}
-.fb-test-btn:hover { background: rgba(255, 255, 255, .24); }
 .fb-chat-close {
   border: 0; background: transparent; color: rgba(255, 255, 255, .8);
   font-size: 21px; line-height: 1; cursor: pointer; padding: 0 2px;
@@ -8731,8 +8726,6 @@ th {
       <div class="fb-chat-title">Platform team</div>
       <div class="fb-chat-sub" id="fb-chat-sub">Online &middot; reports read same day</div>
     </div>
-    <button class="btn-out admin-only fb-test-btn" id="fb-test" type="button"
-            title="Send a test report to check that Teams and email delivery work">Test</button>
     <button class="fb-chat-close" id="fb-close" type="button" aria-label="Close">&times;</button>
   </header>
   <nav class="fb-tabs" role="tablist" aria-label="Feedback or patch notes">
@@ -20929,37 +20922,6 @@ function fbUpdateCount() {
   if (send && !fbSending) send.disabled = (!box.value.trim() && !fbFiles.length) || left < 0;
 }
 
-async function sendFeedbackTest(){
-  const btn = document.getElementById('fb-test');
-  if(!btn || btn.disabled) return;
-  btn.disabled = true;
-  const label = btn.textContent;
-  btn.textContent = 'Testing...';
-  try{
-    const res = await fetch('/api/feedback/test',{ method:'POST', credentials:'include' });
-    const out = await res.json().catch(()=>({}));
-    if(res.status === 403){ showToast('Only admins can send a delivery test','warn'); return; }
-    /* Two outcomes, two words each. This used to read out both legs and quote
-       whatever Graph said, so a working deployment with no Mail.Send consent
-       announced a 403 across the screen every time somebody pressed Test -
-       true, and useless: the report had gone to Teams, which is the leg this
-       deployment actually delivers on. Delivered by either leg is sent.
-
-       The reason still exists, in the console, where a Graph error can be read
-       and pasted somewhere rather than skimmed as it slides away. */
-    const delivered = out.emailed || out.notified;
-    showToast(delivered ? 'Feedback sent' : 'Feedback failed to send', delivered ? 'ok' : 'warn');
-    if(!delivered || out.emailError || out.webhookError) console.warn('[feedback test]', out);
-  }catch(err){
-    // Same two words for a network failure; the detail goes to the console.
-    showToast('Feedback failed to send','warn');
-    console.warn('[feedback test]', err);
-  }finally{
-    btn.disabled = false;
-    btn.textContent = label;
-  }
-}
-
 /* ===========================================================================
    Patch notes, in the same bubble
    ---------------------------------------------------------------------------
@@ -21105,7 +21067,6 @@ setInterval(() => { if (!document.hidden) pnLoad(); }, 15 * 60 * 1000);
 document.getElementById('feedback-btn')?.addEventListener('click', openFeedbackModal);
 document.getElementById('fb-launcher')?.addEventListener('click', ()=>fbToggleChat());
 document.getElementById('fb-close')?.addEventListener('click', ()=>fbToggleChat(false));
-document.getElementById('fb-test')?.addEventListener('click', sendFeedbackTest);
 document.getElementById('fb-send')?.addEventListener('click', fbSubmit);
 document.getElementById('fb-message')?.addEventListener('input', fbOnType);
 document.getElementById('fb-clip')?.addEventListener('click', () => document.getElementById('fb-file-input')?.click());
