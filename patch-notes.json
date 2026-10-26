@@ -4,7 +4,8 @@
       "date": "2026-10-22",
       "title": "Counts Line Up",
       "notes": [
-        { "type": "fixed", "text": "The My resolved count now matches the Resolved figure in your KPIs exactly, and updates at the same times. CS agents get it too, and admins get a Resolved chip for the whole team." }
+        { "type": "fixed", "text": "The My resolved count now matches the Resolved figure in your KPIs exactly, and updates at the same times. CS agents get it too, and admins get a Resolved chip for the whole team." },
+        { "type": "fixed", "text": "Patch notes now show up on the live board too, not just the test one." }
       ]
     },
     {
