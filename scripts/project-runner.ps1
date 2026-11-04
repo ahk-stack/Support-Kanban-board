@@ -27,6 +27,13 @@
        right away too. Logs: %LOCALAPPDATA%\kanban-runner\runner.log
     Remove it with:  .\scripts\project-runner.ps1 -Uninstall
 
+  On your own PC instead (runs on YOUR Claude account, only the runs you queue):
+    Same setup, with your own connector tokens, plus -Mine:
+         .\scripts\project-runner.ps1 -Install -Mine -ProdToken <your prod token> -PreprodToken <your preprod token>
+    Run on the board then goes straight to your PC - no tab, nothing to paste.
+    If your PC is off or busy, the shared runner (if there is one) takes the
+    run after a few minutes, and the board says who is picking it up.
+
   Run it in a window instead (Ctrl+C to stop):
     .\scripts\project-runner.ps1
 
@@ -47,6 +54,8 @@ param(
   # anything not listed is refused. No Bash on purpose (see above).
   [string[]]$AllowedTools = @("Skill", "Read", "Write", "Glob", "Grep", "WebSearch", "WebFetch", "mcp__claude_ai_Quinta_MCP_Servers_PROD"),
   [int]$IntervalSeconds = 20,
+  # A runner on someone's own PC: take only the runs this token's owner queued.
+  [switch]$Mine = $($env:KANBAN_RUNNER_MINE -eq "1"),
   # Old single-board form, still accepted: -BoardUrl <url> -Token <token> -McpName <name>
   [string]$BoardUrl,
   [string]$Token = $env:KANBAN_MCP_TOKEN,
@@ -72,6 +81,7 @@ if ($Install) {
   if ($PreprodToken) { [Environment]::SetEnvironmentVariable("KANBAN_PREPROD_TOKEN", $PreprodToken, "User") }
   if ($PSBoundParameters.ContainsKey("ProdUrl")) { [Environment]::SetEnvironmentVariable("KANBAN_PROD_URL", $ProdUrl, "User") }
   if ($PSBoundParameters.ContainsKey("PreprodUrl")) { [Environment]::SetEnvironmentVariable("KANBAN_PREPROD_URL", $PreprodUrl, "User") }
+  [Environment]::SetEnvironmentVariable("KANBAN_RUNNER_MINE", $(if ($Mine) { "1" } else { $null }), "User")
   if (-not ($ProdToken -or $PreprodToken)) {
     Write-Host "Pass -ProdToken and/or -PreprodToken (Kanban -> Profile -> Claude connector -> Generate token)." -ForegroundColor Red
     exit 1
@@ -114,12 +124,14 @@ if (-not $boards.Count -or ($boards | Where-Object { -not $_.Token })) {
 }
 $allMcp = @($ProdMcp, $PreprodMcp, $McpName) | Select-Object -Unique
 
-foreach ($b in $boards) { Log "Watching the $($b.Name) board at $($b.Url) every $IntervalSeconds s (connector mcp__$($b.Mcp))." "Green" }
+$queuePath = if ($Mine) { "/api/mcp/project-runs/queued?mine=1" } else { "/api/mcp/project-runs/queued" }
+$whose = if ($Mine) { "your own runs" } else { "the shared queue" }
+foreach ($b in $boards) { Log "Watching $whose on the $($b.Name) board at $($b.Url) every $IntervalSeconds s (connector mcp__$($b.Mcp))." "Green" }
 
 while ($true) {
   foreach ($b in $boards) {
     try {
-      $queue = Invoke-RestMethod -Uri "$($b.Url.TrimEnd('/'))/api/mcp/project-runs/queued" -Headers @{ Authorization = "Bearer $($b.Token)" } -Method Get
+      $queue = Invoke-RestMethod -Uri "$($b.Url.TrimEnd('/'))$queuePath" -Headers @{ Authorization = "Bearer $($b.Token)" } -Method Get
       foreach ($run in @($queue.runs)) {
         if (-not $run) { continue }
         Log ("{0}: run {1} - {2} (asked by {3})" -f $b.Name, $run.runId, $run.project, $run.requestedBy) "Cyan"

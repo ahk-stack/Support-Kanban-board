@@ -3490,6 +3490,10 @@ textarea:focus {
   align-items: center;
 }
 
+.archive-search {
+  width: min(340px, 100%);
+}
+
 .btn-back,
 .btn-clear-spam {
   font-size: 14px;
@@ -5242,6 +5246,9 @@ th {
 .emc-suggest-load { display: block; font-size: 12px; color: var(--muted, #64748b); }
 .emc-suggest-btn { font-size: 12px; padding: 3px 10px; }
 .emc-suggest-current { font-size: 12px; color: var(--muted, #64748b); font-style: italic; }
+.emc-reassign { display: flex; align-items: center; gap: 10px; padding: 10px 0 4px; margin-top: 4px; border-top: 1px solid var(--border, #e2e8f0); flex-wrap: wrap; }
+.emc-reassign-label { font-size: 13.5px; font-weight: 700; color: var(--text-soft, #334155); }
+.emc-reassign-sel { flex: 1 1 120px; max-width: 200px; }
 
 
 /* ===== Projects ============================================================ */
@@ -8295,7 +8302,7 @@ th {
   <div class="sep"></div>
   <button class="chip" id="snooze-filter-btn" title="Show only snoozed tickets" style="display:none">Snoozed <span class="jira-ct" id="snooze-count" style="display:none">0</span></button>
   <div class="sep"></div>
-  <button class="chip my-resolved-control" id="my-resolved-filter-btn" title="Every ticket you resolved, including ones CS has confirmed and taken off the board" style="display:none">My resolved <span class="jira-ct" id="my-resolved-count" style="display:none">0</span></button>
+  <button class="chip my-resolved-control" id="my-resolved-filter-btn" title="Every ticket you resolved, including ones CS has confirmed and taken off the board" style="display:none"><span class="my-resolved-label">My resolved</span> <span class="jira-ct" id="my-resolved-count" style="display:none">0</span></button>
   <div class="sep my-resolved-control" style="display:none"></div>
   <span class="filter-label language-filter-control" style="display:none">Language:</span>
   <select class="filter-sel language-filter-control" id="language-filter" style="display:none"><option value="all">All languages</option></select>
@@ -8348,6 +8355,7 @@ th {
   <div class="spam-view-header">
     <div class="spam-view-title" style="color:var(--slate-600);">Archive Inbox <span id="archive-view-count" style="font-size:16px;font-weight:400;color:var(--slate-400);"></span></div>
     <div class="spam-view-actions">
+      <input class="filter-sel archive-search" id="archive-search" type="text" autocomplete="off" data-lpignore="true" data-1p-ignore data-form-type="other" placeholder="Search #0012, QS-8634, sender, subject or company"/>
       <button class="btn-back" id="btn-back-board-archive"> Back to Board</button>
     </div>
   </div>
@@ -8512,7 +8520,8 @@ th {
     <div id="kpi-range-label" style="font-size:14px;color:var(--legacy-666);">Loading</div>
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--legacy-666);">
       <span id="kpi-freshness">-</span>
-      <button class="btn-out" id="kpi-refresh-now" type="button" style="font-size:13px;padding:3px 9px;" title="Pulls again - the figures themselves only change at 00:00, 09:00, 12:00 and 16:00">Refresh</button>
+      <button class="btn-out" id="kpi-refresh-now" type="button" style="font-size:13px;padding:3px 9px;" title="Pulls again - the figures themselves only change at 00:00, 09:00, 12:00 and 16:00 (Tunisia time)">Refresh</button>
+      <button class="btn-out" id="kpi-day-report-btn" type="button" style="font-size:13px;padding:3px 9px;" title="Every ticket resolved on a day, by agent (Tunisia time)" hidden>Day report</button>
     </div>
   </div>
   <!-- Admins only: every ticket since the board went live. Filled by the KPI
@@ -8788,6 +8797,17 @@ th {
 <!-- Intern com modal -->
 <div class="modal-bg" id="com-modal"><div class="modal" style="max-width:560px;"><div class="modal-head"><div style="flex:1;min-width:0;"><h2 id="com-title"></h2><div style="font-size:13px;color:var(--slate-400);margin-top:3px;" id="com-subtitle"></div></div><button class="modal-close-x" data-close="com-modal"></button></div><div class="tr-bar" id="com-tr-bar"></div><div class="com-thread" id="com-thread"></div><div class="compose-area"><div class="compose-label">Add internal comment</div><textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea><div class="compose-footer"><div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div><div style="display:flex;gap:8px;align-self:flex-end;"><button class="btn-out" id="com-debug-expert">Debug Expert</button><button class="btn-primary" id="com-post">Post</button></div></div></div></div></div>
 <!-- KPI drilldown: the tickets behind a red ("bad" tone) KPI card -->
+<!-- Admins: tickets resolved on one day, by agent. Read live, not from the KPI checkpoint. -->
+<div class="modal-bg" id="kpi-day-report-modal"><div class="modal" style="max-width:760px;"><div class="modal-head"><h2 id="kpi-day-report-title">Day report</h2><button class="modal-close-x" data-close="kpi-day-report-modal"></button></div>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;font-size:14px;">
+    <label for="kpi-day-report-date">Day</label>
+    <input type="date" id="kpi-day-report-date" class="filter-sel" style="max-width:170px;">
+    <button class="btn-out" id="kpi-day-report-prev" type="button" style="font-size:13px;padding:3px 9px;">&larr; Previous</button>
+    <button class="btn-out" id="kpi-day-report-next" type="button" style="font-size:13px;padding:3px 9px;">Next &rarr;</button>
+    <span id="kpi-day-report-meta" style="color:var(--legacy-666);font-size:13px;"></span>
+  </div>
+  <div class="modal-body-scroll" id="kpi-day-report-body"></div>
+  <div class="modal-actions"><button class="btn-out" id="kpi-day-report-copy" type="button">Copy summary</button><button class="btn-out" data-close="kpi-day-report-modal">Close</button></div></div></div>
 <div class="modal-bg" id="kpi-tickets-modal"><div class="modal" style="max-width:640px;"><div class="modal-head"><h2 id="kpi-tickets-title"></h2><button class="modal-close-x" data-close="kpi-tickets-modal"></button></div><div class="modal-body-scroll" id="kpi-tickets-list"></div><div class="modal-actions"><button class="btn-out" data-close="kpi-tickets-modal">Close</button></div></div></div>
 <!-- Bulk triage: appears only when something is selected. -->
 <div class="selection-bar" id="selection-bar"></div>
@@ -9584,6 +9604,15 @@ function resumeSlaAfterHold(id,since,now){
   const created=new Date(ticketCreatedAt[id]||0).getTime()||0;
   const base=Math.max(created,Number(ticketSlaResetAt[id]||0));
   if(!base||base>=since)return;
+  // In the agent's shift time, which is what the clock counts - office hours
+  // put the restart point inside the hold and counted the shifts worked during
+  // it. Office hours only for an agent with no shift record.
+  const agent=normalizeSupportAgent(ticketAssignee[id]||'');
+  if(agent&&shiftLoaded&&shiftAgents[agent]){
+    const resumeAt=shiftPointBefore(now,shiftElapsedMs(base,since,agent),agent,base);
+    if(resumeAt>base)ticketSlaResetAt[id]=resumeAt;
+    return;
+  }
   ticketSlaResetAt[id]=businessPointBefore(now,businessMsInRange(base,since));
 }
 function resumeSlaAfterContactWait(id,now){resumeSlaAfterHold(id,ticketStageTouchedAt[id],now);}
@@ -9714,6 +9743,11 @@ function setTicketAssignee(id,agent,ts,source){
       :/^liveSync\//.test(why)?why.split('/')[1]
       :currentUser();
     ticketAssigneeBy[id]={by:actor,source:why,at:stamp,from:prev||''};
+    // Handed from one agent to another: the new owner starts with a full SLA.
+    // Not the first assignment, and not a resolved ticket, whose met/breached
+    // is already settled. A live-sync or reconciled change was reset on the
+    // board (or server) that made it, and the restart point syncs with it.
+    if(prev&&next&&!/^(liveSync|reconciled)\//.test(why)&&normalizeTicketStage(ticketState[id]||'new')!=='res'&&stamp>Number(ticketSlaResetAt[id]||0))ticketSlaResetAt[id]=stamp;
     logAssignChange({id:String(id),from:prev||'(none)',to:next||'(none)',result:'applied',ts:stamp,prevTs,by:why,actor,at:Date.now()});
   }
   return true;
@@ -10433,9 +10467,10 @@ function adoptServerTicketNumbers(map){
   ticketNumberCounter=Math.max(0,...Object.values(ticketNumbers));
   return true;
 }
-function ticketMatchesNumberQuery(ticket){
+// The Archive Inbox passes its own query; the board uses its search box.
+function ticketMatchesNumberQuery(ticket,query=activeTicketNumber){
   const id=String(ticket?.id||'').trim();
-  const q=String(activeTicketNumber||'').trim().toLowerCase();
+  const q=String(query||'').trim().toLowerCase();
   if(!q)return true;
   const raw=String(ensureTicketNumber(id));
   const pretty=ticketDisplayNumber(id).toLowerCase();
@@ -11076,7 +11111,7 @@ const BUSINESS_MS_PER_DAY = BUSINESS_WINDOWS.reduce((total, [sh, sm, eh, em]) =>
    agent abroad or on a PC set to another zone saw 08:00-12:00 land on the
    wrong hours, and their badges disagreed with the dashboard. Offsets are
    cached per hour, since they only change on the hour. */
-let slaTimeZone='Africa/Casablanca';
+let slaTimeZone='Africa/Tunis';
 let slaZoneFmt=null;
 let slaZoneOffsetCache=new Map();
 function setSlaTimeZone(tz){
@@ -11102,6 +11137,10 @@ function slaZoneOffsetMs(ms){
 }
 // A wall-clock time in the SLA zone, written as if it were UTC, to the instant.
 function slaZoneToUtc(wall){return wall-slaZoneOffsetMs(wall-slaZoneOffsetMs(wall));}
+// The tzOffset the KPI endpoints take (minutes, UTC minus local), for the SLA
+// zone rather than the PC's, so "Today" starts at midnight Tunisia time
+// whatever zone the viewer's machine is set to.
+function slaZoneTzOffset(){return String(-Math.round(slaZoneOffsetMs(Date.now())/60000));}
 function slaZoneDayStart(ms){return Math.floor((ms+slaZoneOffsetMs(ms))/86400000)*86400000;}
 function slaZoneIsWeekend(day){const d=new Date(day).getUTCDay();return d===0||d===6;}
 function businessMsInRange(from, to) {
@@ -11210,6 +11249,17 @@ function shiftElapsedMs(fromMs,toMs,agentCode){
     total+=Math.max(0,worked);
   });
   return total;
+}
+// The inverse of shiftElapsedMs. Mirrors shiftPointBefore in server.js.
+function shiftPointBefore(to,amount,agentCode,floor){
+  if(!(amount>0))return to;
+  let lo=floor,hi=to;
+  if(shiftElapsedMs(lo,to,agentCode)<=amount)return lo;
+  while(hi-lo>1000){
+    const mid=Math.floor((lo+hi)/2);
+    if(shiftElapsedMs(mid,to,agentCode)>=amount)lo=mid;else hi=mid;
+  }
+  return lo;
 }
 async function refreshShiftState(){
   try{
@@ -11334,7 +11384,9 @@ function getSLAStatus(id){
   const slaNow=boardNow();
   const wallElapsed=slaNow-createdMs;
   const resetAt=Number(ticketSlaResetAt[id]||0)>new Date(createdAt).getTime()?Number(ticketSlaResetAt[id]):0;
-  const wallText=fmtDuration(wallElapsed)+(resetAt?' since the client\'s last reply':' since received');
+  // A restart stamped at the last handover came from the reassignment.
+  const resetWhy=!resetAt?' since received':resetAt===Number(ticketAssigneeBy[id]?.at||0)?' since reassigned':' since the client\'s last reply';
+  const wallText=fmtDuration(wallElapsed)+resetWhy;
   /* Linked to Jira, so the clock is off. The commitment is a response time
      from us, and once the ticket is with engineering the turnaround is not
      ours to make - telling the agent holding it that they are late asks them
@@ -11352,7 +11404,7 @@ function getSLAStatus(id){
   const adminHold=ticketSlaHold[id];
   if(adminHold&&adminHold.at){
     const frozenAt=Math.max(Number(adminHold.at),createdMs);
-    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+(resetAt?' since the client\'s last reply':' since received');
+    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+resetWhy;
     return{text:`SLA frozen${adminHold.by?' by '+adminHold.by:''}`,cls:'sla-warn',overdue:false,wallText:frozenWall,shiftMs:0,noClock:true,adminHold};
   }
   /* Snoozed: held from the moment it was snoozed. When the snooze ends the
@@ -11361,7 +11413,7 @@ function getSLAStatus(id){
   if(isSnoozed(id,slaNow)){
     const snoozeHold=snoozeEntry(id);
     const frozenAt=Math.min(slaNow,Math.max(Number(snoozeHold.at)||slaNow,createdMs));
-    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+(resetAt?' since the client\'s last reply':' since received');
+    const frozenWall=fmtDuration(Math.max(0,frozenAt-createdMs))+resetWhy;
     return{text:'SLA on hold - snoozed',cls:'sla-warn',overdue:false,wallText:frozenWall,shiftMs:0,noClock:true,snoozeHold};
   }
   const jiraHoldKey=canonicalJiraKey(ticketJira[id]);
@@ -11464,6 +11516,9 @@ async function syncTicketStatusToHubspot(ticketId,newCol){const hsId=ticketHubsp
 
 //  Spam 
 function recordSpamSender(spamEmail){if(!spamEmail||isQuintaSender(spamEmail)||spamSenders.has(spamEmail))return 0;spamSenders.add(spamEmail);let count=0;allTickets.forEach(t=>{const te=ticketClientEmail[t.id]||t.email.sender?.toLowerCase();if(te===spamEmail){ticketCategory[t.id]='Spam';count++;}});return count;}
+// Records the ticket's sender as spam, so their other tickets and new mail
+// follow it. Quinta senders are never recorded. True when a toast was shown.
+function recordTicketSenderAsSpam(id,email){const spamEmail=ticketClientEmail[id]||email?.sender?.toLowerCase();if(!spamEmail||isQuintaSender(spamEmail))return false;const rc=recordSpamSender(spamEmail);showToast(rc>1?` Spam recorded · ${rc} tickets marked`:' Spam sender recorded','spam-t');return true;}
 function getSpamTickets(){return allTickets.filter(t=>ticketCategory[t.id]==='Spam'&&normalizeTicketStage(ticketState[t.id]||'new')!=='res'&&ticketVisibleToCurrentUser(t)).sort((a,b)=>new Date(b.email.receivedDateTime||0)-new Date(a.email.receivedDateTime||0));}
 function updateSpamBadge(){const cnt=getSpamTickets().length;const badge=document.getElementById('spam-count');const btn=document.getElementById('spam-view-btn');if(cnt>0){badge.textContent=cnt>99?'99+':cnt;badge.style.display='inline-flex';}else{badge.style.display='none';}(cnt>0&&!btn.classList.contains('active'))&&(btn.style.fontWeight='700');}
 function getArchivedTickets(){return allTickets.filter(t=>isArchivedTicket(t.id)&&ticketVisibleToCurrentUser(t)).sort((a,b)=>(ticketArchived[b.id]?.archivedAt||0)-(ticketArchived[a.id]?.archivedAt||0));}
@@ -11738,6 +11793,7 @@ function syncRoleRestrictedControls(){
   const hasMyResolved=currentUserHasMyResolved();
   document.querySelectorAll('.my-resolved-control').forEach(el=>{el.style.display=hasMyResolved?'':'none';});
   if(!hasMyResolved)showMyResolved=false;
+  else void loadMyResolved();
   // Admin-only tools. Hiding the entry point is presentation only - the
   // endpoints behind them are requireAdmin server-side.
   const isAdmin=currentUserIsAdmin();
@@ -13983,13 +14039,13 @@ function projectThreadHtml(slug){
     const head=working
       ?`<strong>Claude is working on it</strong>${t.claimedBy?` (${esc(String(t.claimedBy).replace(/^mcp:/,''))})`:''}`
       :t.status==='collecting'?'<strong>The board is collecting the data for this run</strong>'
-      :t.status==='queued'?'<strong>Waiting for Claude to pick this up</strong>':'<strong>Sending…</strong>';
+      :t.status==='queued'?`<strong>${t.runner==='yours'?'Claude on your PC is picking this up':t.runner==='shared'?'Waiting for the shared runner to pick this up':'Waiting for Claude to pick this up'}</strong>`:'<strong>Sending…</strong>';
     parts.push(`<div class="pj-result pj-running pj-progress">
     <span class="spinner"></span>
     <span class="pj-progress-text">${head} <span data-pj-elapsed="${esc(slug)}">${esc(projectElapsedText(t.startedAt))}</span> &middot; You can leave this page &mdash; the answer is saved under Results when it lands.</span>
     <span class="pj-progress-bar"></span>
   </div>`);
-    if(t.status==='queued')parts.push(projectHandoffHtml(p,t.handoff));
+    if(t.status==='queued')parts.push(projectHandoffHtml(p,t.handoff,t.runner));
   }
   if(t.error)parts.push(`<div class="pj-result pj-error">${esc(t.error)}</div>`);
   // Nothing to follow up on until the project has answered once.
@@ -14236,16 +14292,23 @@ function projectClaudeUrl(p){
   return p?.claudeProjectId?`https://claude.ai/project/${encodeURIComponent(p.claudeProjectId)}`:'https://claude.ai/new';
 }
 /* What a queued run shows while it waits: the one line that hands it to Claude,
-   with Copy and Open Claude beside it. A runner PC takes it without anyone
-   doing this; the line is for when there is no runner, or it is off. */
-function projectHandoffHtml(p,handoff){
+   with Copy and Open Claude beside it. A runner (on your PC, or the shared one)
+   takes it without anyone doing this; the line is for when no runner is on.
+   runner is 'yours', 'shared' or 'none' - who the board saw listening. */
+function projectHandoffHtml(p,handoff,runner){
   if(!handoff)return'';
+  if(runner==='yours')return`<div class="pj-help">Your PC is connected and will take this run by itself. If it is busy with another run, the shared runner steps in after a few minutes.</div>`;
+  const help=runner==='shared'
+    ?'The shared runner will take it. To run it on your own Claude instead, paste this in a Claude chat that has the support board connector switched on.'
+    :runner==='none'
+    ?'No runner is connected, so nobody will take this by themselves. Paste it in a Claude chat that has the support board connector switched on, or start the runner on your PC.'
+    :'Paste it in a Claude chat that has the support board connector switched on.';
   return `<div class="pj-handoff">
     <code>${esc(handoff)}</code>
     <div class="pj-handoff-actions">
       <button class="btn-primary pj-copy" type="button" data-pj-clip="${esc(handoff)}">Copy for Claude</button>
       <a class="btn-out pj-copy" href="${esc(projectClaudeUrl(p))}" target="_blank" rel="noopener">Open Claude</a>
-      <span class="pj-help" style="margin:0;">Paste it in a Claude chat that has the support board connector switched on.</span>
+      <span class="pj-help" style="margin:0;">${help}</span>
     </div>
   </div>`;
 }
@@ -14271,7 +14334,7 @@ async function startAndAwaitProjectRun(slug,p,url,body,t){
     const data=await res.json().catch(()=>({}));
     if(!res.ok||data.ok===false||!data.runId){t.error=data?.message||data?.error||`HTTP ${res.status}`;return null;}
     runId=data.runId;
-    t.runId=runId;t.status=data.status||'queued';t.handoff=data.handoff||'';t.claimedBy='';
+    t.runId=runId;t.status=data.status||'queued';t.handoff=data.handoff||'';t.claimedBy='';t.runner=data.runner||'';
     renderProjectsView();
   }catch(error){
     t.error=String(error?.message||error);
@@ -14294,8 +14357,8 @@ async function startAndAwaitProjectRun(slug,p,url,body,t){
       }
       // Redrawn only when the state actually moves, so the form under it is
       // not rebuilt every few seconds.
-      if(res.ok&&run&&run.status!==t.status){
-        t.status=run.status;t.claimedBy=run.claimedBy||'';t.handoff=run.handoff||'';
+      if(res.ok&&run&&(run.status!==t.status||(run.runner||'')!==(t.runner||''))){
+        t.status=run.status;t.claimedBy=run.claimedBy||'';t.handoff=run.handoff||'';t.runner=run.runner||'';
         renderProjectsView();
       }
     }catch(_){/* one dropped check is not a failed run - try again next tick */}
@@ -14814,6 +14877,7 @@ function renderKpiAllTime(all){
       <span><strong>${n(all.open)}</strong> still open</span>
       <span><strong>${n(all.duplicates)}</strong> duplicate${all.duplicates===1?'':'s'} (not counted)</span>
       <span><strong>${n(all.spam)}</strong> spam (not counted)</span>
+      <span><strong>${n(all.archived)}</strong> archived unresolved (not counted)</span>
     </div>
     <button class="btn-out kpi-alltime-btn" type="button" data-kpi-range="since_launch">Show all of it below</button>`;
   el.hidden=false;
@@ -14922,13 +14986,13 @@ function kpiZoneTime(iso){
 }
 function kpiFreshnessText(){
   if(!kpiLastLoadedAt||!kpiSnapshotInfo)return'Not loaded yet';
-  return`Figures as of ${kpiZoneTime(kpiSnapshotInfo.asOf)} · next update ${kpiZoneTime(kpiSnapshotInfo.nextUpdateAt)}`;
+  return`Figures as of ${kpiZoneTime(kpiSnapshotInfo.asOf)} · next update ${kpiZoneTime(kpiSnapshotInfo.nextUpdateAt)} (Tunisia time)`;
 }
 function updateKpiFreshnessLabel(){
   const el=document.getElementById('kpi-freshness');
   if(el){
     el.textContent=kpiFreshnessText();
-    el.title='The KPI figures update at '+(kpiSnapshotInfo?.checkpointHours||[0,9,12,16]).map(h=>String(h).padStart(2,'0')+':00').join(', ')+'. Changes made in between show at the next update.';
+    el.title='The KPI figures update at '+(kpiSnapshotInfo?.checkpointHours||[0,9,12,16]).map(h=>String(h).padStart(2,'0')+':00').join(', ')+' Tunisia time. Changes made in between show at the next update.';
   }
 }
 // Pulls a few seconds after the next checkpoint, by the server's clock.
@@ -14942,6 +15006,14 @@ function startKpiAutoRefresh(){
     if(viewMode!=='kpi'||document.visibilityState!=='visible')return;
     void renderKpiView({force:true});
   },Math.min(Math.max(1000,next-boardNow()+3000),2**31-1));
+  // A timer hours long does not count while the PC sleeps and is held back in
+  // a throttled tab, so it could fire long after the checkpoint and the page
+  // sat on the old figures. This check catches any checkpoint the timer missed.
+  kpiFreshnessTimer=setInterval(()=>{
+    if(viewMode!=='kpi'||document.visibilityState!=='visible'||kpiFetchInFlight)return;
+    const due=kpiNextUpdateMs();
+    if(due&&boardNow()>=due+3000)void renderKpiView({force:true});
+  },30000);
 }
 function stopKpiAutoRefresh(){
   clearTimeout(kpiRefreshTimer);kpiRefreshTimer=null;
@@ -15042,7 +15114,7 @@ async function openKpiDrilldown(key){
   const requestId=++kpiDrilldownRequestSeq;
   showKpiTicketsPopup(entry.title,[],{loading:true});
   try{
-    const params=new URLSearchParams({category:entry.category,range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:String(new Date().getTimezoneOffset())});
+    const params=new URLSearchParams({category:entry.category,range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:slaZoneTzOffset()});
     const res=await fetch('/api/tickets/kpis/drilldown?'+params.toString(),{credentials:'include'});
     const data=await res.json().catch(()=>({}));
     if(!res.ok)throw new Error(data?.error||'drilldown_fetch_failed');
@@ -15088,6 +15160,7 @@ async function renderKpiView(opts){
     kpiAgentFilter=enforcedAgentFilter();
   }
   const canViewAllTickets=canViewAllKpis;
+  document.getElementById('kpi-day-report-btn').hidden=!canViewAllKpis;
   const agentFilterEl=document.getElementById('kpi-agent-filter');
   const teamFilterEl=document.getElementById('kpi-team-filter');
   populateKpiRangeOptions();
@@ -15095,7 +15168,7 @@ async function renderKpiView(opts){
   document.getElementById('kpi-team-filter').value=kpiTeamFilter;
   // Only announce loading on the first pull - a timed refresh that blanked the
   // header every 45 seconds would read as the dashboard breaking.
-  const params=new URLSearchParams({range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:String(new Date().getTimezoneOffset())});
+  const params=new URLSearchParams({range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:slaZoneTzOffset()});
   // The figures on screen stand until the next checkpoint: a board patch or a
   // return to this view does not pull again unless a filter changed.
   if(!opts?.force&&kpiLastLoadedAt&&kpiLoadedKey===params.toString()&&boardNow()<kpiNextUpdateMs())return;
@@ -15611,7 +15684,9 @@ function renderHygieneDashboard(grid){
 function renderCompaniesView(){const groups=companyGroups();ensureHubspotOwnerNames(groups);ensureCompanyNetworks(groups);upsertCompanyProfiles(groups);refreshCompaniesFilterOptions(groups);const filtered=applyCompanyFilters(groups);document.getElementById('companies-type-filter').value=companyFilters.type;document.getElementById('companies-search').value=companyFilters.q||'';document.getElementById('companies-viewtype-btn').textContent=companiesViewLabel(companiesViewType)+' ';document.getElementById('companies-stats').textContent=`${filtered.length} companies · ${filtered.reduce((s,x)=>s+x.tickets.length,0)} tickets`;const grid=document.getElementById('companies-grid');if(companiesViewType==='report'){renderHygieneDashboard(grid);if(!dataHygieneReport&&!dataHygieneLoading)fetchDataHygieneReport(false);return;}if(companiesViewType==='calendar'){grid.style.display='block';grid.innerHTML='<div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:20px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);"><div style="font-family:Caladea,serif;font-size:24px;margin-bottom:8px;">Calendar view</div><div style="font-size:15px;color:var(--legacy-666);">Calendar view is still a placeholder and can be expanded next.</div></div>';return;}if(!filtered.length){grid.innerHTML='<div class="empty"><div class="empty-icon"></div>No companies match current filters.</div>';return;}grid.style.display='grid';grid.style.gridTemplateColumns=companiesViewType==='table'?'1fr':'repeat(auto-fill,minmax(min(320px,100%),1fr))';grid.innerHTML='';filtered.forEach(gr=>{const custom=companyCustomProps[gr.companyId]||{};const profile=companyProfiles[gr.companyId]||null;const labeled=(gr.associatedCompanies||[]).map(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());const label=l.find(x=>x.includes('specific hotel'))?'specific hotel':(l.find(x=>x.includes('group central'))?'group central':null);return label?{label,ref:c}:null;}).filter(Boolean);const parentChild=((gr.parentCompany?[{label:'group central',ref:gr.parentCompany}]:[]).concat((gr.childCompanies||[]).map(c=>({label:'specific hotel',ref:c}))));const unlabeledAssoc=(gr.associatedCompanies||[]).filter(c=>{const l=(c.labels||[]).map(x=>String(x).toLowerCase());return !(l.find(x=>x.includes('specific hotel'))||l.find(x=>x.includes('group central')));}).map(c=>({label:'group related',ref:c}));const related=[...labeled,...parentChild,...unlabeledAssoc];const relHtml=related.length?related.map(r=>`<span style="font-size:13px;border:1px solid var(--legacy-ddd);border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:var(--slate-50);">${esc(r.label)}: ${esc(r.ref?.name||r.ref?.id||'')}</span>`).join(''):(gr.relationshipType==='group'?`<span style="font-size:13px;border:1px solid var(--legacy-ddd);border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:var(--slate-50);">Group</span>`:`<span style="font-size:13px;border:1px solid var(--legacy-ddd);border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 6px 2px 0;background:var(--slate-50);">Monhotel</span>`);const shownCS=displayCSOwner(gr.coOwner);const metaLine=[gr.country?` ${gr.country}`:null,shownCS?`CS: ${shownCS}`:null].filter(Boolean).join(' · ');const contactHtml=[...gr.contacts.values()].map(c=>`<a href="${c.contactUrl||'#'}" ${c.contactUrl?'target="_blank"':''} style="text-decoration:none;color:var(--legacy-333);border:1px solid var(--legacy-ddd);border-radius:999px;padding:2px 8px;font-size:13px;display:inline-flex;gap:4px;align-items:center;"> ${esc(c.contactName)}</a>`).join(' ');const ticketHtml=gr.tickets.slice(0,8).map(t=>{const p=ticketPriority[t.id]||t.priority||'Medium';const col=normalizeTicketStage(ticketState[t.id]||'new');const colLbl={new:'New',inp:'In Progress',wus:'Waiting On Us',dft:'Due for test',wct:'Waiting On Contact',res:'Resolved'}[col]||'New';return `<button data-open-company-ticket="${esc(t.id)}" style="width:100%;text-align:left;border:1px solid var(--legacy-ddd);border-radius:10px;padding:8px 10px;margin-top:6px;background:var(--white);cursor:pointer;"><div style="font-weight:700;font-size:14px;margin-bottom:3px;">${esc(t.email.subject||'(no subject)')}</div><div style="display:flex;justify-content:space-between;font-size:13px;color:var(--legacy-666);"><span>${esc(colLbl)} · ${esc(p)}</span><span>${fmtDate(t.email.receivedDateTime)}</span></div></button>`;}).join('');const customHtml=Object.entries(custom).map(([k,v])=>`<span style="font-size:13px;border:1px solid var(--legacy-ddd);border-radius:999px;padding:2px 8px;display:inline-block;margin:2px 4px 2px 0;">${esc(k)}: ${esc(v)}</span>`).join('')||'<span style="font-size:13px;color:var(--legacy-777);">No custom properties yet</span>';const card=document.createElement('div');card.style.cssText='background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);';card.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div><div style="font-family:Caladea,serif;font-size:22px;">${esc(gr.companyName)}</div><div style="font-size:13px;color:var(--legacy-666);">${gr.tickets.length} ticket(s)${profile?.createdAt?` · profile: ${fmtDate(profile.createdAt)}`:''}</div>${metaLine?`<div style="font-size:13px;color:var(--legacy-777);margin-top:2px;">${esc(metaLine)}</div>`:''}</div><div style="display:flex;gap:6px;">${gr.companyUrl?`<a class="btn-out" href="${esc(gr.companyUrl)}" target="_blank" style="font-size:13px;padding:4px 8px;">Open HubSpot</a>`:''}<button class="btn-primary" data-cprop="${esc(gr.companyId)}" style="font-size:13px;padding:4px 8px;">Custom Properties</button></div></div><div style="margin-top:8px;"><div style="font-size:13px;color:var(--legacy-666);margin-bottom:3px;">Hierarchy</div>${relHtml}</div><div style="margin-top:8px;"><div style="font-size:13px;color:var(--legacy-666);margin-bottom:5px;">Contacts</div><div style="display:flex;flex-wrap:wrap;gap:4px;">${contactHtml||'<span style="font-size:13px;color:var(--legacy-777);">No contacts</span>'}</div></div><div style="margin-top:8px;"><div style="font-size:13px;color:var(--legacy-666);margin-bottom:3px;">Properties</div>${customHtml}</div><div style="margin-top:8px;"><div style="font-size:13px;color:var(--legacy-666);margin-bottom:2px;">Tickets</div>${ticketHtml}</div>`;if(companiesViewType==='table'){card.style.borderRadius='10px';card.style.padding='10px';card.style.display='grid';card.style.gridTemplateColumns='minmax(220px,1fr) minmax(260px,1fr) minmax(260px,1fr)';card.style.columnGap='12px';card.innerHTML=`<div><div style="font-family:Caladea,serif;font-size:20px;">${esc(gr.companyName)}</div><div style="font-size:13px;color:var(--legacy-666);margin-bottom:6px;">${gr.tickets.length} ticket(s)</div>${metaLine?`<div style=\"font-size:13px;color:var(--legacy-777);margin-bottom:6px;\">${esc(metaLine)}</div>`:''}${relHtml}${gr.companyUrl?`<a class=\"btn-out\" href=\"${esc(gr.companyUrl)}\" target=\"_blank\" style=\"font-size:13px;padding:4px 8px;display:inline-block;\">Open HubSpot</a>`:''}<button class=\"btn-primary\" data-cprop=\"${esc(gr.companyId)}\" style=\"font-size:13px;padding:4px 8px;margin-left:6px;\">Custom Properties</button></div><div><div style=\"font-size:13px;color:var(--legacy-666);margin-bottom:5px;\">Contacts</div><div style=\"display:flex;flex-wrap:wrap;gap:4px;\">${contactHtml||'<span style=\"font-size:13px;color:var(--legacy-777);\">No contacts</span>'}</div><div style=\"margin-top:8px;font-size:13px;color:var(--legacy-666);\">Properties</div><div>${customHtml}</div></div><div><div style=\"font-size:13px;color:var(--legacy-666);margin-bottom:2px;\">Tickets</div>${ticketHtml}</div>`;}card.querySelector('[data-cprop]')?.addEventListener('click',()=>openCompanyPropModal(gr));card.querySelectorAll('[data-open-company-ticket]').forEach(btn=>btn.addEventListener('click',()=>{const t=allTickets.find(x=>x.id===btn.dataset.openCompanyTicket);if(t)openEmailModal(t);}));grid.appendChild(card);});}
 function showCompaniesView(){viewMode='companies';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('companies-view').style.display='block';setSideNavActive(companiesViewType==='report'?'dashboard':'companies');saveLastWorkspaceSession(companiesViewType==='report'?'dashboard':'companies');renderCompaniesView();}
 function renderSpamView(){const spamTickets=getSpamTickets();const listEl=document.getElementById('spam-list');document.getElementById('spam-view-count').textContent=`(${spamTickets.length} ticket${spamTickets.length!==1?'s':''})`;if(!spamTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;"></div><div style="font-size:16px;font-weight:700;color:var(--gray-700);margin-bottom:6px;">Inbox zero!</div><div style="font-size:15px;color:var(--slate-400);">No spam tickets.</div></div>';return;}listEl.innerHTML='';spamTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'';const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip"> ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip"> ${esc(hs.companyName)}</span>`:''}<span class="spam-date">${fmtDate(email.receivedDateTime)}</span></div></div><div class="spam-row-actions"><button class="btn-restore" data-restore="${id}"> Restore</button></div>`;row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{ticketCategory[id]='Other';if(normalizeTicketStage(ticketState[id]||'new')==='res'){ticketState[id]='new';ticketStageTouchedAt[id]=Date.now();}const te=clientEmail||email.sender?.toLowerCase();const otherSpam=allTickets.some(x=>x.id!==id&&normalizeTicketStage(ticketState[x.id]||'new')!=='res'&&(ticketClientEmail[x.id]||x.email.sender?.toLowerCase())===te&&ticketCategory[x.id]==='Spam');if(!otherSpam&&te)spamSenders.delete(te);saveState('spam_ticket_restored');renderSpamView();renderBoard();updateSpamBadge();showToast('Ticket restored to board','ok');});listEl.appendChild(row);});}
-function renderArchiveView(){const archivedTickets=getArchivedTickets();const listEl=document.getElementById('archive-list');document.getElementById('archive-view-count').textContent=`(${archivedTickets.length} ticket${archivedTickets.length!==1?'s':''})`;if(!archivedTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;"></div><div style="font-size:16px;font-weight:700;color:var(--gray-700);margin-bottom:6px;">Nothing archived</div><div style="font-size:15px;color:var(--slate-400);">Archived tickets will show up here.</div></div>';return;}listEl.innerHTML='';archivedTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'';const meta=ticketArchived[id]||{};const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip"> ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip"> ${esc(hs.companyName)}</span>`:''}<span class="spam-date">Archived ${fmtDate(meta.archivedAt?new Date(meta.archivedAt).toISOString():'')}</span></div></div><div class="spam-row-actions"><button class="btn-out" data-archive-open="${id}" style="font-size:13px;"> Open</button><button class="btn-restore" data-restore="${id}"> Restore</button></div>`;row.querySelector(`[data-archive-open="${id}"]`).addEventListener('click',()=>openEmailModal(t));row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{if(ticketResolutionMeta[id])delete ticketResolutionMeta[id].confirmedAt;
+let archiveQuery='';
+function archiveTicketMatchesQuery(t){const q=archiveQuery.trim().toLowerCase();if(!q)return true;if(ticketMatchesNumberQuery(t,q))return true;const ce=ticketClientEmail[t.id]||'';return String(hsCache[ce]?.companyName||'').toLowerCase().includes(q);}
+function renderArchiveView(){const allArchived=getArchivedTickets();const archivedTickets=allArchived.filter(archiveTicketMatchesQuery);const listEl=document.getElementById('archive-list');document.getElementById('archive-view-count').textContent=archiveQuery.trim()?`(${archivedTickets.length} of ${allArchived.length})`:`(${allArchived.length} ticket${allArchived.length!==1?'s':''})`;if(allArchived.length&&!archivedTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:16px;font-weight:700;color:var(--gray-700);margin-bottom:6px;">No match</div><div style="font-size:15px;color:var(--slate-400);">No archived ticket matches that search.</div></div>';return;}if(!archivedTickets.length){listEl.innerHTML='<div class="spam-empty"><div style="font-size:48px;margin-bottom:12px;"></div><div style="font-size:16px;font-weight:700;color:var(--gray-700);margin-bottom:6px;">Nothing archived</div><div style="font-size:15px;color:var(--slate-400);">Archived tickets will show up here.</div></div>';return;}listEl.innerHTML='';archivedTickets.forEach(t=>{const{email,id}=t;const clientEmail=ticketClientEmail[id]||null;const hs=clientEmail?hsCache[clientEmail]:null;const senderDisplay=clientEmail||email.sender||'';const meta=ticketArchived[id]||{};const row=document.createElement('div');row.className='spam-row';row.innerHTML=`<div class="spam-row-info"><div class="spam-row-subject">${esc(email.subject||'(no subject)')}</div><div class="spam-row-meta"><span class="spam-sender-chip"> ${esc(senderName(senderDisplay))}</span>${hs?.companyName?`<span class="spam-company-chip"> ${esc(hs.companyName)}</span>`:''}<span class="spam-date">Archived ${fmtDate(meta.archivedAt?new Date(meta.archivedAt).toISOString():'')}</span></div></div><div class="spam-row-actions"><button class="btn-out" data-archive-open="${id}" style="font-size:13px;"> Open</button><button class="btn-restore" data-restore="${id}"> Restore</button></div>`;row.querySelector(`[data-archive-open="${id}"]`).addEventListener('click',()=>openEmailModal(t));row.querySelector(`[data-restore="${id}"]`).addEventListener('click',()=>{if(ticketResolutionMeta[id])delete ticketResolutionMeta[id].confirmedAt;
     // ticketArchived[id] must be set to a falsy value (never `delete`d) -
     // server-side merging spreads the current and incoming maps together
     // ({...current,...incoming}), which can add/override a key but can
@@ -15630,6 +15705,7 @@ document.getElementById('btn-clear-spam').addEventListener('click',()=>{const sp
 document.getElementById('btn-back-board').addEventListener('click',showBoardView);
 document.getElementById('spam-view-btn').addEventListener('click',()=>{if(viewMode==='spam')showBoardView();else showSpamView();});
 document.getElementById('btn-back-board-archive').addEventListener('click',showBoardView);
+document.getElementById('archive-search').addEventListener('input',e=>{archiveQuery=e.target.value||'';renderArchiveView();});
 document.getElementById('archive-view-btn').addEventListener('click',()=>{if(viewMode==='archive')showBoardView();else showArchiveView();});
 document.getElementById('break-btn').addEventListener('click',toggleShiftBreak);
 document.getElementById('assignlog-view-btn').addEventListener('click',()=>{if(viewMode==='assignlog')showBoardView();else showAssignLogView();});
@@ -15660,6 +15736,70 @@ document.getElementById('qt-detect-clear').addEventListener('click',()=>{
   qtDetectRows=[];qtDetectRender();qtDetectSetStatus('Paste URLs to begin.');
 });
 document.getElementById('kpi-refresh-now').addEventListener('click',()=>{if(viewMode==='kpi')void renderKpiView({force:true});});
+// ---------------------------------------------------------------------------
+// Day report (admins): the tickets resolved on one day, Tunisia time, by
+// agent. Read live from the server, not from the KPI checkpoint, so a day
+// that has just ended reads complete.
+// ---------------------------------------------------------------------------
+let kpiDayReport=null,kpiDayReportSeq=0;
+function slaZoneDateKey(ms){return new Date(slaZoneDayStart(ms)).toISOString().slice(0,10);}
+function shiftDateKey(key,days){const d=new Date(key+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+days);return d.toISOString().slice(0,10);}
+async function loadKpiDayReport(date){
+  const body=document.getElementById('kpi-day-report-body');
+  const meta=document.getElementById('kpi-day-report-meta');
+  document.getElementById('kpi-day-report-date').value=date;
+  document.getElementById('kpi-day-report-next').disabled=date>=slaZoneDateKey(boardNow());
+  body.innerHTML='<div style="padding:20px 0;color:var(--muted);font-size:15px;">Loading...</div>';
+  meta.textContent='';
+  const seq=++kpiDayReportSeq;
+  try{
+    const res=await fetch('/api/tickets/kpis/day-report?date='+encodeURIComponent(date),{credentials:'include'});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(data?.error||'day_report_failed');
+    if(seq!==kpiDayReportSeq)return;
+    kpiDayReport=data;
+    const day=new Date(data.date+'T12:00:00Z').toLocaleDateString('en-GB',{weekday:'long',day:'2-digit',month:'short',year:'numeric',timeZone:'UTC'});
+    document.getElementById('kpi-day-report-title').textContent=`Resolved on ${day} (${data.total})`;
+    meta.textContent=`Live · ${kpiZoneTime(data.generatedAt)} Tunisia time`;
+    const cell='padding:6px 10px;';
+    const agentTable=data.agents.length?`<table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:14px;">
+      <thead><tr style="text-align:left;border-bottom:1px solid var(--legacy-d7d7d7);"><th style="${cell}">Agent</th><th style="${cell}">Resolved</th><th style="${cell}">SLA met</th><th style="${cell}">SLA missed</th><th style="${cell}">Duplicates</th></tr></thead>
+      <tbody>${data.agents.map(a=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);"><td style="${cell}font-weight:700;">${esc(a.agent)}</td><td style="${cell}">${a.resolved+a.credits}${a.credits?` <span style="color:var(--muted);font-size:12px;">(${a.credits} credited)</span>`:''}</td><td style="${cell}">${a.slaMet}</td><td style="${cell}${a.slaBreached?'color:var(--red-600);font-weight:700;':''}">${a.slaBreached}</td><td style="${cell}">${a.duplicates}</td></tr>`).join('')}</tbody></table>`
+      :'<div style="padding:20px 0;color:var(--muted);font-size:15px;">No tickets were resolved on this day.</div>';
+    const list=data.tickets.map(r=>`<div class="kpi-ticket-row" data-kpi-ticket="${esc(r.externalId||'')}">
+      <div style="min-width:0;">
+        <div style="font-weight:700;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.ticketNumber?esc(r.ticketNumber)+' ':''}${esc(r.subject||'(no subject)')}</div>
+        <div style="font-size:13px;color:var(--muted);margin-top:2px;">${esc(r.company||'')} · ${esc(r.agent)}${r.csAgent?' · CS '+esc(r.csAgent):''}${r.duplicate?' · Duplicate':''}</div>
+      </div>
+      <div style="font-size:13px;white-space:nowrap;text-align:right;"><div>${r.resolvedAt?esc(kpiZoneTime(r.resolvedAt)):''}</div><div style="${r.sla==='breached'?'color:var(--red-600);font-weight:700;':'color:var(--muted);'}">${r.sla==='met'?'Met SLA':r.sla==='breached'?'Missed SLA':''}</div></div>
+    </div>`).join('');
+    body.innerHTML=agentTable+list;
+  }catch(error){
+    if(seq!==kpiDayReportSeq)return;
+    body.innerHTML=`<div style="padding:20px 0;color:var(--red-600);font-size:15px;">Failed to load: ${esc(String(error?.message||error))}</div>`;
+  }
+}
+document.getElementById('kpi-day-report-btn').addEventListener('click',()=>{
+  document.getElementById('kpi-day-report-modal').classList.add('open');
+  void loadKpiDayReport(slaZoneDateKey(boardNow()));
+});
+document.getElementById('kpi-day-report-date').addEventListener('change',e=>{if(/^\d{4}-\d{2}-\d{2}$/.test(e.target.value))void loadKpiDayReport(e.target.value);});
+document.getElementById('kpi-day-report-prev').addEventListener('click',()=>{void loadKpiDayReport(shiftDateKey(document.getElementById('kpi-day-report-date').value||slaZoneDateKey(boardNow()),-1));});
+document.getElementById('kpi-day-report-next').addEventListener('click',()=>{void loadKpiDayReport(shiftDateKey(document.getElementById('kpi-day-report-date').value||slaZoneDateKey(boardNow()),1));});
+document.getElementById('kpi-day-report-body').addEventListener('click',e=>{
+  const row=e.target.closest('[data-kpi-ticket]');
+  if(!row||!row.dataset.kpiTicket)return;
+  const ticket=allTickets.find(t=>t.id===row.dataset.kpiTicket);
+  if(!ticket){showToast("Ticket isn't loaded on the board right now - it may be outside the board's current fetch window.");return;}
+  document.getElementById('kpi-day-report-modal').classList.remove('open');
+  openEmailModal(ticket);
+});
+document.getElementById('kpi-day-report-copy').addEventListener('click',()=>{
+  const d=kpiDayReport;
+  if(!d)return;
+  const lines=[`Resolved on ${d.date}: ${d.total}`,...d.agents.map(a=>`${a.agent}: ${a.resolved+a.credits} resolved (SLA met ${a.slaMet}, missed ${a.slaBreached})`)];
+  navigator.clipboard?.writeText(lines.join('\n')).then(()=>showToast('Summary copied'),()=>showToast('Could not copy'));
+});
 // Coming back to a dashboard left open on another monitor should not show
 // figures from whenever it was last looked at.
 document.addEventListener('visibilitychange',()=>{
@@ -17409,6 +17549,7 @@ function makeCard(ticket,isNew=false){
         ${dupMasterId?'':`<button class="btn-out card-act" data-dup-open="${id}" title="Mark this ticket as a duplicate of another one">Duplicate</button>`}
         <button class="btn-out card-act" data-snooze-open="${id}" title="Hide this ticket until later - a client reply wakes it early">${snooze?'Snoozed':'Snooze'}</button>
         <button class="btn-out card-act" data-archive="${id}" title="Archive this ticket">Archive</button>
+        <button class="btn-out card-act" data-spam="${id}" title="Send this ticket to the Spam Inbox">Spam</button>
         ${hsTicketBtn}
       </div>
       <div class="card-people">
@@ -17514,7 +17655,23 @@ function makeCard(ticket,isNew=false){
        below redraws the control as a text field or a select to match. */
     if(ticketSubtype[id])delete ticketSubtype[id];
     delete subtypeDrafts[id];
-    if(newCat==='Spam'){const spamEmail=ticketClientEmail[id]||email.sender?.toLowerCase();if(spamEmail&&!isQuintaSender(spamEmail)){const rc=recordSpamSender(spamEmail);showToast(rc>1?` Spam recorded · ${rc} tickets marked`:' Spam sender recorded','spam-t');}}saveState();renderBoard();updateSpamBadge();});
+    if(newCat==='Spam')recordTicketSenderAsSpam(id,email);saveState();renderBoard();updateSpamBadge();});
+  div.querySelector('[data-spam]')?.addEventListener('click',async ev=>{
+    ev.stopPropagation();
+    const answer=await confirmAction('Send this ticket to the Spam Inbox? Other tickets and new mail from the same sender go there too. It can be restored from the Spam Inbox.',
+      {title:'Mark as spam',confirmLabel:'Spam',danger:true});
+    if(!answer||ticketCategory[id]==='Spam')return;
+    ticketCategory[id]='Spam';
+    if(ticketSubtype[id])delete ticketSubtype[id];
+    delete subtypeDrafts[id];
+    if(!recordTicketSenderAsSpam(id,email))showToast(' Moved to Spam Inbox','spam-t');
+    // Leaving the board, so it leaves the selection too, as Archive does.
+    selectedTickets.delete(id);
+    if(lastSelectedId===id)lastSelectedId=null;
+    if(focusedCardId===id)focusedCardId=null;
+    saveState('ticket_marked_spam');
+    renderBoard();updateSpamBadge();
+  });
   /* The numbered sub-category picker. This had no listener at all before, so
      changing it on a card looked like it worked and was gone on the next
      render - worth wiring while the free-text field next to it is being
@@ -18752,28 +18909,61 @@ function renderLaneBoard(visible){
   });
 }
 
-function ticketIsMyResolved(t){
-  if(String(ticketCategory[t.id]||'').toLowerCase()==='spam')return false;
-  // The KPI leaves duplicates out of every resolved figure; this count has to
-  // too, or an agent's badge and their KPI can never agree.
-  if(isDuplicateTicket(t.id))return false;
-  if(normalizeTicketStage(ticketState[t.id]||'new')!=='res')return false;
-  const me=supportIdentityCode();
-  return !!me&&ticketFilterAgentValues(t).assignee===me;
+/* The set behind "My resolved" comes from the server, from the KPI
+   dashboard's own working set (Resolved on "Since launch", scoped like the
+   dashboard: CS by CS owner, support by assignee, admins the whole team).
+   Counted here from the board state it ran a few tickets off the KPI - the
+   board's own assignee and stage, no launch cut-off, no hand credits, live
+   where the dashboard is a checkpoint snapshot. It moves when the KPIs do. */
+let myResolvedIds=new Set();
+let myResolvedTotal=0;
+let myResolvedAsOf='';
+let myResolvedLoadedAt=0;
+let myResolvedLoading=null;
+const MY_RESOLVED_REFRESH_MS=5*60*1000;
+function loadMyResolved(force){
+  if(!currentUserHasMyResolved())return Promise.resolve();
+  if(myResolvedLoading)return myResolvedLoading;
+  if(!force&&Date.now()-myResolvedLoadedAt<MY_RESOLVED_REFRESH_MS)return Promise.resolve();
+  myResolvedLoading=fetch('/api/tickets/my-resolved?tzOffset='+slaZoneTzOffset(),{credentials:'include'})
+    .then(r=>r.ok?r.json():null)
+    .then(data=>{
+      if(!data?.ok)return;
+      myResolvedIds=new Set((data.externalIds||[]).map(String));
+      myResolvedTotal=Number(data.total)||0;
+      myResolvedAsOf=data.asOf||'';
+      myResolvedLoadedAt=Date.now();
+      updateMyResolvedBadge();
+      if(showMyResolved)renderBoard();
+    })
+    .catch(()=>{})
+    .finally(()=>{myResolvedLoading=null;});
+  return myResolvedLoading;
 }
-// Anyone who resolves tickets under a support code - an admin who is also on
-// the support roster included. Gating it on the support team left those
-// admins with no way to find their own resolved tickets once they left the
-// board.
+setInterval(()=>{void loadMyResolved();},MY_RESOLVED_REFRESH_MS);
+function ticketIsMyResolved(t){
+  return myResolvedIds.has(String(t.id));
+}
+// Everyone who has a KPI dashboard has a Resolved figure on it, so everyone
+// gets the chip: support, CS and admins alike.
 function currentUserHasMyResolved(){
-  const me=supportIdentityCode();
-  if(currentUserIsAdmin())return SUPPORT_AGENTS.includes(me);
-  return currentUserTeam()==='support';
+  return !!currentSessionUser;
 }
 function updateMyResolvedBadge(){
+  const btn=document.getElementById('my-resolved-filter-btn');
   const badge=document.getElementById('my-resolved-count');
   if(!badge)return;
-  const count=currentUserHasMyResolved()?allTickets.filter(ticketIsMyResolved).length:0;
+  const admin=currentUserIsAdmin();
+  const label=btn?.querySelector('.my-resolved-label');
+  if(label)label.textContent=admin?'Resolved':'My resolved';
+  if(btn){
+    const asOf=myResolvedAsOf?` As of ${new Date(myResolvedAsOf).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}, the same figure as the KPIs.`:'';
+    const team=currentUserTeam();
+    btn.title=(admin?'Every ticket the team resolved since launch, including ones taken off the board.'
+      :team==='cs'?'Every resolved ticket you are the CS owner of since launch, including ones you confirmed and took off the board.'
+      :'Every ticket you resolved since launch, including ones CS has confirmed and taken off the board.')+asOf;
+  }
+  const count=currentUserHasMyResolved()?myResolvedTotal:0;
   badge.textContent=count>999?'999+':count;
   badge.style.display=count?'inline-flex':'none';
 }
@@ -18906,7 +19096,7 @@ document.getElementById('sla-filter-btn').addEventListener('click',()=>{activeSL
 document.getElementById('group-filter')?.addEventListener('change',e=>{boardGrouping=e.target.value==='company'?'company':'none';saveLastWorkspaceSession();renderBoard();});
 document.getElementById('language-filter')?.addEventListener('change',e=>{activeLanguage=e.target.value||'all';saveLastWorkspaceSession();renderBoard();});
 document.getElementById('snooze-filter-btn')?.addEventListener('click',()=>{showSnoozed=!showSnoozed;document.getElementById('snooze-filter-btn').classList.toggle('active',showSnoozed);renderBoard();});
-document.getElementById('my-resolved-filter-btn')?.addEventListener('click',()=>{showMyResolved=!showMyResolved;document.getElementById('my-resolved-filter-btn').classList.toggle('active',showMyResolved);renderBoard();});
+document.getElementById('my-resolved-filter-btn')?.addEventListener('click',()=>{showMyResolved=!showMyResolved;document.getElementById('my-resolved-filter-btn').classList.toggle('active',showMyResolved);renderBoard();if(showMyResolved)void loadMyResolved();});
 document.getElementById('save-view-btn')?.addEventListener('click',saveCurrentView);
 document.getElementById('copy-view-btn')?.addEventListener('click',copyViewLink);
 document.getElementById('saved-views')?.addEventListener('change',e=>{const v=e.target.value;e.target.value='';if(v!=='')applySavedView(v);});
@@ -19640,7 +19830,19 @@ async function emLoadAssignee(id){
   }
   renderEmContext();
 }
-function emAssigneeHtml(){
+function emAssigneeHtml(){return emAssigneeSuggestionsHtml()+emReassignHtml();}
+// Admins can hand the ticket to anyone on the support roster, not only the
+// people the ranking happened to name.
+function emReassignHtml(){
+  if(!currentUserIsAdmin())return '';
+  const current=normalizeSupportAgent(ticketAssignee[emContextTicketId]||'');
+  return `<div class="emc-reassign">
+      <label class="emc-reassign-label" for="emc-reassign-sel">Reassign to</label>
+      <select class="filter-sel emc-reassign-sel" id="emc-reassign-sel">${assignableSupportAgents().map(a=>`<option value="${esc(a)}"${a===current?' selected':''}>${esc(a)}${a===current?' (current)':''}</option>`).join('')}</select>
+      <button class="btn-out emc-suggest-btn" data-emc-reassign>Assign</button>
+    </div>`;
+}
+function emAssigneeSuggestionsHtml(){
   if(emAssignee.state==='loading')return '<div class="emc-loading"><span class="spinner-sm"></span> Reading who resolved similar tickets…</div>';
   if(emAssignee.state==='error')return `<div class="emc-note">Could not work this out: ${esc(emAssignee.message||'unknown error')}</div>`;
   if(!emAssignee.rows.length)return '<div class="emc-note">No resolved history for this client, company or category to go on.</div>';
@@ -19807,20 +20009,25 @@ function renderEmContext(){
     if(emContextOpen.similar&&emSimilar.state==='idle')emLoadSimilar(id);
     if(emContextOpen.assignee&&emAssignee.state==='idle')emLoadAssignee(id);
   }));
-  host.querySelectorAll('[data-emc-assign]').forEach(btn=>btn.addEventListener('click',async ()=>{
+  const assignFromPanel=async (agent,source,reason)=>{
     const ticket=allTickets.find(t=>t.id===id);
-    if(!ticket)return;
+    if(!ticket||!agent)return;
+    if(normalizeSupportAgent(ticketAssignee[id]||'')===agent)return showToast('Already assigned to '+agent);
     // Accepting a suggestion is still an assignment, so it answers to the same
     // rule - a support agent may accept one that names them, not one that
     // names a colleague.
-    if(!currentUserCanAssignTicketTo(ticket,btn.dataset.emcAssign))return showToast(assignRefusedMessage(),'warn');
+    if(!currentUserCanAssignTicketTo(ticket,agent))return showToast(assignRefusedMessage(),'warn');
     const before=captureTicketState([id],['assignee']);
-    setTicketAssignee(id,btn.dataset.emcAssign,Date.now(),'suggestion');
-    pushUndo(`Assigned ${ticketDisplayNumber(id)} to ${btn.dataset.emcAssign}`,()=>restoreTicketState(before,['assignee']));
+    setTicketAssignee(id,agent,Date.now(),source);
+    // Same as the card's agent menu: a person's pick, so auto-assign keeps off it.
+    if(source==='manual'){ticketAssignmentMode[id]='support';manualSupportOverride[id]=true;}
+    pushUndo(`Assigned ${ticketDisplayNumber(id)} to ${agent}`,()=>restoreTicketState(before,['assignee']));
     renderActiveView();renderEmContext();
-    await saveState('assign_from_suggestion');
-    showToast('Assigned to '+btn.dataset.emcAssign,'ok');
-  }));
+    await saveState(reason);
+    showToast('Assigned to '+agent,'ok');
+  };
+  host.querySelectorAll('[data-emc-assign]').forEach(btn=>btn.addEventListener('click',()=>assignFromPanel(btn.dataset.emcAssign,'suggestion','assign_from_suggestion')));
+  host.querySelector('[data-emc-reassign]')?.addEventListener('click',()=>assignFromPanel(host.querySelector('#emc-reassign-sel')?.value,'manual','admin_reassign_from_panel'));
   host.querySelectorAll('[data-emc-open]').forEach(btn=>btn.addEventListener('click',()=>{
     const ticket=allTickets.find(t=>t.id===btn.dataset.emcOpen);
     if(!ticket)return showToast('That ticket is not on the board right now');
@@ -20881,7 +21088,8 @@ async function fbSubmit() {
     // message, where an eye looking for confirmation already is.
     if (mine) mine.delivered = true;
 
-    if (out.notified || out.emailed) await fbSay('Feedback sent - the platform team has it.', 'ok', 260);
+    if (out.notified || out.emailed) await fbSay(out.ticketCreated ? 'Feedback sent - the platform team has it, and a ticket is open for it on the board.' : 'Feedback sent - the platform team has it.', 'ok', 260);
+    else if (out.ticketCreated) await fbSay('Feedback saved - a ticket is open for it on the board.', 'ok', 260);
     else if (out.stored) { await fbSay('Written down, but it could not be delivered yet. It is saved and someone will see it.', 'warn', 260); return; }
     else { await fbSay('That could not be sent or saved. Please tell someone directly.', 'bad', 260); return; }
 

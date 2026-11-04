@@ -1,6 +1,43 @@
 {
   "patches": [
     {
+      "date": "2026-10-29",
+      "title": "Find & Follow",
+      "notes": [
+        { "type": "new", "text": "The Archive Inbox has a search box: find an archived ticket by number, Jira key, sender, subject or company." },
+        { "type": "new", "text": "Every piece of feedback you send now opens a ticket on the board for the support team, so it gets tracked and worked like any other ticket." },
+        { "type": "new", "text": "Admins can reassign a ticket to any support agent from \"Who should take this\" inside the ticket, not just to the people it suggests." },
+        { "type": "fixed", "text": "A frozen SLA now really stops: when the freeze is lifted, the timer picks up exactly where it was instead of coming back overdue. The same fix applies to snoozes, Waiting on Contact, Jira links and Velma bugs." },
+        { "type": "fixed", "text": "Every ticket that was frozen, or came out of a freeze, gets a fresh SLA. Tickets still frozen stay frozen and get their full time when released." }
+      ]
+    },
+    {
+      "date": "2026-10-28",
+      "title": "Clean Sweep",
+      "notes": [
+        { "type": "new", "text": "Every card now has a Spam button that sends the ticket straight to the Spam Inbox, along with other mail from the same sender. Restore it from the Spam Inbox if it was a mistake." },
+        { "type": "improved", "text": "Tickets archived without being resolved no longer count in the KPIs. Tickets archived after being resolved still count as resolved work." },
+        { "type": "fixed", "text": "KPIs now update on time at 00:00, 09:00, 12:00 and 16:00 Tunisia time, and the page picks up each update even if your PC was asleep." },
+        { "type": "new", "text": "Admins have a Day report on the KPI page: every ticket resolved on a chosen day, by agent, with SLA met or missed." }
+      ]
+    },
+    {
+      "date": "2026-10-26",
+      "title": "Handover & Home Runs",
+      "notes": [
+        { "type": "improved", "text": "When a ticket is reassigned to someone else, its SLA starts over, so the new owner gets the full time to answer. The badge says \"since reassigned\" when that is why the clock restarted." },
+        { "type": "new", "text": "Projects can now run on your own PC: once the runner is set up there, pressing Run hands the job straight to your Claude, with no tab to open and nothing to paste. While a run waits, the card tells you who is picking it up." }
+      ]
+    },
+    {
+      "date": "2026-10-22",
+      "title": "Counts Line Up",
+      "notes": [
+        { "type": "fixed", "text": "The My resolved count now matches the Resolved figure in your KPIs exactly, and updates at the same times. CS agents get it too, and admins get a Resolved chip for the whole team." },
+        { "type": "fixed", "text": "Patch notes now show up on the live board too, not just the test one." }
+      ]
+    },
+    {
       "date": "2026-10-19",
       "title": "Patch Notes",
       "notes": [
