@@ -1,6 +1,15 @@
 {
   "patches": [
     {
+      "date": "2026-11-04",
+      "title": "Clean Slate",
+      "notes": [
+        { "type": "fixed", "text": "Every overdue ticket, and every ticket archived without being resolved, gets a fresh SLA. Tickets already resolved keep their SLA result." },
+        { "type": "fixed", "text": "KPIs update more reliably at 00:00, 09:00, 12:00 and 16:00 Tunisia time, even if the server was busy or paused right at the update time." },
+        { "type": "fixed", "text": "Tickets archived after being resolved now count as resolved work everywhere on the KPI page, as intended. Tickets archived without being resolved still don't count." }
+      ]
+    },
+    {
       "date": "2026-10-29",
       "title": "Find & Follow",
       "notes": [
