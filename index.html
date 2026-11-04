@@ -9770,6 +9770,9 @@ let ticketSendBackAlerts={};
 let ticketReopenedAt={};
 let ticketArchived={}; // ticketId -> {archivedAt,archivedBy,reason:'manual'|'resolved_confirmed'}
 function isArchivedTicket(id){return !!ticketArchived[id];}
+// Put away without being resolved: left out of the KPIs, as on the server. Archived
+// after resolving still counts as resolved work.
+function isArchivedOpenTicket(id){return isArchivedTicket(id)&&normalizeTicketStage(ticketState[id]||'new')!=='res';}
 // A ticket only counts toward an agent's workload while it is still open.
 // Resolved tickets used to be counted here, which inflated every agent pill
 // (an agent with 17 open and 18 resolved showed 35) and - worse - made
@@ -15335,9 +15338,9 @@ function renderKpiViewLocal(){
   // Duplicates are held out here exactly as the server holds them out, so the
   // offline fallback can't quietly report a different, friendlier number than
   // the live dashboard.
-  const duplicatesInView=allTickets.filter(t=>isDuplicateTicket(t.id)&&ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id));
+  const duplicatesInView=allTickets.filter(t=>isDuplicateTicket(t.id)&&ticketCategory[t.id]!=='Spam'&&!isArchivedOpenTicket(t.id));
   const inRange=allTickets
-    .filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&!isDuplicateTicket(t.id))
+    .filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedOpenTicket(t.id)&&!isDuplicateTicket(t.id))
     .filter(t=>{const ms=ticketTimestampMs(t);return ms!==null&&ms>=bounds.start&&ms<=bounds.end;})
     .filter(ticketMatchesCompany)
     .filter(t=>!activeJira||!!ticketJira[t.id])

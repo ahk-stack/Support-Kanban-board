@@ -5965,6 +5965,40 @@ async function resetFrozenSlaClocksOnce() {
   }).catch((error) => console.error('Frozen SLA reset marker write failed:', error?.message || error));
   console.log(`SLA reset for ${frozen.length} frozen and ${released.length} released ticket(s).`);
 }
+/* One-off: a fresh SLA, from the moment this runs, for every ticket archived
+   without being resolved. They are already left out of the KPIs; this means
+   one brought back from the archive does not return overdue. Overdue tickets
+   still on the board keep their clock. Resolved tickets are never touched -
+   their SLA is a finished measurement. Once per database, like the resets
+   above. */
+const SLA_ARCHIVED_OPEN_RESET_SYNC_TYPE = 'sla_archived_open_reset_v1';
+async function resetArchivedOpenSlaClocksOnce() {
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_ARCHIVED_OPEN_RESET_SYNC_TYPE, status: 'success' } });
+  if (done) return;
+  const now = Date.now();
+  const state = safeReadState();
+  const archives = state.ticketArchived || {};
+  const isOpen = id => String(state.ticketState?.[id] || 'new') !== 'res';
+  const rows = await prisma.ticket.findMany({ where: { externalId: { in: Object.keys(archives) } }, select: { externalId: true, status: true } });
+  const ids = rows
+    .filter(t => archives[t.externalId] && normalizeDbStatusForBoard(t.status) !== 'res' && isOpen(t.externalId))
+    .map(t => t.externalId);
+  if (ids.length) writeServerFieldsIntoState(ids.map(id => ({ field: 'ticketSlaResetAt', id, value: now })));
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_ARCHIVED_OPEN_RESET_SYNC_TYPE,
+      status: 'success',
+      message: `SLA reset for ${ids.length} archived unresolved ticket(s).`,
+      metadata: { at: new Date(now).toISOString(), tickets: ids }
+    }
+  }).catch((error) => console.error('Archived SLA reset marker write failed:', error?.message || error));
+  if (ids.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: ids } }, data: { slaResetAt: new Date(now) } })
+      .catch((error) => console.error('Archived SLA reset database update failed:', error?.message || error));
+  }
+  console.log(`SLA reset for ${ids.length} archived unresolved ticket(s).`);
+}
 app.post('/api/admin/sla/restart-at-baseline', requireAdmin, async (req, res) => {
   try {
     const out = await restartOpenSlaClocksAtBaselineOnce();
@@ -6813,27 +6847,38 @@ async function takeKpiSnapshot(checkpoint) {
     const entry = snoozes[t.externalId];
     if (entry && Number(entry.at) > 0) t.snooze = { at: Number(entry.at), until: Number(entry.until) || 0 };
   }
-  kpiSnapshot = { checkpoint, takenAt: Date.now(), tickets, spam, archivedOpen };
+  const taken = { checkpoint, takenAt: Date.now(), tickets, spam, archivedOpen };
+  // A slow read for an earlier checkpoint must not replace a later one.
+  if (!kpiSnapshot || checkpoint >= kpiSnapshot.checkpoint) kpiSnapshot = taken;
   console.log(`KPI snapshot for ${new Date(checkpoint).toISOString()}: ${tickets.length} ticket(s), ${spam.length} spam, ${archivedOpen.length} archived unresolved.`);
-  return kpiSnapshot;
+  return taken;
 }
+// The checkpoint the read in flight is for. A read started just before a
+// checkpoint used to be handed to the callers after it, so the checkpoint
+// itself was skipped until someone opened the dashboard.
+let kpiSnapshotLoadingFor = 0;
 async function currentKpiSnapshot() {
   const checkpoint = kpiCheckpointAtOrBefore();
   if (kpiSnapshot && kpiSnapshot.checkpoint >= checkpoint) return kpiSnapshot;
-  if (!kpiSnapshotLoading) {
-    kpiSnapshotLoading = takeKpiSnapshot(checkpoint).finally(() => { kpiSnapshotLoading = null; });
+  if (!kpiSnapshotLoading || kpiSnapshotLoadingFor < checkpoint) {
+    const loading = takeKpiSnapshot(checkpoint).finally(() => { if (kpiSnapshotLoading === loading) kpiSnapshotLoading = null; });
+    kpiSnapshotLoading = loading;
+    kpiSnapshotLoadingFor = checkpoint;
   }
   return kpiSnapshotLoading;
 }
 // Taken on the hour whether anyone is looking or not, so the figures are the
 // tickets as they stood at the checkpoint rather than at the first view after it.
+// Checked every few seconds rather than by one timer set hours ahead: that
+// timer ran on the process's clock, not the wall clock, so a paused VM or a
+// clock correction could fire it late, and a failed read waited for the next
+// checkpoint. This also retries a failed read straight away.
+const KPI_SNAPSHOT_CHECK_MS = 15 * 1000;
 function scheduleKpiSnapshots() {
-  const wait = Math.max(1000, kpiNextCheckpointAfter() - Date.now() + 500);
-  setTimeout(() => {
-    currentKpiSnapshot()
-      .catch(error => console.error('KPI snapshot failed:', error?.message || error))
-      .finally(scheduleKpiSnapshots);
-  }, Math.min(wait, 2 ** 31 - 1)).unref?.();
+  setInterval(() => {
+    if (kpiSnapshot && kpiSnapshot.checkpoint >= kpiCheckpointAtOrBefore()) return;
+    currentKpiSnapshot().catch(error => console.error('KPI snapshot failed:', error?.message || error));
+  }, KPI_SNAPSHOT_CHECK_MS).unref?.();
 }
 function kpiSnapshotInfo(snapshot) {
   return {
@@ -15524,6 +15569,8 @@ const server = app.listen(PORT, () => {
     .catch((error) => console.error('SLA manual reset failed:', error?.message || error))
     .then(() => resetFrozenSlaClocksOnce())
     .catch((error) => console.error('Frozen SLA reset failed:', error?.message || error))
+    .then(() => resetArchivedOpenSlaClocksOnce())
+    .catch((error) => console.error('Archived SLA reset failed:', error?.message || error))
     .then(() => currentKpiSnapshot())
     .catch((error) => console.error('KPI snapshot failed:', error?.message || error))
     .finally(scheduleKpiSnapshots);
