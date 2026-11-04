@@ -2126,6 +2126,36 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
   });
   return total;
 }
+/* The time an open or resolved ticket's SLA has run. The agent's shift time,
+   unless they have no shift logged on this board at all inside the window:
+   then office hours, less their time off, flagged as estimated. Counting only
+   shift time, a ticket held by someone who never logs in to this board (every
+   agent, on preprod) never moved, so Overdue read 0 next to resolved tickets
+   from the same weeks reading late on office hours. Kept out of shiftElapsedMs
+   itself, which shiftPointBefore needs to only grow as the window widens. */
+function agentHasShiftIn(fromMs, toMs, agentCode) {
+  const rec = shiftStore.agents[String(agentCode || '').trim().toUpperCase()];
+  if (!rec || !Array.isArray(rec.sessions)) return false;
+  const now = Date.now();
+  return rec.sessions.some(s => Number(s.start || 0) < toMs && (s.end === null || s.end === undefined ? now : Number(s.end)) > fromMs);
+}
+function slaClockMs(fromMs, toMs, agentCode) {
+  // Until the shift history has loaded, every agent looks like they never
+  // logged in; the shift clock is the lesser evil for that moment.
+  if (!shiftStoreDbReady || agentHasShiftIn(fromMs, toMs, agentCode)) return { ms: shiftElapsedMs(fromMs, toMs, agentCode), estimated: false };
+  const rec = shiftStore.agents[String(agentCode || '').trim().toUpperCase()];
+  const now = Date.now();
+  let ms = businessMsInRange(fromMs, toMs);
+  let cursor = fromMs;
+  (rec?.leaves || []).map(p => [Math.max(Number(p.start || 0), fromMs), Math.min(leavePeriodEnd(p, now), toMs)])
+    .filter(([a, b]) => b > a)
+    .sort((x, y) => x[0] - y[0])
+    .forEach(([a, b]) => {
+      const from = Math.max(a, cursor);
+      if (b > from) { ms -= businessMsInRange(from, b); cursor = b; }
+    });
+  return { ms: Math.max(0, ms), estimated: true };
+}
 // The inverse of shiftElapsedMs: the latest moment, no earlier than floor,
 // from which `amount` of the agent's shift time has run by `to`. Shift time
 // only grows as the start moves back, so a binary search finds it.
@@ -2263,13 +2293,15 @@ function liveTicketSlaSnapshot(ticket, now = Date.now()) {
     return { ...base, state: left >= 0 ? 'met' : 'breached', estimated: true, shiftMs: officeMs, wallMs, overdueMs: Math.max(0, -left) };
   }
 
-  const shiftMs = shiftElapsedMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
+  const clock = slaClockMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
+  const shiftMs = clock.ms;
+  const estimated = clock.estimated ? { estimated: true } : {};
   const remaining = targetMs - shiftMs;
   if (resolved) {
-    return { ...base, state: remaining >= 0 ? 'met' : 'breached', shiftMs, wallMs, overdueMs: Math.max(0, -remaining) };
+    return { ...base, state: remaining >= 0 ? 'met' : 'breached', ...estimated, shiftMs, wallMs, overdueMs: Math.max(0, -remaining) };
   }
-  if (remaining <= 0) return { ...base, state: 'overdue', shiftMs, wallMs, overdueMs: -remaining };
-  return { ...base, state: remaining / targetMs <= 0.25 ? 'at_risk' : 'on_track', shiftMs, wallMs };
+  if (remaining <= 0) return { ...base, state: 'overdue', ...estimated, shiftMs, wallMs, overdueMs: -remaining };
+  return { ...base, state: remaining / targetMs <= 0.25 ? 'at_risk' : 'on_track', ...estimated, shiftMs, wallMs };
 }
 
 const hoursFromMs = ms => Math.round((Number(ms || 0) / 3600000) * 10) / 10;
@@ -7386,6 +7418,11 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
 // polled every 60s - a card nobody clicks (most of them, most of the time)
 // should not cost a full ticket list on every poll.
 const KPI_STATUS_CATEGORIES = new Set(['new', 'inp', 'wus', 'dft', 'wct', 'res']);
+// Open tickets with no SLA clock running, by why: the Off the clock card.
+const KPI_OFF_CLOCK_LABELS = {
+  no_clock: 'No assignee', jira_hold: 'Waiting on Jira', velma_hold: 'Waiting on a Velma bug',
+  contact_hold: 'Waiting on contact', leave_hold: 'Agent off', admin_hold: 'Frozen by an admin', snooze_hold: 'Snoozed'
+};
 app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
   try {
     const category = String(req.query.category || '').trim();
@@ -7410,7 +7447,7 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
       rows = scopedTickets.filter(t => isDateInBounds(t.createdAt, bounds)).map(t => kpiDrilldownRow(t));
     } else if (category === 'resolved') {
       rows = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').map(t => kpiDrilldownRow(t));
-    } else if (category === 'overdue' || category === 'atRisk' || category === 'oldestOpen') {
+    } else if (category === 'overdue' || category === 'atRisk' || category === 'oldestOpen' || category === 'onTrack' || category === 'offClock') {
       const openSnapshots = workTickets
         .filter(t => normalizeDbStatusForBoard(t.status) !== 'res')
         .map(t => ({ t, snapshot: ticketSlaSnapshot(t, now) }));
@@ -7422,6 +7459,14 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
         rows = openSnapshots.filter(x => x.snapshot.state === 'at_risk')
           .sort((a, b) => b.snapshot.shiftMs - a.snapshot.shiftMs)
           .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.ageMs) + 'h open'));
+      } else if (category === 'onTrack') {
+        rows = openSnapshots.filter(x => x.snapshot.state === 'on_track')
+          .sort((a, b) => b.snapshot.shiftMs - a.snapshot.shiftMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.shiftMs) + 'h of ' + snapshot.targetHours + 'h used'));
+      } else if (category === 'offClock') {
+        rows = openSnapshots.filter(x => KPI_OFF_CLOCK_LABELS[x.snapshot.state])
+          .sort((a, b) => b.snapshot.ageMs - a.snapshot.ageMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, KPI_OFF_CLOCK_LABELS[snapshot.state]));
       } else {
         rows = openSnapshots.sort((a, b) => b.snapshot.ageMs - a.snapshot.ageMs)
           .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.ageMs) + 'h open'));
