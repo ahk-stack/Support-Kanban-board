@@ -252,6 +252,7 @@ const JIRA_EMAIL = process.env.JIRA_EMAIL || process.env.JIRA_USER_EMAIL || '';
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN || '';
 const JIRA_PROJECT_KEY = process.env.JIRA_PROJECT_KEY || '';
 const JIRA_ISSUE_TYPE = process.env.JIRA_ISSUE_TYPE || 'Task';
+const JIRA_REQUEST_TIMEOUT_MS = 10000;
 const TEAMS_EMAIL_DOMAIN = String(process.env.TEAMS_EMAIL_DOMAIN || 'quinta.im').trim().toLowerCase();
 const TEAMS_FALLBACK_EMAIL_DOMAIN = String(process.env.TEAMS_FALLBACK_EMAIL_DOMAIN || 'quicktext.im').trim().toLowerCase();
 const POWER_AUTOMATE_RESOLVED_WEBHOOK_URL = String(
@@ -1225,19 +1226,22 @@ async function jiraApiRequest(config, pathname, options = {}) {
   const url = `${config.baseUrl}${pathname.startsWith('/') ? '' : '/'}${pathname}`;
   const modes = config.authMode === 'basic'
     ? ['basic']
-    : (config.authMode === 'bearer' ? ['bearer'] : ['basic', 'bearer']);
+    : (config.authMode === 'bearer' ? ['bearer'] : (config.accessToken ? ['bearer', 'basic'] : ['basic', 'bearer']));
   let lastStatus = 0;
   let lastText = '';
   for (const mode of modes) {
     if (mode === 'basic' && (!config.email || !config.apiToken)) continue;
     if (mode === 'bearer' && !(config.accessToken || config.apiToken)) continue;
+    // Bounded: a Jira that never answers used to hold the board's details
+    // request open indefinitely, and the panel sat on "Loading..." for good.
     const response = await fetch(url, {
       method: options.method || 'GET',
       headers: {
         ...jiraAuthHeaders(config, mode),
         ...(options.headers || {})
       },
-      body: options.body
+      body: options.body,
+      signal: AbortSignal.timeout(JIRA_REQUEST_TIMEOUT_MS)
     });
     if (response.ok) {
       if (response.status === 204) return null;
@@ -1292,9 +1296,12 @@ function jiraIssueSummary(issue) {
 async function jiraFetchIssue(config, issueKey) {
   const key = normalizeJiraKey(issueKey);
   if (!key) throw new Error('missing_jira_issue_key');
+  // v2 first: it answers on Jira Cloud and on a self-hosted Jira alike, while a
+  // self-hosted one answers v3 with a 200 login page - a wasted round trip per
+  // issue before falling through to v2 anyway.
   const paths = [
-    `/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`,
     `/rest/api/2/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`,
+    `/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`,
     `/rest/api/latest/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`
   ];
   let lastError = null;
@@ -2207,8 +2214,8 @@ function liveTicketSlaSnapshot(ticket, now = Date.now()) {
   const base = { targetHours, resolved, state: 'no_clock', shiftMs: 0, wallMs: 0, ageMs: 0, overdueMs: 0 };
   if (!Number.isFinite(createdMs)) return base;
 
-  // Frozen by an admin: the clock stopped when the hold began. Released, the
-  // restart point moves forward by the hold (see /api/tickets/:id/sla-hold).
+  // Frozen by an admin: the clock stopped when the hold began. Released, it
+  // restarts from the release with a fresh SLA (see /api/tickets/:id/sla-hold).
   const holdMs = ticket?.slaHoldAt ? new Date(ticket.slaHoldAt).getTime() : NaN;
   const held = Number.isFinite(holdMs);
   const endMs = Math.min(resolved
@@ -5791,9 +5798,10 @@ app.delete('/api/velma-bug/link/:kanbanTicketId', requireAuth, async (req, res) 
 
    Held, the clock stops where it is: the badge says who froze it, and the
    ticket drops out of overdue and at risk (admin_hold in ticketSlaSnapshot).
-   Released, it resumes from where it stopped - the restart point moves
-   forward by the working time the hold lasted, like the end of any other
-   hold - so the freeze neither counts against the agent nor gives time back. */
+   Released, the ticket gets a fresh SLA: the clock restarts from the moment
+   of release with its full target, whatever it had used before the freeze.
+   This is the admin freeze only - snooze, Waiting on Contact, Jira and Velma
+   holds still resume where they stopped (slaResumePointAfterHold). */
 app.post('/api/tickets/:externalId/sla-hold', requireAdmin, async (req, res) => {
   try {
     const externalId = String(req.params.externalId || '').trim();
@@ -5808,7 +5816,7 @@ app.post('/api/tickets/:externalId/sla-hold', requireAdmin, async (req, res) => 
 
     const value = hold ? { at: now, by: actor } : null;
     const entries = [{ field: 'ticketSlaHold', id: externalId, value }];
-    const resumeAt = hold ? null : slaResumePointAfterHold(state, externalId, Number(current.at || 0), now);
+    const resumeAt = hold ? null : now;
     if (resumeAt) entries.push({ field: 'ticketSlaResetAt', id: externalId, value: resumeAt });
     writeServerFieldsIntoState(entries);
 
@@ -6326,15 +6334,20 @@ app.get('/api/jira/issues', requireAuth, async (req, res) => {
       .map(normalizeJiraKey)
       .filter(Boolean)
       .slice(0, 50);
-    const issues = [];
-    for (const key of keys) {
-      try {
-        const issue = await jiraFetchIssue(jira, key);
-        issues.push(issue);
-      } catch (error) {
-        issues.push({ key, error: String(error.message || error) });
+    // A few at a time rather than one after another: each issue is several
+    // round trips, and the board waits for the whole list.
+    const issues = new Array(keys.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(5, keys.length) }, async () => {
+      while (next < keys.length) {
+        const i = next++;
+        try {
+          issues[i] = await jiraFetchIssue(jira, keys[i]);
+        } catch (error) {
+          issues[i] = { key: keys[i], error: String(error.message || error) };
+        }
       }
-    }
+    }));
     return res.json({
       connected: true,
       browseBaseUrl: jira.browseBaseUrl,
@@ -7429,6 +7442,18 @@ app.get('/api/tickets/my-resolved', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Read my resolved failed:', error);
     return res.status(500).json({ error: 'read_my_resolved_failed' });
+  }
+});
+/* Admins: retake the KPI snapshot now instead of waiting for the next
+   checkpoint. It replaces the current checkpoint's snapshot, so everyone reads
+   the new figures on their next pull, and the next checkpoint still runs. */
+app.post('/api/tickets/kpis/snapshot', requireAdmin, async (req, res) => {
+  try {
+    const snapshot = await takeKpiSnapshot(kpiCheckpointAtOrBefore());
+    return res.json({ ok: true, snapshot: kpiSnapshotInfo(snapshot) });
+  } catch (error) {
+    console.error('Forced KPI snapshot failed:', error);
+    return res.status(500).json({ error: String(error.message || error) });
   }
 });
 /* Admins' day report: every ticket resolved on one calendar day (the SLA's
