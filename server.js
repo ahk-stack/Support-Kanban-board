@@ -2214,8 +2214,8 @@ function liveTicketSlaSnapshot(ticket, now = Date.now()) {
   const base = { targetHours, resolved, state: 'no_clock', shiftMs: 0, wallMs: 0, ageMs: 0, overdueMs: 0 };
   if (!Number.isFinite(createdMs)) return base;
 
-  // Frozen by an admin: the clock stopped when the hold began. Released, the
-  // restart point moves forward by the hold (see /api/tickets/:id/sla-hold).
+  // Frozen by an admin: the clock stopped when the hold began. Released, it
+  // restarts from the release with a fresh SLA (see /api/tickets/:id/sla-hold).
   const holdMs = ticket?.slaHoldAt ? new Date(ticket.slaHoldAt).getTime() : NaN;
   const held = Number.isFinite(holdMs);
   const endMs = Math.min(resolved
@@ -5798,9 +5798,10 @@ app.delete('/api/velma-bug/link/:kanbanTicketId', requireAuth, async (req, res) 
 
    Held, the clock stops where it is: the badge says who froze it, and the
    ticket drops out of overdue and at risk (admin_hold in ticketSlaSnapshot).
-   Released, it resumes from where it stopped - the restart point moves
-   forward by the working time the hold lasted, like the end of any other
-   hold - so the freeze neither counts against the agent nor gives time back. */
+   Released, the ticket gets a fresh SLA: the clock restarts from the moment
+   of release with its full target, whatever it had used before the freeze.
+   This is the admin freeze only - snooze, Waiting on Contact, Jira and Velma
+   holds still resume where they stopped (slaResumePointAfterHold). */
 app.post('/api/tickets/:externalId/sla-hold', requireAdmin, async (req, res) => {
   try {
     const externalId = String(req.params.externalId || '').trim();
@@ -5815,7 +5816,7 @@ app.post('/api/tickets/:externalId/sla-hold', requireAdmin, async (req, res) => 
 
     const value = hold ? { at: now, by: actor } : null;
     const entries = [{ field: 'ticketSlaHold', id: externalId, value }];
-    const resumeAt = hold ? null : slaResumePointAfterHold(state, externalId, Number(current.at || 0), now);
+    const resumeAt = hold ? null : now;
     if (resumeAt) entries.push({ field: 'ticketSlaResetAt', id: externalId, value: resumeAt });
     writeServerFieldsIntoState(entries);
 
