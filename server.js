@@ -5965,64 +5965,39 @@ async function resetFrozenSlaClocksOnce() {
   }).catch((error) => console.error('Frozen SLA reset marker write failed:', error?.message || error));
   console.log(`SLA reset for ${frozen.length} frozen and ${released.length} released ticket(s).`);
 }
-/* One-off: a fresh SLA, from the moment this runs, for every open ticket that
-   is overdue and for every ticket archived without being resolved. Archived
-   open tickets are already left out of the KPIs; resetting them too means one
-   brought back from the archive does not return overdue. Overdue is judged by
-   the KPI dashboard's clock, which counts the agent's shift time, so this waits
-   for the shift history to load from the database: without it the time worked
-   is under-counted and overdue tickets are missed. Resolved tickets are never
-   touched - their SLA is a finished measurement. Once per database, like the
-   resets above. */
-const SLA_OVERDUE_RESET_SYNC_TYPE = 'sla_overdue_and_archived_reset_v1';
-async function waitForShiftStoreDb(timeoutMs) {
-  const until = Date.now() + timeoutMs;
-  while (!shiftStoreDbReady && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 2000));
-  return shiftStoreDbReady;
-}
-async function resetOverdueSlaClocksOnce() {
-  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_OVERDUE_RESET_SYNC_TYPE, status: 'success' } });
+/* One-off: a fresh SLA, from the moment this runs, for every ticket archived
+   without being resolved. They are already left out of the KPIs; this means
+   one brought back from the archive does not return overdue. Overdue tickets
+   still on the board keep their clock. Resolved tickets are never touched -
+   their SLA is a finished measurement. Once per database, like the resets
+   above. */
+const SLA_ARCHIVED_OPEN_RESET_SYNC_TYPE = 'sla_archived_open_reset_v1';
+async function resetArchivedOpenSlaClocksOnce() {
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_ARCHIVED_OPEN_RESET_SYNC_TYPE, status: 'success' } });
   if (done) return;
-  if (!(await waitForShiftStoreDb(5 * 60 * 1000))) {
-    console.warn('Overdue SLA reset skipped: the shift history has not loaded yet. It runs at the next start.');
-    return;
-  }
-  // Who is off decides leave_hold, which is not overdue.
-  await loadAgentLeave();
   const now = Date.now();
   const state = safeReadState();
   const archives = state.ticketArchived || {};
-  const snoozes = state.ticketSnooze || {};
   const isOpen = id => String(state.ticketState?.[id] || 'new') !== 'res';
-  const rows = await prisma.ticket.findMany({ select: KPI_TICKET_SELECT });
-  const archived = [];
-  const overdue = [];
-  for (const t of rows) {
-    if (!t.externalId || normalizeDbStatusForBoard(t.status) === 'res' || !isOpen(t.externalId)) continue;
-    if (archives[t.externalId]) { archived.push(t.externalId); continue; }
-    const entry = snoozes[t.externalId];
-    if (entry && Number(entry.at) > 0) t.snooze = { at: Number(entry.at), until: Number(entry.until) || 0 };
-    if (liveTicketSlaSnapshot(t, now).state === 'overdue') overdue.push(t.externalId);
-  }
-  const ids = [...archived, ...overdue];
+  const rows = await prisma.ticket.findMany({ where: { externalId: { in: Object.keys(archives) } }, select: { externalId: true, status: true } });
+  const ids = rows
+    .filter(t => archives[t.externalId] && normalizeDbStatusForBoard(t.status) !== 'res' && isOpen(t.externalId))
+    .map(t => t.externalId);
   if (ids.length) writeServerFieldsIntoState(ids.map(id => ({ field: 'ticketSlaResetAt', id, value: now })));
   await prisma.syncLog.create({
     data: {
       provider: 'kanban',
-      syncType: SLA_OVERDUE_RESET_SYNC_TYPE,
+      syncType: SLA_ARCHIVED_OPEN_RESET_SYNC_TYPE,
       status: 'success',
-      message: `SLA reset for ${overdue.length} overdue and ${archived.length} archived unresolved ticket(s).`,
-      metadata: { at: new Date(now).toISOString(), overdue, archived }
+      message: `SLA reset for ${ids.length} archived unresolved ticket(s).`,
+      metadata: { at: new Date(now).toISOString(), tickets: ids }
     }
-  }).catch((error) => console.error('Overdue SLA reset marker write failed:', error?.message || error));
+  }).catch((error) => console.error('Archived SLA reset marker write failed:', error?.message || error));
   if (ids.length) {
     await prisma.ticket.updateMany({ where: { externalId: { in: ids } }, data: { slaResetAt: new Date(now) } })
-      .catch((error) => console.error('Overdue SLA reset database update failed:', error?.message || error));
-    // The dashboard shows the fresh clocks now rather than at the next
-    // checkpoint, even if a snapshot was taken while this waited.
-    await takeKpiSnapshot(kpiCheckpointAtOrBefore());
+      .catch((error) => console.error('Archived SLA reset database update failed:', error?.message || error));
   }
-  console.log(`SLA reset for ${overdue.length} overdue and ${archived.length} archived unresolved ticket(s).`);
+  console.log(`SLA reset for ${ids.length} archived unresolved ticket(s).`);
 }
 app.post('/api/admin/sla/restart-at-baseline', requireAdmin, async (req, res) => {
   try {
@@ -15594,8 +15569,8 @@ const server = app.listen(PORT, () => {
     .catch((error) => console.error('SLA manual reset failed:', error?.message || error))
     .then(() => resetFrozenSlaClocksOnce())
     .catch((error) => console.error('Frozen SLA reset failed:', error?.message || error))
-    .then(() => resetOverdueSlaClocksOnce())
-    .catch((error) => console.error('Overdue SLA reset failed:', error?.message || error))
+    .then(() => resetArchivedOpenSlaClocksOnce())
+    .catch((error) => console.error('Archived SLA reset failed:', error?.message || error))
     .then(() => currentKpiSnapshot())
     .catch((error) => console.error('KPI snapshot failed:', error?.message || error))
     .finally(scheduleKpiSnapshots);
