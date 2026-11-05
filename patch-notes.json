@@ -1,6 +1,15 @@
 {
   "patches": [
     {
+      "date": "2026-11-04",
+      "title": "Clean Slate",
+      "notes": [
+        { "type": "fixed", "text": "Every ticket archived without being resolved gets a fresh SLA, so one brought back from the archive doesn't return overdue. Tickets on the board keep their SLA as it is." },
+        { "type": "fixed", "text": "KPIs update more reliably at 00:00, 09:00, 12:00 and 16:00 Tunisia time, even if the server was busy or paused right at the update time." },
+        { "type": "fixed", "text": "Tickets archived after being resolved now count as resolved work everywhere on the KPI page, as intended. Tickets archived without being resolved still don't count." }
+      ]
+    },
+    {
       "date": "2026-10-29",
       "title": "Find & Follow",
       "notes": [
@@ -8,7 +17,10 @@
         { "type": "new", "text": "Every piece of feedback you send now opens a ticket on the board for the support team, so it gets tracked and worked like any other ticket." },
         { "type": "new", "text": "Admins can reassign a ticket to any support agent from \"Who should take this\" inside the ticket, not just to the people it suggests." },
         { "type": "fixed", "text": "A frozen SLA now really stops: when the freeze is lifted, the timer picks up exactly where it was instead of coming back overdue. The same fix applies to snoozes, Waiting on Contact, Jira links and Velma bugs." },
-        { "type": "fixed", "text": "Every ticket that was frozen, or came out of a freeze, gets a fresh SLA. Tickets still frozen stay frozen and get their full time when released." }
+        { "type": "fixed", "text": "Every ticket that was frozen, or came out of a freeze, gets a fresh SLA. Tickets still frozen stay frozen and get their full time when released." },
+        { "type": "fixed", "text": "Jira details on a card (status, assignee, reporter, comments) load again and much faster. If Jira can't be reached, the card now says so instead of showing \"Loading...\" forever." },
+        { "type": "new", "text": "Admins have an \"Update now\" button on the KPI page that recalculates the figures right away for everyone, without waiting for the next scheduled update." },
+        { "type": "fixed", "text": "Reassigning a ticket from inside it now updates the owner and the SLA at the top of the ticket straight away, showing the fresh SLA the new owner gets. A reassignment's fresh SLA also no longer gets lost if the board reloads right after." }
       ]
     },
     {

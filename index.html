@@ -7834,6 +7834,8 @@ th {
 
 .velma-details {
   margin-top: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
   padding: 8px 9px;
   border-radius: 10px;
   border: 1px solid color-mix(in srgb, var(--violet-600) 35%, transparent);
@@ -8521,6 +8523,7 @@ th {
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--legacy-666);">
       <span id="kpi-freshness">-</span>
       <button class="btn-out" id="kpi-refresh-now" type="button" style="font-size:13px;padding:3px 9px;" title="Pulls again - the figures themselves only change at 00:00, 09:00, 12:00 and 16:00 (Tunisia time)">Refresh</button>
+      <button class="btn-out" id="kpi-force-update" type="button" style="font-size:13px;padding:3px 9px;" title="Recalculates the figures now from the current tickets, for everyone, without waiting for the next update" hidden>Update now</button>
       <button class="btn-out" id="kpi-day-report-btn" type="button" style="font-size:13px;padding:3px 9px;" title="Every ticket resolved on a day, by agent (Tunisia time)" hidden>Day report</button>
     </div>
   </div>
@@ -9655,7 +9658,7 @@ let ticketJira={};   // ticketId  Jira key (e.g. 'QT-1234') | null
    puts the SLA on hold (getSLAStatus). */
 let ticketVelmaBug={};
 // ticketId -> { at, by }: an admin froze the SLA clock at `at`. Server-owned
-// (POST /api/tickets/:id/sla-hold); released, the clock resumes where it stopped.
+// (POST /api/tickets/:id/sla-hold); released, the ticket gets a fresh SLA from then.
 let ticketSlaHold={};
 // ticketId -> the ticket id this one duplicates. The same problem reaches the
 // helpdesk twice often enough (a resend, a reply Outlook threads under a fresh
@@ -9767,6 +9770,9 @@ let ticketSendBackAlerts={};
 let ticketReopenedAt={};
 let ticketArchived={}; // ticketId -> {archivedAt,archivedBy,reason:'manual'|'resolved_confirmed'}
 function isArchivedTicket(id){return !!ticketArchived[id];}
+// Put away without being resolved: left out of the KPIs, as on the server. Archived
+// after resolving still counts as resolved work.
+function isArchivedOpenTicket(id){return isArchivedTicket(id)&&normalizeTicketStage(ticketState[id]||'new')!=='res';}
 // A ticket only counts toward an agent's workload while it is still open.
 // Resolved tickets used to be counted here, which inflated every agent pill
 // (an agent with 17 open and 18 resolved showed 35) and - worse - made
@@ -9806,6 +9812,7 @@ let appBuildVersion='unknown';
 let jiraConnection={connected:false,baseUrl:'',browseBaseUrl:'',projectKey:'',email:'',emailMasked:'',authMode:'auto',hasApiToken:false,hasAccessToken:false,configuredVia:'none',canConfigure:false};
 let jiraIssueCache={};
 let jiraIssuesLoading=false;
+let jiraIssuesRerun=false;
 const DEFAULT_COOWNER_ID_MAPPINGS={
   '27996261':'VGU',
   '227118544':'VGU',
@@ -10917,7 +10924,9 @@ async function loadState(){
   if(s.ticketClientEmail)Object.assign(ticketClientEmail,s.ticketClientEmail);
   if(s.ticketCreatedAt)Object.assign(ticketCreatedAt,s.ticketCreatedAt);
   if(s.ticketSlaResetAt&&typeof s.ticketSlaResetAt==='object'){
-    Object.entries(s.ticketSlaResetAt).forEach(([k,v])=>{const at=Number(v||0);if(k&&at>0)ticketSlaResetAt[k]=at;});
+    // The later one, as the server merges it: a restart made here (a reassignment,
+    // a reply) whose save has not landed yet must not be pulled back by a reload.
+    Object.entries(s.ticketSlaResetAt).forEach(([k,v])=>{const at=Number(v||0);if(k&&at>Number(ticketSlaResetAt[k]||0))ticketSlaResetAt[k]=at;});
   }
   if(s.ticketCreatedBy&&typeof s.ticketCreatedBy==='object')Object.assign(ticketCreatedBy,s.ticketCreatedBy);
   if(s.ticketNumbers&&typeof s.ticketNumbers==='object')adoptServerTicketNumbers(s.ticketNumbers);
@@ -11823,21 +11832,44 @@ async function refreshJiraStatus(){
   if(btn)btn.classList.toggle('hidden', !jiraConnection.canConfigure);
 }
 async function refreshLinkedJiraIssues(force=false){
-  if(jiraIssuesLoading)return;
+  // A refresh asked for while one is out (a link made mid-fetch) runs again
+  // once it lands, rather than being dropped - the new key was not in the
+  // first request, and its card would say "Loading..." until the next minute.
+  if(jiraIssuesLoading){jiraIssuesRerun=true;return;}
   const keys=[...new Set(Object.values(ticketJira).map(canonicalJiraKey).filter(Boolean))];
   if(!keys.length)return;
   jiraIssuesLoading=true;
   try{
-    const out=await apiGetJiraIssues(keys);
+    const out=await apiGetJiraIssues(keys).catch(error=>({ok:false,error:String(error?.message||error)}));
     if(out?.browseBaseUrl)JIRA_URL=out.browseBaseUrl;
-    if(Array.isArray(out?.issues)){
-      out.issues.forEach(issue=>{if(issue?.key)jiraIssueCache[String(issue.key).trim().toUpperCase()]=issue;});
-      processJiraReporterAlerts(out.issues);
-      await applyJiraDrivenBoardUpdates(out.issues);
-      if(force)renderActiveView();
+    if(Array.isArray(out?.issues)&&out.issues.length){
+      // The server answers in the order asked, so each answer is also filed
+      // under the key the card asked for: an issue moved to another project
+      // comes back with its new key, and the card kept "Loading..." for good.
+      out.issues.forEach((issue,i)=>{
+        if(!issue)return;
+        if(issue.key)jiraIssueCache[String(issue.key).trim().toUpperCase()]=issue;
+        if(keys[i])jiraIssueCache[keys[i]]=issue;
+      });
+      // A key with no answer at all (past the server's 50-key cap, or a gap)
+      // says so rather than loading forever.
+      keys.forEach(key=>{if(!jiraIssueCache[key])jiraIssueCache[key]={key,error:'Jira did not return this issue.'};});
+      // A failure in what the answers drive must not stop the cards from
+      // being redrawn with them.
+      try{
+        processJiraReporterAlerts(out.issues.filter(Boolean));
+        await applyJiraDrivenBoardUpdates(out.issues.filter(Boolean));
+      }catch(error){console.warn('Jira board updates failed:',error);}
+    }else{
+      // Nothing came back: say why on the cards that have nothing yet, instead
+      // of "Loading..." for good. Details already shown are kept.
+      const why=out?.connected===false?'Jira is not connected - an admin can connect it in Jira settings.':`Could not reach Jira (${out?.error||'no answer'}).`;
+      keys.forEach(key=>{if(!jiraIssueCache[key]||jiraIssueCache[key].error)jiraIssueCache[key]={key,error:why};});
     }
+    if(force)renderActiveView();
   }finally{
     jiraIssuesLoading=false;
+    if(jiraIssuesRerun){jiraIssuesRerun=false;void refreshLinkedJiraIssues(true);}
   }
 }
 function refreshJiraOnVisibility(){
@@ -12110,7 +12142,7 @@ document.getElementById('jira-input').addEventListener('keydown',e=>{if(e.key===
 let velmaTicketId=null;
 function velmaFieldsHtml(link,limit){
   const entries=Object.entries(link?.fields||{}).filter(([,v])=>String(v||'').trim());
-  return entries.slice(0,limit).map(([k,v])=>`<div style="margin-top:2px;"><span style="color:var(--slate-500);">${esc(k)}:</span> ${esc(String(v).slice(0,160))}</div>`).join('');
+  return entries.slice(0,limit).map(([k,v])=>`<div style="margin-top:2px;overflow-wrap:anywhere;"><span style="color:var(--slate-500);">${esc(k)}:</span> ${esc(String(v).slice(0,160))}</div>`).join('');
 }
 function openVelmaModal(id){
   velmaTicketId=id;
@@ -12187,18 +12219,18 @@ document.getElementById('velma-unlink').addEventListener('click',async()=>{
 document.getElementById('velma-input').addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('velma-save').click();});
 
 /* Admin freeze of a ticket's SLA clock. The server owns it: it stores the hold,
-   moves the restart point forward on release and pushes both to every board,
+   restarts the clock from the release (a fresh SLA) and pushes both to every board,
    so this only updates the local copy straight away. */
 async function setTicketSlaHold(id,hold){
   if(!currentUserIsAdmin())return;
-  if(!hold&&!confirm('Release the hold? The SLA timer resumes where it stopped.'))return;
+  if(!hold&&!confirm('Release the hold? The ticket gets a fresh SLA, starting now.'))return;
   const res=await fetch(`/api/tickets/${encodeURIComponent(id)}/sla-hold`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({hold})}).catch(()=>null);
   const out=res?await res.json().catch(()=>({})):{};
   if(!res||!res.ok){showToast(`SLA hold failed: ${out?.error||'network error'}`);return;}
   if(out.hold)ticketSlaHold[id]=out.hold;else delete ticketSlaHold[id];
   if(out.slaResetAt)ticketSlaResetAt[id]=Math.max(Number(ticketSlaResetAt[id]||0),Number(out.slaResetAt));
   renderActiveView();
-  showToast(hold?'SLA frozen - the timer is stopped until an admin releases it':'Hold released - the SLA timer resumes where it stopped','ok');
+  showToast(hold?'SLA frozen - the timer is stopped until an admin releases it':'Hold released - the ticket has a fresh SLA, starting now','ok');
 }
 /* Google access for the Velma bug sheet.
 
@@ -15161,6 +15193,7 @@ async function renderKpiView(opts){
   }
   const canViewAllTickets=canViewAllKpis;
   document.getElementById('kpi-day-report-btn').hidden=!canViewAllKpis;
+  document.getElementById('kpi-force-update').hidden=!canViewAllKpis;
   const agentFilterEl=document.getElementById('kpi-agent-filter');
   const teamFilterEl=document.getElementById('kpi-team-filter');
   populateKpiRangeOptions();
@@ -15305,9 +15338,9 @@ function renderKpiViewLocal(){
   // Duplicates are held out here exactly as the server holds them out, so the
   // offline fallback can't quietly report a different, friendlier number than
   // the live dashboard.
-  const duplicatesInView=allTickets.filter(t=>isDuplicateTicket(t.id)&&ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id));
+  const duplicatesInView=allTickets.filter(t=>isDuplicateTicket(t.id)&&ticketCategory[t.id]!=='Spam'&&!isArchivedOpenTicket(t.id));
   const inRange=allTickets
-    .filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&!isDuplicateTicket(t.id))
+    .filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedOpenTicket(t.id)&&!isDuplicateTicket(t.id))
     .filter(t=>{const ms=ticketTimestampMs(t);return ms!==null&&ms>=bounds.start&&ms<=bounds.end;})
     .filter(ticketMatchesCompany)
     .filter(t=>!activeJira||!!ticketJira[t.id])
@@ -15736,6 +15769,26 @@ document.getElementById('qt-detect-clear').addEventListener('click',()=>{
   qtDetectRows=[];qtDetectRender();qtDetectSetStatus('Paste URLs to begin.');
 });
 document.getElementById('kpi-refresh-now').addEventListener('click',()=>{if(viewMode==='kpi')void renderKpiView({force:true});});
+// Admins: has the server retake the snapshot now, between checkpoints, then pulls it.
+document.getElementById('kpi-force-update').addEventListener('click',async()=>{
+  const btn=document.getElementById('kpi-force-update');
+  if(btn.disabled)return;
+  btn.disabled=true;
+  const label=btn.textContent;
+  btn.textContent='Updating...';
+  try{
+    const res=await fetch('/api/tickets/kpis/snapshot',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:'{}'});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(data?.error||'kpi_snapshot_failed');
+    if(viewMode==='kpi')await renderKpiView({force:true});
+    showToast('KPIs updated','ok');
+  }catch(error){
+    showToast('Could not update the KPIs: '+(error?.message||error),'warn');
+  }finally{
+    btn.disabled=false;
+    btn.textContent=label;
+  }
+});
 // ---------------------------------------------------------------------------
 // Day report (admins): the tickets resolved on one day, Tunisia time, by
 // agent. Read live from the server, not from the KPI checkpoint, so a day
@@ -17456,7 +17509,7 @@ function makeCard(ticket,isNew=false){
   const slaHoldBtn=normalizeTicketStage(ticketState[id]||'new')==='res'&&!slaHold?''
     :currentUserIsAdmin()
       ?(slaHold
-        ?`<button class="sla-hold-badge" data-sla-hold="${id}" data-hold="0" title="${slaHoldTitle} - click to release; the timer resumes where it stopped">Frozen</button>`
+        ?`<button class="sla-hold-badge" data-sla-hold="${id}" data-hold="0" title="${slaHoldTitle} - click to release; the ticket gets a fresh SLA from then">Frozen</button>`
         :`<button class="sla-hold-btn" data-sla-hold="${id}" data-hold="1" title="Freeze this ticket's SLA timer" aria-label="Hold the SLA">Hold</button>`)
       :(slaHold?`<span class="sla-hold-badge" title="${slaHoldTitle}">Frozen</span>`:'');
   const velmaDetailsHtml=velmaLink?`<div class="velma-details${velmaLink.done?' done':''}"><div class="velma-details-head"><strong>Velma bug ${esc(velmaLink.id)}</strong>${velmaLink.status?`<span class="velma-status">${esc(velmaLink.status)}</span>`:''}${velmaLink.url?`<a href="${esc(velmaLink.url)}" target="_blank" rel="noopener">Open row</a>`:''}</div>${velmaLink.done?`<div class="velma-details-note">${esc(velmaDoneNote)}</div>`:''}${velmaFieldsHtml(velmaLink,4)}</div>`:'';
@@ -17465,8 +17518,8 @@ function makeCard(ticket,isNew=false){
   const jiraCommentHtml=jiraInfo?.comments?.length?jiraInfo.comments.slice(-2).reverse().map(c=>`<div style="margin-top:3px;"><strong>${esc(c.author||'Unknown')}:</strong> ${esc(c.body||'').slice(0,140)}</div>`).join(''):'<div style="color:var(--slate-400);margin-top:3px;">No Jira comments</div>';
   const jiraStateHtml=jiraError
     ?`<div style="margin-top:4px;color:var(--amber-700);">Jira details unavailable</div><div style="margin-top:3px;color:var(--amber-800);white-space:normal;">${esc(jiraError.slice(0,180))}</div>`
-    :(jiraInfo?.status?`<span style="font-weight:700;color:var(--slate-900);">${esc(jiraInfo.status)}</span>`:`<span style="color:var(--slate-400);">Loading...</span>`);
-  const jiraDetailsHtml=jiraKey?`<div style="margin-top:6px;padding:7px 8px;border:1px solid var(--blue-100);border-radius:10px;background:var(--legacy-f8fbff);font-size:12px;line-height:1.35;color:var(--slate-700);"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><strong style="color:var(--blue-700);">Jira</strong>${jiraStateHtml}</div>${jiraError?'':`<div style="margin-top:4px;">Assignee: <strong>${esc(jiraInfo?.assignee||'Unknown')}</strong></div><div>Reporter: <strong>${esc(jiraInfo?.reporter||'Unknown')}</strong></div><div style="margin-top:4px;">QT links: ${jiraLinkedHtml}</div><div style="margin-top:4px;">Comments:${jiraCommentHtml}</div>`}</div>`:'';
+    :(jiraInfo?.status?`<span style="font-weight:700;color:var(--slate-900);">${esc(jiraInfo.status)}</span>`:(jiraInfo?`<span style="color:var(--slate-400);">No status</span>`:`<span style="color:var(--slate-400);">Loading...</span>`));
+  const jiraDetailsHtml=jiraKey?`<div style="margin-top:6px;padding:7px 8px;border:1px solid var(--blue-100);border-radius:10px;background:var(--legacy-f8fbff);font-size:12px;line-height:1.35;color:var(--slate-700);min-width:0;overflow-wrap:anywhere;"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center;"><strong style="color:var(--blue-700);">Jira</strong>${jiraStateHtml}</div>${jiraError||!jiraInfo?'':`<div style="margin-top:4px;">Assignee: <strong>${esc(jiraInfo?.assignee||'Unknown')}</strong></div><div>Reporter: <strong>${esc(jiraInfo?.reporter||'Unknown')}</strong></div><div style="margin-top:4px;">QT links: ${jiraLinkedHtml}</div><div style="margin-top:4px;">Comments:${jiraCommentHtml}</div>`}</div>`:'';
   const hsTicketId=ticketHubspotId[id]||'';
   const inFlight=hubspotTicketSyncInFlight.has(id);
   if(inFlight){
@@ -20023,6 +20076,8 @@ function renderEmContext(){
     if(source==='manual'){ticketAssignmentMode[id]='support';manualSupportOverride[id]=true;}
     pushUndo(`Assigned ${ticketDisplayNumber(id)} to ${agent}`,()=>restoreTicketState(before,['assignee']));
     renderActiveView();renderEmContext();
+    // The header names the owner and their SLA, which has just restarted.
+    if(emCurrentTicket?.id===id)emRenderMeta(emCurrentTicket);
     await saveState(reason);
     showToast('Assigned to '+agent,'ok');
   };
@@ -21446,29 +21501,12 @@ document.getElementById('em-reply-body')?.addEventListener('keydown',ev=>{
   if((ev.ctrlKey||ev.metaKey)&&ev.key==='Enter'){ev.preventDefault();emSendReply();}
 });
 
-async function openEmailModal(ticket){
+// The ticket header line: who sent it, when, who holds it and its SLA. Its own
+// function so a reassignment made from inside the ticket can redraw it -
+// built once on open, it kept showing the old owner and the old clock.
+function emRenderMeta(ticket){
   const{email,id}=ticket;const clientEmail=ticketClientEmail[id];
-  emCurrentTicket=ticket;
-  emResetReply(ticket);
-  // "Seen before" is the panel worth paying for up front - it is the one that
-  // changes what the agent writes. History waits until it is opened.
-  emResetContext(ticket);
-  emResetThread();
-  emLoadSimilar(id);
-  // The rest of the conversation, which used to be invisible unless the sender
-  // happened to quote it.
-  emLoadThread(ticket);
-  // Any translation belongs to the message that was open before. Clear it
-  // first, so nothing from the previous ticket can be reverted into this one.
-  trResetEmailState(id);
-  trRenderEmailBar();
-  // Warm the picker's "cached" markers from whatever the team already has.
-  trLoadCachedFor(id).then(()=>{if(emTrState.ticketId===id)trRenderEmailBar();});const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
-  document.getElementById('em-title').textContent=email.subject||'(no subject)';
-  // Always offered, and never a dead button: with a webLink it opens the
-  // message, without one it offers to create the mail that does not exist yet.
-  // See emOpenInOutlook.
-  emSyncOutlookButton(ticket);
+  const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
   const csOwner=ticketCSOwner[id]||null;
   const csMeta=csOwner?` · CS: ${esc(csOwner)}`:'';
   let metaHtml=isReply?`<span><strong>Client:</strong> ${esc(clientEmail)}</span><span><strong>Replied by:</strong> ${esc(email.sender)}</span>`:`<span><strong>From:</strong> ${esc(email.sender||'')}</span>`;
@@ -21496,6 +21534,32 @@ async function openEmailModal(ticket){
   if(ticketHubspotId[id])metaHtml+=`<span><strong>HubSpot Ticket:</strong> <a href="https://app.hubspot.com/contacts/25445053/record/0-5/${esc(ticketHubspotId[id])}" target="_blank" style="color:var(--teal-700);font-weight:700;text-decoration:none;"> ${esc(ticketHubspotId[id])}</a></span>`;
   if(hs?.companyName)metaHtml+=`<span><strong>Company:</strong> ${esc(hs.companyName)}${hs.inferredVia?'<span style="font-size:12px;color:var(--slate-400);font-style:italic;"> ~inferred</span>':''}${hs.companyUrl?` <a href="${esc(hs.companyUrl)}" target="_blank" style="color:var(--amber-500);font-size:13px;"> HubSpot</a>`:''}</span>`;
   document.getElementById('em-meta').innerHTML=metaHtml;
+}
+
+async function openEmailModal(ticket){
+  const{email,id}=ticket;const clientEmail=ticketClientEmail[id];
+  emCurrentTicket=ticket;
+  emResetReply(ticket);
+  // "Seen before" is the panel worth paying for up front - it is the one that
+  // changes what the agent writes. History waits until it is opened.
+  emResetContext(ticket);
+  emResetThread();
+  emLoadSimilar(id);
+  // The rest of the conversation, which used to be invisible unless the sender
+  // happened to quote it.
+  emLoadThread(ticket);
+  // Any translation belongs to the message that was open before. Clear it
+  // first, so nothing from the previous ticket can be reverted into this one.
+  trResetEmailState(id);
+  trRenderEmailBar();
+  // Warm the picker's "cached" markers from whatever the team already has.
+  trLoadCachedFor(id).then(()=>{if(emTrState.ticketId===id)trRenderEmailBar();});const hs=clientEmail?hsCache[clientEmail]:null;const isReply=isQuintaSender(email.sender)&&!!clientEmail;
+  document.getElementById('em-title').textContent=email.subject||'(no subject)';
+  // Always offered, and never a dead button: with a webLink it opens the
+  // message, without one it offers to create the mail that does not exist yet.
+  // See emOpenInOutlook.
+  emSyncOutlookButton(ticket);
+  emRenderMeta(ticket);
   // Manual tickets show description instead of fetching from Outlook
   if(email.isManual){
     document.getElementById('em-body').innerHTML=email.summary?`<div class="email-body-content" style="overflow-wrap:break-word;white-space:pre-wrap;">${esc(email.summary)}</div>`:'<div class="email-body-content"><em style="color:#64748b">No description provided.</em></div>';
