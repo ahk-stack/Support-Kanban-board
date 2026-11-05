@@ -6031,6 +6031,57 @@ async function resetArchivedOpenSlaClocksOnce() {
   }
   console.log(`SLA reset for ${ids.length} archived unresolved ticket(s).`);
 }
+/* One-off: tickets with no category - most of them manual - were left out of
+   the KPIs until KPI_NOT_SPAM_WHERE. Now counted, none of them should arrive
+   overdue or late. Still open: a fresh SLA from the moment this runs.
+   Resolved: the clock restarts at the moment it was resolved, so it counts as
+   met. Written into the board state as well as the row, or the next board save
+   would put the old clock back. Once per database, like the resets above. */
+const SLA_UNCATEGORISED_RESET_SYNC_TYPE = 'sla_uncategorised_reset_v1';
+async function resetUncategorisedSlaClocksOnce() {
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_UNCATEGORISED_RESET_SYNC_TYPE, status: 'success' } });
+  if (done) return;
+  const now = Date.now();
+  const rows = await prisma.ticket.findMany({
+    where: { category: null, externalId: { not: null } },
+    select: { externalId: true, status: true, createdAt: true, updatedAt: true, resolvedAt: true, slaResetAt: true }
+  });
+  const open = [];
+  const resolved = [];
+  for (const t of rows) {
+    if (normalizeDbStatusForBoard(t.status) === 'res') {
+      const at = kpiResolvedDate(t)?.getTime();
+      // A clock already at or past the resolve is met as it stands.
+      const resetMs = t.slaResetAt ? new Date(t.slaResetAt).getTime() : 0;
+      if (Number.isFinite(at) && resetMs < at) resolved.push({ id: t.externalId, at });
+    } else {
+      open.push(t.externalId);
+    }
+  }
+  const entries = [
+    ...open.map(id => ({ field: 'ticketSlaResetAt', id, value: now })),
+    ...resolved.map(r => ({ field: 'ticketSlaResetAt', id: r.id, value: r.at }))
+  ];
+  if (entries.length) writeServerFieldsIntoState(entries);
+  if (open.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: open } }, data: { slaResetAt: new Date(now) } })
+      .catch((error) => console.error('Uncategorised SLA reset database update failed:', error?.message || error));
+  }
+  for (const r of resolved) {
+    await prisma.ticket.updateMany({ where: { externalId: r.id }, data: { slaResetAt: new Date(r.at) } })
+      .catch((error) => console.error('Uncategorised SLA reset database update failed:', error?.message || error));
+  }
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_UNCATEGORISED_RESET_SYNC_TYPE,
+      status: 'success',
+      message: `SLA reset for ${open.length} open and ${resolved.length} resolved uncategorised ticket(s).`,
+      metadata: { at: new Date(now).toISOString(), open, resolved: resolved.map(r => r.id) }
+    }
+  }).catch((error) => console.error('Uncategorised SLA reset marker write failed:', error?.message || error));
+  console.log(`SLA reset for ${open.length} open and ${resolved.length} resolved uncategorised ticket(s).`);
+}
 app.post('/api/admin/sla/restart-at-baseline', requireAdmin, async (req, res) => {
   try {
     const out = await restartOpenSlaClocksAtBaselineOnce();
@@ -6834,6 +6885,13 @@ const KPI_TICKET_SELECT = {
   resolvedAt: true,
   slaResetAt: true
 };
+// Every ticket the KPIs count: anything not marked Spam. The empty category
+// has to be named: a NOT filter on its own also drops rows whose category is
+// NULL, which left every uncategorised ticket - most manual ones - out of
+// every figure, and out of the spam count too.
+const KPI_NOT_SPAM_WHERE = {
+  OR: [{ category: null }, { NOT: { category: { equals: 'Spam', mode: 'insensitive' } } }]
+};
 /* KPI checkpoints. The dashboard is not live: it is read from a snapshot of
    the tickets taken at 00:00, 09:00, 12:00 and 16:00 in the server's zone (the
    SLA's zone), and SLA positions are judged as of that snapshot. A change made
@@ -6856,14 +6914,13 @@ function kpiNextCheckpointAfter(ms = Date.now()) {
   return d.getTime();
 }
 // { checkpoint, takenAt, tickets, spam } read once per checkpoint: the
-// tickets the dashboard counts, and the spam the admin banner counts. Split by
-// the same database filters the dashboard's queries used, so a ticket with no
-// category falls on the same side as it did there.
+// tickets the dashboard counts, and the spam the admin banner counts. A ticket
+// with no category is counted (see KPI_NOT_SPAM_WHERE).
 let kpiSnapshot = null;
 let kpiSnapshotLoading = null;
 async function takeKpiSnapshot(checkpoint) {
   const [allTickets, spam] = await Promise.all([
-    prisma.ticket.findMany({ where: { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }] }, select: KPI_TICKET_SELECT, orderBy: [{ createdAt: 'desc' }] }),
+    prisma.ticket.findMany({ where: KPI_NOT_SPAM_WHERE, select: KPI_TICKET_SELECT, orderBy: [{ createdAt: 'desc' }] }),
     prisma.ticket.findMany({ where: { category: { equals: 'Spam', mode: 'insensitive' } }, select: KPI_TICKET_SELECT })
   ]);
   // Snoozes and archives live in the board state, not on the row.
@@ -6971,9 +7028,7 @@ async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.
   const company = String(req.query.company || 'all').trim();
   const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
 
-  const baseWhere = {
-    NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
-  };
+  const baseWhere = { ...KPI_NOT_SPAM_WHERE };
   // One set of tickets for the whole dashboard: everything since the board
   // went live. The launch banner counted from launch while the cards counted
   // every row, so the two could never agree.
@@ -7564,7 +7619,7 @@ app.get('/api/tickets/kpis/day-report', requireAdmin, async (req, res) => {
     const rows = await prisma.ticket.findMany({
       where: {
         resolvedAt: { gte: start, lt: end },
-        NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
+        ...KPI_NOT_SPAM_WHERE
       },
       select: KPI_TICKET_SELECT,
       orderBy: [{ resolvedAt: 'asc' }]
@@ -15616,6 +15671,8 @@ const server = app.listen(PORT, () => {
     .catch((error) => console.error('Frozen SLA reset failed:', error?.message || error))
     .then(() => resetArchivedOpenSlaClocksOnce())
     .catch((error) => console.error('Archived SLA reset failed:', error?.message || error))
+    .then(() => resetUncategorisedSlaClocksOnce())
+    .catch((error) => console.error('Uncategorised SLA reset failed:', error?.message || error))
     .then(() => currentKpiSnapshot())
     .catch((error) => console.error('KPI snapshot failed:', error?.message || error))
     .finally(scheduleKpiSnapshots);
