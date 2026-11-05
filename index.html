@@ -11259,6 +11259,21 @@ function shiftElapsedMs(fromMs,toMs,agentCode){
   });
   return total;
 }
+// The time the SLA has run: shift time, or office hours less time off when the
+// agent has no shift at all in the window. Mirrors slaClockMs in server.js.
+function slaClockMs(fromMs,toMs,agentCode){
+  const rec=shiftAgents[String(agentCode||'').toUpperCase()];
+  const now=boardNow();
+  const hasShift=!!rec&&Array.isArray(rec.sessions)&&rec.sessions.some(s=>Number(s.start||0)<toMs&&(s.end===null||s.end===undefined?now:Number(s.end))>fromMs);
+  if(hasShift)return{ms:shiftElapsedMs(fromMs,toMs,agentCode),estimated:false};
+  let ms=businessMsInRange(fromMs,toMs);
+  let cursor=fromMs;
+  (rec?.leaves||[]).map(p=>[Math.max(Number(p.start||0),fromMs),Math.min(leavePeriodEnd(p,now),toMs)])
+    .filter(([a,b])=>b>a)
+    .sort((x,y)=>x[0]-y[0])
+    .forEach(([a,b])=>{const from=Math.max(a,cursor);if(b>from){ms-=businessMsInRange(from,b);cursor=b;}});
+  return{ms:Math.max(0,ms),estimated:true};
+}
 // The inverse of shiftElapsedMs. Mirrors shiftPointBefore in server.js.
 function shiftPointBefore(to,amount,agentCode,floor){
   if(!(amount>0))return to;
@@ -11460,9 +11475,10 @@ function getSLAStatus(id){
   if(!shiftLoaded){
     return{text:'Loading shift data',cls:'sla-warn',overdue:false,wallText,shiftMs:0,noClock:true};
   }
-  const elapsed=shiftElapsedMs(createdMs,slaNow,agent);
+  const clock=slaClockMs(createdMs,slaNow,agent);
+  const elapsed=clock.ms;
   const remaining=slaMs-elapsed;
-  const shiftText=fmtDuration(elapsed)+' worked ('+agent+')';
+  const shiftText=fmtDuration(elapsed)+(clock.estimated?' of office hours ('+agent+' has no shift logged)':' worked ('+agent+')');
   if(remaining<=0){
     return{text:fmtDuration(Math.abs(remaining))+' overdue',cls:'sla-breach',overdue:true,wallText,shiftText,shiftMs:elapsed,resetAt};
   }
@@ -15243,6 +15259,11 @@ async function renderKpiView(opts){
     updateKpiFreshnessLabel();
     if(viewMode==='kpi')startKpiAutoRefresh();
     const compliance=sla.compliancePct;
+    const backlog=sla.backlog||{};
+    const offClock=[['noClock','no assignee'],['jiraHold','Jira'],['velmaHold','Velma bug'],['contactHold','waiting on contact'],['leaveHold','agent off'],['adminHold','frozen'],['snoozeHold','snoozed']]
+      .map(([key,label])=>[backlog[key]||0,label]).filter(([n])=>n>0);
+    const offClockTotal=offClock.reduce((sum,[n])=>sum+n,0);
+    const offClockParts=offClock.map(([n,label])=>`${n} ${label}`);
     const overdueDrilldownRows=(data.overdueRows||[]).map(r=>({id:r.externalId,ticketNumber:r.ticketNumber,subject:r.subject,company:r.company,agent:r.agent,priority:r.priority,statusLabel:COL_NAMES[r.status]||r.status,detail:fmtHours(r.overdueHours)+' overdue'}));
     resetKpiDrilldownStore();
     document.getElementById('kpi-status-cards').innerHTML=[
@@ -15262,6 +15283,10 @@ async function renderKpiView(opts){
     document.getElementById('kpi-sla-cards').innerHTML=[
       kpiCard('Overdue now',sla.overdue||0,{tone:(sla.overdue||0)>0?'bad':'good',hint:'Open, past SLA target',rows:overdueDrilldownRows}),
       kpiCard('At risk',sla.atRisk||0,{tone:(sla.atRisk||0)>0?'warn':'',hint:'Under 25% of target left',category:'atRisk'}),
+      // Overdue + At risk + On track + Off the clock = every open ticket, so
+      // the row adds up to the open columns above.
+      kpiCard('On track',backlog.onTrack||0,{hint:'Open, clock running',category:'onTrack'}),
+      kpiCard('Off the clock',offClockTotal,{hint:offClockParts.length?offClockParts.join(' · '):'Every open ticket is on the clock',category:'offClock'}),
       kpiCard('SLA met',compliance===null||compliance===undefined?'-':`${compliance}%`,{
         tone:compliance===null||compliance===undefined?'':(compliance>=90?'good':compliance>=75?'warn':'bad'),
         // on time + late + no SLA + before reset = the Resolved card, ticket for ticket.
