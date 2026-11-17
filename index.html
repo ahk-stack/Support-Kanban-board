@@ -16677,10 +16677,17 @@ function resolvedAtForTicket(id){
   const created=Date.parse(ticketCreatedAt[id]||'');
   return Number.isFinite(created)?created:0;
 }
+// The CS review exists so the ticket's CS signs the resolution off. A ticket
+// with no CS ("No CS") has nobody to do that, so it does not wait: resolving
+// it closes it, the same as a CS confirming it.
+function resolvedTicketNeedsCsReview(id){
+  return !!String(ticketCSOwner[id]||'').trim();
+}
 function isResolvedTicketHidden(id,now=Date.now()){
   if(normalizeTicketStage(ticketState[id]||'new')!=='res')return false;
   const meta=ticketResolutionMeta[id]||{};
   if(meta.confirmedAt)return true;
+  if(!resolvedTicketNeedsCsReview(id))return true;
   const resolvedAt=resolvedAtForTicket(id);
   return !!resolvedAt&&now-resolvedAt>=RESOLVED_RETENTION_MS;
 }
@@ -16690,7 +16697,7 @@ function resolvedReviewHtml(id,csOwner){
   // Only reachable through My resolved: the review is over, so say how it
   // ended instead of counting down a window that has already closed.
   if(isArchivedTicket(id)||isResolvedTicketHidden(id)){
-    const how=meta.confirmedAt?`Confirmed by ${esc(meta.confirmedBy||'CS')}`:isArchivedTicket(id)?'Archived':'Past the review window';
+    const how=meta.confirmedAt?`Confirmed by ${esc(meta.confirmedBy||'CS')}`:isArchivedTicket(id)?'Archived':!resolvedTicketNeedsCsReview(id)?'No CS - closed without review':'Past the review window';
     return`<div style="margin-top:7px;padding:5px 8px;border:1px solid var(--green-200);border-radius:8px;background:var(--green-50);color:var(--green-800);font-size:12px;">${how} - off the main board</div>`;
   }
   const resolvedAt=resolvedAtForTicket(id);
@@ -19377,7 +19384,10 @@ function bindColumnDropTarget(col){
     renderActiveView();
     col.classList.add('just-received');setTimeout(()=>col.classList.remove('just-received'),600);
     const saved=await saveState('ticket_stage_move');
-    if(saved)showToast(' Moved to '+COL_NAMES[newCol]+' · saved','move');else showToast('Stage updated locally but save is still pending');
+    // A ticket with no CS closes straight away instead of waiting for a CS
+    // review, so its card leaves the board - say so, or it looks lost.
+    const closedNoCs=newCol==='res'&&!resolvedTicketNeedsCsReview(id);
+    if(saved)showToast(closedNoCs?' Resolved and closed · no CS to review it · saved':' Moved to '+COL_NAMES[newCol]+' · saved','move');else showToast('Stage updated locally but save is still pending');
     const rs=await syncTicketStatusToHubspot(id,newCol);
     if(!rs?.ok&&rs?.reason!=='missing_hubspot_ticket_id'){showToast(`HubSpot status sync failed: ${rs?.error||rs?.reason}`);}
   });
