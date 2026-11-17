@@ -9812,6 +9812,15 @@ let appBuildVersion='unknown';
 let jiraConnection={connected:false,baseUrl:'',browseBaseUrl:'',projectKey:'',email:'',emailMasked:'',authMode:'auto',hasApiToken:false,hasAccessToken:false,configuredVia:'none',canConfigure:false};
 let jiraIssueCache={};
 let jiraIssuesLoading=false;
+// Refreshes in a row where Jira gave no answer for a key; the card only shows
+// an error once this reaches JIRA_FAIL_STREAK_BEFORE_ERROR.
+let jiraIssueFailStreak={};
+let jiraIssueRetryTimer=null;
+// Failed refreshes come every 15s while a card waits, and each one has
+// already retried on the server, so 6 is well over a minute of Jira silence.
+const JIRA_FAIL_STREAK_BEFORE_ERROR=6;
+const JIRA_PENDING_RETRY_MS=15000;
+const JIRA_SINGLE_RETRY_MAX=20;
 let jiraIssuesRerun=false;
 const DEFAULT_COOWNER_ID_MAPPINGS={
   '27996261':'VGU',
@@ -10303,9 +10312,48 @@ async function apiUnlinkVelmaBug(kanbanTicketId){
 async function apiGetJiraIssues(keys){
   const uniq=[...new Set((Array.isArray(keys)?keys:[]).map(k=>String(k||'').trim().toUpperCase()).filter(Boolean))];
   if(!uniq.length)return{connected:jiraConnection.connected,issues:[]};
-  const res=await fetch(`/api/jira/issues?keys=${encodeURIComponent(uniq.join(','))}`,{credentials:'include'});
-  const out=await res.json().catch(()=>({issues:[]}));
-  return{ok:res.ok,...out};
+  // The server answers at most 50 keys a request, so a board with more linked
+  // issues than that asks in batches - every key past the 50th used to come
+  // back empty and its card said "Jira did not return this issue". Batches run
+  // one after another so Jira sees the same load per request as before.
+  const BATCH=50;
+  let merged=null;
+  for(let i=0;i<uniq.length;i+=BATCH){
+    const chunk=uniq.slice(i,i+BATCH);
+    let out;
+    // A batch that fails outright (server restarting, network blip) is asked
+    // once more before its cards are left to the single-key fallback.
+    for(let attempt=0;attempt<2;attempt++){
+      try{
+        const res=await fetch(`/api/jira/issues?keys=${encodeURIComponent(chunk.join(','))}`,{credentials:'include'});
+        out={ok:res.ok,...await res.json().catch(()=>({issues:[]}))};
+      }catch(error){out={ok:false,error:String(error?.message||error),issues:[]};}
+      if(out.ok&&!out.error)break;
+      if(attempt===0)await new Promise(r=>setTimeout(r,1500));
+    }
+    if(out.connected===false)return out;
+    // Keep the answers lined up with the keys asked: a batch that failed
+    // leaves its slots empty instead of shifting the rest, and its reason is
+    // kept so those cards can say why.
+    const answers=chunk.map((_,j)=>(Array.isArray(out.issues)&&out.issues[j])||null);
+    if(!merged)merged={connected:out.connected,browseBaseUrl:out.browseBaseUrl,projectKey:out.projectKey,ok:false,issues:[]};
+    merged.issues.push(...answers);
+    if(out.browseBaseUrl)merged.browseBaseUrl=out.browseBaseUrl;
+    if(out.ok&&!out.error)merged.ok=true;
+    else merged.error=merged.error||out.error||'no answer';
+  }
+  // Nothing answered at all: no issues, so the caller keeps what is shown.
+  if(!merged.issues.some(Boolean))merged.issues=[];
+  return merged;
+}
+// One issue by its exact key, for a card the batch left without an answer.
+async function apiGetJiraIssue(key){
+  try{
+    const res=await fetch(`/api/jira/issue/${encodeURIComponent(key)}`,{credentials:'include'});
+    const out=await res.json().catch(()=>({}));
+    if(out?.browseBaseUrl)JIRA_URL=out.browseBaseUrl;
+    return out?.issue||null;
+  }catch(_){return null;}
 }
 function buildStatePayload(reason){
   const now=Date.now();
@@ -11858,29 +11906,77 @@ async function refreshLinkedJiraIssues(force=false){
   try{
     const out=await apiGetJiraIssues(keys).catch(error=>({ok:false,error:String(error?.message||error)}));
     if(out?.browseBaseUrl)JIRA_URL=out.browseBaseUrl;
-    if(Array.isArray(out?.issues)&&out.issues.length){
-      // The server answers in the order asked, so each answer is also filed
-      // under the key the card asked for: an issue moved to another project
-      // comes back with its new key, and the card kept "Loading..." for good.
-      out.issues.forEach((issue,i)=>{
-        if(!issue)return;
-        if(issue.key)jiraIssueCache[String(issue.key).trim().toUpperCase()]=issue;
-        if(keys[i])jiraIssueCache[keys[i]]=issue;
-      });
-      // A key with no answer at all (past the server's 50-key cap, or a gap)
-      // says so rather than loading forever.
-      keys.forEach(key=>{if(!jiraIssueCache[key])jiraIssueCache[key]={key,error:'Jira did not return this issue.'};});
-      // A failure in what the answers drive must not stop the cards from
-      // being redrawn with them.
-      try{
-        processJiraReporterAlerts(out.issues.filter(Boolean));
-        await applyJiraDrivenBoardUpdates(out.issues.filter(Boolean));
-      }catch(error){console.warn('Jira board updates failed:',error);}
-    }else{
-      // Nothing came back: say why on the cards that have nothing yet, instead
-      // of "Loading..." for good. Details already shown are kept.
-      const why=out?.connected===false?'Jira is not connected - an admin can connect it in Jira settings.':`Could not reach Jira (${out?.error||'no answer'}).`;
+    if(out?.connected===false){
+      // Not a hiccup: nothing will load until an admin connects Jira.
+      const why='Jira is not connected - an admin can connect it in Jira settings.';
       keys.forEach(key=>{if(!jiraIssueCache[key]||jiraIssueCache[key].error)jiraIssueCache[key]={key,error:why};});
+      if(force)renderActiveView();
+      return;
+    }
+    const answers=Array.isArray(out?.issues)?out.issues:[];
+    // Each key's answer: good details, a definite error (not found, no
+    // access), or nothing usable yet (timeout, Jira busy, batch failed).
+    const good=[];
+    const definite={};
+    const retry=[];
+    const take=(key,issue)=>{
+      if(issue&&!issue.error){
+        // Filed under the key the card asked for as well as the one Jira
+        // answered with: a moved issue comes back with its new key.
+        if(issue.key)jiraIssueCache[String(issue.key).trim().toUpperCase()]=issue;
+        jiraIssueCache[key]=issue;
+        delete jiraIssueFailStreak[key];
+        good.push(issue);
+        return true;
+      }
+      return false;
+    };
+    keys.forEach((key,i)=>{
+      const issue=answers[i];
+      if(take(key,issue))return;
+      if(issue?.error&&!issue.transient)definite[key]=issue.error;
+      else retry.push(key);
+    });
+    // Whatever the batch left without an answer is looked up on its own, by
+    // its exact key, a few at a time.
+    const queue=retry.slice(0,JIRA_SINGLE_RETRY_MAX);
+    await Promise.all(Array.from({length:Math.min(3,queue.length)},async()=>{
+      while(queue.length){
+        const key=queue.shift();
+        const issue=await apiGetJiraIssue(key);
+        if(take(key,issue))continue;
+        if(issue?.error&&!issue.transient)definite[key]=issue.error;
+      }
+    }));
+    // Still nothing for a key. Details already on the card are kept as they
+    // are - a slow minute from Jira never replaces them with an error. A card
+    // with nothing yet stays on "Loading..." and only gives a reason once
+    // Jira has failed it several refreshes running, or said something
+    // definite (not found, no access).
+    let pending=false;
+    keys.forEach(key=>{
+      const cached=jiraIssueCache[key];
+      if(cached&&!cached.error)return;
+      if(definite[key]){jiraIssueCache[key]={key,error:definite[key]};return;}
+      if(good.some(x=>x.key===key))return;
+      const streak=(jiraIssueFailStreak[key]||0)+1;
+      jiraIssueFailStreak[key]=streak;
+      pending=true;
+      if(streak>=JIRA_FAIL_STREAK_BEFORE_ERROR)jiraIssueCache[key]={key,error:'Jira has not answered for this issue for a few minutes. The board keeps trying automatically.'};
+      else if(cached?.error)delete jiraIssueCache[key];
+    });
+    // Cards still waiting are tried again soon rather than at the next
+    // minute's refresh.
+    if(pending&&!jiraIssueRetryTimer){
+      jiraIssueRetryTimer=setTimeout(()=>{jiraIssueRetryTimer=null;void refreshLinkedJiraIssues(true);},JIRA_PENDING_RETRY_MS);
+    }
+    // A failure in what the answers drive must not stop the cards from
+    // being redrawn with them.
+    if(good.length){
+      try{
+        processJiraReporterAlerts(good);
+        await applyJiraDrivenBoardUpdates(good);
+      }catch(error){console.warn('Jira board updates failed:',error);}
     }
     if(force)renderActiveView();
   }finally{

@@ -1311,9 +1311,51 @@ async function jiraFetchIssue(config, issueKey) {
       return jiraIssueSummary(issue);
     } catch (error) {
       lastError = error;
+      // Jira not answering is the same on every API version: trying the next
+      // one only triples the wait before the retry that may actually work.
+      if (jiraErrorIsTransient(error)) throw error;
     }
   }
   throw lastError || new Error('jira_issue_fetch_failed');
+}
+// A timeout, a dropped connection, rate limiting or a Jira-side 5xx: worth
+// asking again. A 404 or a refused login will say the same thing next time.
+function jiraErrorIsTransient(error) {
+  const msg = String(error?.message || error || '');
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return true;
+  const status = Number((msg.match(/^jira_api_error_(\d+)/) || [])[1] || 0);
+  if (status) return status === 408 || status === 429 || status >= 500;
+  if (/^jira_non_json_response_/.test(msg)) return false;
+  return /timeout|timed out|aborted|fetch failed|network|socket|ECONN|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE/i.test(msg);
+}
+// What a card shows when an issue really cannot be fetched, in words an agent
+// can act on rather than a raw API error.
+function jiraIssueErrorMessage(key, error) {
+  const msg = String(error?.message || error || '');
+  const status = Number((msg.match(/^jira_api_error_(\d+)/) || [])[1] || 0);
+  if (status === 404) return `${key} was not found in Jira. It may have been deleted, or the board's Jira account cannot see it.`;
+  if (status === 401 || status === 403) return `Jira refused access to ${key}. The board's Jira account may not have permission for it.`;
+  if (status === 429) return 'Jira is busy right now. Retrying automatically.';
+  if (jiraErrorIsTransient(error)) return 'Jira was slow to answer. Retrying automatically.';
+  return `Could not load ${key} from Jira (${msg.slice(0, 120)}).`;
+}
+// One issue, asked again on a temporary failure with a short pause between
+// tries. Never throws: an issue that still fails comes back as { key, error }
+// with transient set, so the board knows to try again rather than give up.
+async function jiraFetchIssueWithRetry(config, key, attempts = 3) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const issue = await jiraFetchIssue(config, key);
+      if (issue) return issue;
+      lastError = new Error('jira_empty_issue');
+    } catch (error) {
+      lastError = error;
+      if (!jiraErrorIsTransient(error)) break;
+    }
+    if (attempt < attempts - 1) await new Promise(r => setTimeout(r, 400 * (attempt + 1) * (attempt + 1)));
+  }
+  return { key, error: jiraIssueErrorMessage(key, lastError), transient: jiraErrorIsTransient(lastError) };
 }
 async function findTicketRecordByKanbanId(kanbanTicketId) {
   const key = String(kanbanTicketId || '').trim();
@@ -6455,14 +6497,17 @@ app.get('/api/jira/issues', requireAuth, async (req, res) => {
     // round trips, and the board waits for the whole list.
     const issues = new Array(keys.length);
     let next = 0;
+    // Retries are for a hiccup on one issue. Once several issues in a row have
+    // run out of retries, Jira itself is down: the rest get one try each so
+    // the request answers in seconds, and the board's own retry picks them up.
+    let transientFailures = 0;
     await Promise.all(Array.from({ length: Math.min(5, keys.length) }, async () => {
       while (next < keys.length) {
         const i = next++;
-        try {
-          issues[i] = await jiraFetchIssue(jira, keys[i]);
-        } catch (error) {
-          issues[i] = { key: keys[i], error: String(error.message || error) };
-        }
+        const issue = await jiraFetchIssueWithRetry(jira, keys[i], transientFailures >= 3 ? 1 : 3);
+        if (issue?.transient) transientFailures++;
+        else if (issue && !issue.error) transientFailures = 0;
+        issues[i] = issue;
       }
     }));
     return res.json({
@@ -6471,6 +6516,20 @@ app.get('/api/jira/issues', requireAuth, async (req, res) => {
       projectKey: jira.projectKey || '',
       issues
     });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+// One issue by its exact key - the board's fallback for a card the batch left
+// without an answer, so that card is looked up on its own.
+app.get('/api/jira/issue/:key', requireAuth, async (req, res) => {
+  try {
+    const jira = await getJiraConfig();
+    if (!jira.connected) return res.json({ connected: false, issue: null });
+    const key = normalizeJiraKey(req.params.key);
+    if (!/^[A-Z][A-Z0-9]+-\d+$/.test(key)) return res.status(400).json({ error: 'invalid_jira_key' });
+    const issue = await jiraFetchIssueWithRetry(jira, key);
+    return res.json({ connected: true, browseBaseUrl: jira.browseBaseUrl, issue });
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
   }
