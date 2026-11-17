@@ -5,7 +5,8 @@
       "title": "Jira Catch-Up",
       "notes": [
         { "type": "fixed", "text": "Jira details show up on every linked ticket again. Once more than 50 tickets had a Jira link, the rest showed \"Jira did not return this issue\" instead of their status." },
-        { "type": "improved", "text": "When Jira is slow, the board quietly retries and looks up each missing ticket on its own. Details already on a card stay put, and you only see a message if Jira stays silent for over a minute or the issue really can't be found." }
+        { "type": "improved", "text": "When Jira is slow, the board quietly retries and looks up each missing ticket on its own. Details already on a card stay put, and you only see a message if Jira stays silent for over a minute or the issue really can't be found." },
+        { "type": "maintenance", "text": "Behind-the-scenes accounts used by automations no longer show up in the agent lists or get tickets." }
       ]
     },
     {

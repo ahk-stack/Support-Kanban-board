@@ -759,11 +759,17 @@ function normalizeRole(role) {
   return ['owner', 'admin', 'cs', 'support'].includes(value) ? value : null;
 }
 // '' means on no roster; undefined means the value was not recognised.
+// 'hidden' is for service accounts (an n8n workflow's token user, say): the
+// account keeps its role, so its token works as before, but it is on no
+// roster - never in a dropdown, never auto-assigned, never in the KPIs - and
+// is not listed as a former agent either. Unlike "none", changing the role in
+// Manage Users does not quietly put it back on a team.
 function normalizeTeam(team) {
   const value = String(team ?? '').trim().toLowerCase();
   if (!value || value === 'none') return '';
-  return value === 'cs' || value === 'support' ? value : undefined;
+  return value === 'cs' || value === 'support' || value === 'hidden' ? value : undefined;
 }
+const HIDDEN_TEAM = 'hidden';
 // A user's agent code is their username when it is a trigram, otherwise the
 // local part of their email - the same order the board resolves it in.
 function userAgentCode(user) {
@@ -785,25 +791,30 @@ let agentRosterLoadedAt = 0;
 async function refreshAgentRoster() {
   let users;
   try {
-    users = await prisma.user.findMany({ where: { team: { in: ['cs', 'support'] } }, orderBy: { username: 'asc' }, select: { username: true, email: true, team: true, isActive: true } });
+    users = await prisma.user.findMany({ where: { team: { in: ['cs', 'support', HIDDEN_TEAM] } }, orderBy: { username: 'asc' }, select: { username: true, email: true, team: true, isActive: true } });
   } catch (error) {
     console.warn('Agent roster: could not read users, keeping the current roster:', error?.message || error);
     return false;
   }
-  if (!users.length) return false;
+  if (!users.some(user => user.team !== HIDDEN_TEAM)) return false;
   const next = { support: new Set(), cs: new Set() };
   const inactive = { support: new Set(), cs: new Set() };
+  // Hidden accounts are on no roster and are not "former" agents either: a
+  // service account taken off the board leaves no trace in its lists.
+  const hidden = new Set();
   for (const user of users) {
     const code = userAgentCode(user);
     if (!code) continue;
+    if (user.team === HIDDEN_TEAM) { hidden.add(code); continue; }
     (user.isActive === false ? inactive : next)[user.team].add(code);
   }
   for (const kind of ['support', 'cs']) {
     const live = kind === 'support' ? SUPPORT_AGENT_CODES : CS_AGENT_CODES;
     const legacy = kind === 'support' ? LEGACY_SUPPORT_AGENT_CODES : LEGACY_CS_AGENT_CODES;
     const former = FORMER_AGENT_CODES[kind];
-    [...live, ...legacy, ...inactive[kind]].forEach(code => { if (!next[kind].has(code)) former.add(code); });
+    [...live, ...legacy, ...inactive[kind]].forEach(code => { if (!next[kind].has(code) && !hidden.has(code)) former.add(code); });
     next[kind].forEach(code => former.delete(code));
+    hidden.forEach(code => former.delete(code));
     live.clear();
     next[kind].forEach(code => live.add(code));
   }
