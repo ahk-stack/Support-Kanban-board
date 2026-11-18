@@ -210,19 +210,23 @@
     }
 
     // The team is which dropdowns the person appears in on the board: the CS
-    // owner list, the support assignee list, or neither.
+    // owner list, the support assignee list, or neither. Hidden is for service
+    // accounts (an n8n workflow's token user): kept, with its role and token,
+    // but never shown on the board and never given tickets.
     function teamOptionsHtml() {
-      return '<option value="">None</option><option value="cs">CS</option><option value="support">Support</option>';
+      return '<option value="">None</option><option value="cs">CS</option><option value="support">Support</option><option value="hidden">Hidden (service account)</option>';
     }
 
     function teamLabel(team) {
-      return { cs: 'CS team', support: 'Support team' }[team] || '';
+      return { cs: 'CS team', support: 'Support team', hidden: 'Hidden' }[team] || '';
     }
 
     // Picking CS or Support as the role puts them on that team too; an admin's
-    // team is left alone, since an admin can also work as an agent.
+    // team is left alone, since an admin can also work as an agent. A hidden
+    // account stays hidden: changing its role must not put it on the board.
     function followRoleWithTeam(roleSelect, teamSelect) {
       roleSelect.addEventListener('change', () => {
+        if (teamSelect.value === 'hidden') return;
         if (roleSelect.value === 'cs' || roleSelect.value === 'support') teamSelect.value = roleSelect.value;
       });
     }
@@ -279,8 +283,8 @@
         if (user.team) {
           const team = document.createElement('span');
           team.className = 'role';
-          team.style.background = user.team === 'cs' ? '#ecfdf5' : '#fff7ed';
-          team.style.color = user.team === 'cs' ? '#047857' : '#c2410c';
+          team.style.background = user.team === 'cs' ? '#ecfdf5' : (user.team === 'hidden' ? '#f1f5f9' : '#fff7ed');
+          team.style.color = user.team === 'cs' ? '#047857' : (user.team === 'hidden' ? '#475569' : '#c2410c');
           team.textContent = teamLabel(user.team);
           nameRow.append(team);
         }
@@ -447,7 +451,7 @@
           <button class="btn btn-primary" id="saveProfile" type="button">Save changes</button>
           <button class="btn btn-danger" id="deleteProfile" type="button">Delete user</button>
         </div>
-        <p class="help-text">Team decides which board dropdowns this person is listed in: CS owners, Support assignees, or neither. Disabling or deleting a user takes them off it. Username, role, and email can be changed here. Upload a PNG/JPG/WEBP avatar if you want a profile photo.</p>
+        <p class="help-text">Team decides which board dropdowns this person is listed in: CS owners, Support assignees, or neither. Hidden is for service accounts: they keep their role and API token but never appear on the board or get tickets. Disabling or deleting a user takes them off it. Username, role, and email can be changed here. Upload a PNG/JPG/WEBP avatar if you want a profile photo.</p>
         <div class="message" id="profileMessage"></div>
       `;
 
