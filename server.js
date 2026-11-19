@@ -759,11 +759,17 @@ function normalizeRole(role) {
   return ['owner', 'admin', 'cs', 'support'].includes(value) ? value : null;
 }
 // '' means on no roster; undefined means the value was not recognised.
+// 'hidden' is for service accounts (an n8n workflow's token user, say): the
+// account keeps its role, so its token works as before, but it is on no
+// roster - never in a dropdown, never auto-assigned, never in the KPIs - and
+// is not listed as a former agent either. Unlike "none", changing the role in
+// Manage Users does not quietly put it back on a team.
 function normalizeTeam(team) {
   const value = String(team ?? '').trim().toLowerCase();
   if (!value || value === 'none') return '';
-  return value === 'cs' || value === 'support' ? value : undefined;
+  return value === 'cs' || value === 'support' || value === 'hidden' ? value : undefined;
 }
+const HIDDEN_TEAM = 'hidden';
 // A user's agent code is their username when it is a trigram, otherwise the
 // local part of their email - the same order the board resolves it in.
 function userAgentCode(user) {
@@ -785,25 +791,30 @@ let agentRosterLoadedAt = 0;
 async function refreshAgentRoster() {
   let users;
   try {
-    users = await prisma.user.findMany({ where: { team: { in: ['cs', 'support'] } }, orderBy: { username: 'asc' }, select: { username: true, email: true, team: true, isActive: true } });
+    users = await prisma.user.findMany({ where: { team: { in: ['cs', 'support', HIDDEN_TEAM] } }, orderBy: { username: 'asc' }, select: { username: true, email: true, team: true, isActive: true } });
   } catch (error) {
     console.warn('Agent roster: could not read users, keeping the current roster:', error?.message || error);
     return false;
   }
-  if (!users.length) return false;
+  if (!users.some(user => user.team !== HIDDEN_TEAM)) return false;
   const next = { support: new Set(), cs: new Set() };
   const inactive = { support: new Set(), cs: new Set() };
+  // Hidden accounts are on no roster and are not "former" agents either: a
+  // service account taken off the board leaves no trace in its lists.
+  const hidden = new Set();
   for (const user of users) {
     const code = userAgentCode(user);
     if (!code) continue;
+    if (user.team === HIDDEN_TEAM) { hidden.add(code); continue; }
     (user.isActive === false ? inactive : next)[user.team].add(code);
   }
   for (const kind of ['support', 'cs']) {
     const live = kind === 'support' ? SUPPORT_AGENT_CODES : CS_AGENT_CODES;
     const legacy = kind === 'support' ? LEGACY_SUPPORT_AGENT_CODES : LEGACY_CS_AGENT_CODES;
     const former = FORMER_AGENT_CODES[kind];
-    [...live, ...legacy, ...inactive[kind]].forEach(code => { if (!next[kind].has(code)) former.add(code); });
+    [...live, ...legacy, ...inactive[kind]].forEach(code => { if (!next[kind].has(code) && !hidden.has(code)) former.add(code); });
     next[kind].forEach(code => former.delete(code));
+    hidden.forEach(code => former.delete(code));
     live.clear();
     next[kind].forEach(code => live.add(code));
   }
@@ -1311,9 +1322,51 @@ async function jiraFetchIssue(config, issueKey) {
       return jiraIssueSummary(issue);
     } catch (error) {
       lastError = error;
+      // Jira not answering is the same on every API version: trying the next
+      // one only triples the wait before the retry that may actually work.
+      if (jiraErrorIsTransient(error)) throw error;
     }
   }
   throw lastError || new Error('jira_issue_fetch_failed');
+}
+// A timeout, a dropped connection, rate limiting or a Jira-side 5xx: worth
+// asking again. A 404 or a refused login will say the same thing next time.
+function jiraErrorIsTransient(error) {
+  const msg = String(error?.message || error || '');
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return true;
+  const status = Number((msg.match(/^jira_api_error_(\d+)/) || [])[1] || 0);
+  if (status) return status === 408 || status === 429 || status >= 500;
+  if (/^jira_non_json_response_/.test(msg)) return false;
+  return /timeout|timed out|aborted|fetch failed|network|socket|ECONN|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE/i.test(msg);
+}
+// What a card shows when an issue really cannot be fetched, in words an agent
+// can act on rather than a raw API error.
+function jiraIssueErrorMessage(key, error) {
+  const msg = String(error?.message || error || '');
+  const status = Number((msg.match(/^jira_api_error_(\d+)/) || [])[1] || 0);
+  if (status === 404) return `${key} was not found in Jira. It may have been deleted, or the board's Jira account cannot see it.`;
+  if (status === 401 || status === 403) return `Jira refused access to ${key}. The board's Jira account may not have permission for it.`;
+  if (status === 429) return 'Jira is busy right now. Retrying automatically.';
+  if (jiraErrorIsTransient(error)) return 'Jira was slow to answer. Retrying automatically.';
+  return `Could not load ${key} from Jira (${msg.slice(0, 120)}).`;
+}
+// One issue, asked again on a temporary failure with a short pause between
+// tries. Never throws: an issue that still fails comes back as { key, error }
+// with transient set, so the board knows to try again rather than give up.
+async function jiraFetchIssueWithRetry(config, key, attempts = 3) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const issue = await jiraFetchIssue(config, key);
+      if (issue) return issue;
+      lastError = new Error('jira_empty_issue');
+    } catch (error) {
+      lastError = error;
+      if (!jiraErrorIsTransient(error)) break;
+    }
+    if (attempt < attempts - 1) await new Promise(r => setTimeout(r, 400 * (attempt + 1) * (attempt + 1)));
+  }
+  return { key, error: jiraIssueErrorMessage(key, lastError), transient: jiraErrorIsTransient(lastError) };
 }
 async function findTicketRecordByKanbanId(kanbanTicketId) {
   const key = String(kanbanTicketId || '').trim();
@@ -6455,14 +6508,17 @@ app.get('/api/jira/issues', requireAuth, async (req, res) => {
     // round trips, and the board waits for the whole list.
     const issues = new Array(keys.length);
     let next = 0;
+    // Retries are for a hiccup on one issue. Once several issues in a row have
+    // run out of retries, Jira itself is down: the rest get one try each so
+    // the request answers in seconds, and the board's own retry picks them up.
+    let transientFailures = 0;
     await Promise.all(Array.from({ length: Math.min(5, keys.length) }, async () => {
       while (next < keys.length) {
         const i = next++;
-        try {
-          issues[i] = await jiraFetchIssue(jira, keys[i]);
-        } catch (error) {
-          issues[i] = { key: keys[i], error: String(error.message || error) };
-        }
+        const issue = await jiraFetchIssueWithRetry(jira, keys[i], transientFailures >= 3 ? 1 : 3);
+        if (issue?.transient) transientFailures++;
+        else if (issue && !issue.error) transientFailures = 0;
+        issues[i] = issue;
       }
     }));
     return res.json({
@@ -6471,6 +6527,20 @@ app.get('/api/jira/issues', requireAuth, async (req, res) => {
       projectKey: jira.projectKey || '',
       issues
     });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+// One issue by its exact key - the board's fallback for a card the batch left
+// without an answer, so that card is looked up on its own.
+app.get('/api/jira/issue/:key', requireAuth, async (req, res) => {
+  try {
+    const jira = await getJiraConfig();
+    if (!jira.connected) return res.json({ connected: false, issue: null });
+    const key = normalizeJiraKey(req.params.key);
+    if (!/^[A-Z][A-Z0-9]+-\d+$/.test(key)) return res.status(400).json({ error: 'invalid_jira_key' });
+    const issue = await jiraFetchIssueWithRetry(jira, key);
+    return res.json({ connected: true, browseBaseUrl: jira.browseBaseUrl, issue });
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
   }
