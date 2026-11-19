@@ -13643,7 +13643,7 @@ function renderJiraTicketsView(){
 }
 async function editJiraTicketsScope(){
   const current=jiraTicketsData?.jql||jiraTicketsData?.defaultJql||'';
-  const next=window.prompt('Which Jira tickets this page reads, as a JQL query. Leave empty for the default (every ticket with the Support Agent field filled in).',current);
+  const next=window.prompt('Which Jira tickets this page reads, as a JQL query. Leave empty for the default (every ticket with the Support Agent field filled in, plus every ticket the shared Helpdesk account raised).',current);
   if(next===null)return;
   try{
     const res=await fetch('/api/jira/support-tickets/scope',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({jql:next.trim()})});
