@@ -1,0 +1,12 @@
+-- A token issued from the UI (or the OAuth connector flow) has scope = NULL,
+-- meaning "full access equal to the underlying user's role" - unchanged
+-- behavior for every token that already exists.
+--
+-- A scoped token (e.g. 'churn_signals') can ONLY be used against the one
+-- endpoint that checks for that exact scope; requireApiToken - the
+-- middleware behind the general MCP/ticket read+write surface - rejects any
+-- token that has a scope at all. This is what lets a machine credential
+-- handed to an external, unattended automation be genuinely read-only and
+-- narrow, rather than inheriting whatever its underlying user's role can do
+-- everywhere else the token mechanism is accepted.
+ALTER TABLE "ApiToken" ADD COLUMN "scope" TEXT;

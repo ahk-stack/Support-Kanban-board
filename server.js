@@ -1,5 +1,14 @@
 require('dotenv').config();
+// The SLA clock runs 08:00-12:00 and 14:00-17:00 on weekdays, and those are
+// the team's hours, not the container's. The image ships with no timezone, so
+// without this the server counted in UTC: its "weekend" began an hour early
+// and its windows sat an hour off the board's. Set before anything reads a
+// date. The team works on Tunisia time (GMT+1, no daylight saving). Only
+// SLA_TIMEZONE overrides it: a generic TZ (often UTC on a cluster) used to win
+// here, which put every KPI checkpoint an hour after the time the page showed.
+process.env.TZ = String(process.env.SLA_TIMEZONE || 'Africa/Tunis').trim();
 const prisma = require('./prismaClient');
+const { Prisma } = require('@prisma/client');
 const express = require('express');
 const helmet = require('helmet');
 const session = require('express-session');
@@ -25,7 +34,6 @@ const VIEWS_DIR = path.join(__dirname, 'views');
 const AVATAR_UPLOAD_DIR = path.join(__dirname, 'public', 'uploads', 'avatars');
 const MAX_BACKUPS = Number(process.env.STATE_BACKUP_KEEP || 50);
 const BACKUP_MIN_INTERVAL_MS = Number(process.env.STATE_BACKUP_MIN_INTERVAL_MS || 60_000);
-const RESOLVED_RETENTION_MS = Number(process.env.RESOLVED_RETENTION_MS || 72 * 60 * 60 * 1000);
 // Shift tracking (drives shift-time SLA). Kept in its own file rather than in
 // board-state.json: it is server-authoritative (the client cannot be trusted to
 // report its own shift), and it must not take part in the board's
@@ -36,9 +44,12 @@ const SHIFTS_PATH = path.join(__dirname, 'data', 'shifts.json');
 // browser crash cannot accrue SLA time overnight.
 const SHIFT_IDLE_MS = Number(process.env.SHIFT_IDLE_MS || 30 * 60 * 1000);
 const SHIFT_SWEEP_MS = 60_000;
-// SLA only ever looks back over open tickets; 120 days is far more history than
-// that needs and keeps the file small.
-const SHIFT_RETENTION_MS = 120 * 24 * 60 * 60 * 1000;
+// Kept since launch: the KPI dashboard measures resolved tickets over any
+// range back to go-live, and that needs the shift time they were worked in.
+const SHIFT_RETENTION_MS = Number(process.env.SHIFT_RETENTION_DAYS || 1095) * 24 * 60 * 60 * 1000;
+// What /api/shift/state sends each tab: the board only times open tickets, so
+// it never needs the full history, and every tab polls it.
+const SHIFT_STATE_WINDOW_MS = 120 * 24 * 60 * 60 * 1000;
 
 //const USERNAME = process.env.KANBAN_USER || 'admin';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-this-session-secret';
@@ -241,6 +252,7 @@ const JIRA_EMAIL = process.env.JIRA_EMAIL || process.env.JIRA_USER_EMAIL || '';
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN || '';
 const JIRA_PROJECT_KEY = process.env.JIRA_PROJECT_KEY || '';
 const JIRA_ISSUE_TYPE = process.env.JIRA_ISSUE_TYPE || 'Task';
+const JIRA_REQUEST_TIMEOUT_MS = 10000;
 const TEAMS_EMAIL_DOMAIN = String(process.env.TEAMS_EMAIL_DOMAIN || 'quinta.im').trim().toLowerCase();
 const TEAMS_FALLBACK_EMAIL_DOMAIN = String(process.env.TEAMS_FALLBACK_EMAIL_DOMAIN || 'quicktext.im').trim().toLowerCase();
 const POWER_AUTOMATE_RESOLVED_WEBHOOK_URL = String(
@@ -259,8 +271,21 @@ const CS_TEAMS_EMAIL_OVERRIDES = (() => {
     return {};
   }
 })();
-const SUPPORT_AGENT_CODES = new Set(['SGU','ZIO','SFA','MEZ','SHE','JBA','RMD']);
-const CS_AGENT_CODES = new Set(['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC']);
+/* The CS and Support rosters. They come from the users table (User.team, set
+   by admins in Manage Users) - see refreshAgentRoster. The lists below are only
+   what the board runs on until that first load, or if the database cannot be
+   read; they are also the "former agents" the client still recognises when it
+   attributes old tickets.
+
+   These two Sets are mutated in place, never reassigned, so every reader in
+   this file always sees the current roster. */
+const LEGACY_SUPPORT_AGENT_CODES = ['SGU','ZIO','SFA','MEZ','SHE','JBA','RMD'];
+const LEGACY_CS_AGENT_CODES = ['VGU','NAO','MBH','TBR','IBE','SKE','BKH','JAT','VPO','RKH','AZA','GGO','WPH','JFC','TNY','LGI'];
+const SUPPORT_AGENT_CODES = new Set(LEGACY_SUPPORT_AGENT_CODES);
+const CS_AGENT_CODES = new Set(LEGACY_CS_AGENT_CODES);
+// Agents who were on a roster and no longer are (disabled, deleted, or moved
+// off it). Their old tickets keep their name; they are just not offered.
+const FORMER_AGENT_CODES = { support: new Set(), cs: new Set() };
 
 const APP_BUILD_VERSION = (
   process.env.RENDER_GIT_COMMIT ||
@@ -348,7 +373,12 @@ const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeade
 const passwordResetLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false });
 
 function isAuthed(req) { return req.session && req.session.authenticated === true; }
-function requireAuth(req, res, next) { return isAuthed(req) ? next() : res.status(401).json({ error: 'unauthorized' }); }
+// Deliberately not a plain session check any more - see revalidateSession for
+// what the session alone was letting through.
+function requireAuth(req, res, next) {
+  if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
+  return revalidateSession(req, res, next);
+}
 function isAdminRole(role) { return role === 'admin' || role === 'owner'; }
 function isOwnerRole(role) { return role === 'owner'; }
 // The two decisions that are CS's to make, named once so the client's hidden
@@ -387,35 +417,212 @@ function canConfirmResolution(role, username) {
   return team === 'cs' || team === 'admin';
 }
 function canAssignSupportAgent(role, username) { return canConfirmResolution(role, username); }
+
+/* Handing a ticket out is CS's call, with one exception: a support agent may
+   take a ticket for themselves. Picking up your own work is not the decision
+   this restriction exists to protect - what it stops is one agent quietly
+   passing a ticket to somebody else. So the check is on the destination, not
+   just on who is asking. */
+function canAssignSupportAgentTo(role, username, nextAssignee) {
+  if (canAssignSupportAgent(role, username)) return true;
+  const me = String(username || '').trim().toUpperCase();
+  const to = String(nextAssignee || '').trim().toUpperCase();
+  return !!me && me === to;
+}
+
+// The team the request is being made by, and the agent code to scope rows to.
+function actorTeam(req) { return effectiveTeam(req?.session?.role, req?.session?.username); }
+function actorAgentCode(req) { return String(req?.session?.username || '').trim().toUpperCase(); }
+
 function requireAdmin(req, res, next) {
   if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
-  if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
-  return next();
+  // Revalidate first, so the role checked below is the one on the row rather
+  // than the one copied into the session at login.
+  return revalidateSession(req, res, () => {
+    if (!isAdminRole(req.session.role)) return res.status(403).json({ error: 'admin_required' });
+    return next();
+  });
+}
+/* The audit trail is a support and admin tool: it answers "what happened to
+   this ticket", which is a question the person working the ticket has to be
+   able to ask. CS is deliberately out - they see the tickets they opened and
+   nothing about how the rest of the board was handled.
+
+   Passing the gate is not the same as seeing everything: a support agent's
+   rows are narrowed to their own tickets by auditTicketWhereForActor below.
+   Admin is the only team that reads the whole log. */
+function requireSupportOrAdmin(req, res, next) {
+  if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
+  return revalidateSession(req, res, () => {
+    const team = actorTeam(req);
+    if (team !== 'admin' && team !== 'support') return res.status(403).json({ error: 'support_or_admin_required' });
+    return next();
+  });
+}
+/* The ticket-side half of the same rule, as a Prisma filter. Null means "no
+   restriction" (admin); otherwise only the tickets this support agent holds.
+   Returned as a filter rather than applied by the caller so the four audit
+   routes cannot drift apart on what "his ticket" means. */
+function auditTicketWhereForActor(req) {
+  if (actorTeam(req) === 'admin') return null;
+  return { assignedAgent: actorAgentCode(req) };
 }
 function hashApiToken(rawToken) {
   return crypto.createHash('sha256').update(String(rawToken || '')).digest('hex');
 }
-// Bearer-token auth for the MCP connector, independent of the cookie session
-// used by the browser app - each token maps 1:1 to an existing Kanban user,
-// so a tool call can never do more than that person could already do in the UI.
-async function requireApiToken(req, res, next) {
+// Looks up and validates the bearer token itself, shared by the general
+// (requireApiToken) and scoped (requireScopedApiToken) middleware below so
+// the actual lookup/validation logic can't drift between the two. Returns
+// null for "no/invalid token" and re-throws for a real DB error, so callers
+// can tell the two apart.
+async function loadBearerApiToken(req) {
   const header = String(req.headers.authorization || '');
   const match = header.match(/^Bearer\s+(.+)$/i);
-  if (!match) return res.status(401).json({ error: 'missing_token' });
+  if (!match) return null;
   const tokenHash = hashApiToken(match[1].trim());
+  const token = await prisma.apiToken.findUnique({ where: { tokenHash }, include: { user: true } });
+  if (!token || token.revokedAt || !token.user || token.user.isActive === false) return null;
+  prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } }).catch(() => null);
+  return token;
+}
+// Bearer-token auth for the MCP connector and general ticket API, independent
+// of the cookie session used by the browser app - each token maps 1:1 to an
+// existing Kanban user, so a tool call can never do more than that person
+// could already do in the UI.
+//
+// Rejects any token that carries a scope (see ApiToken.scope): a scoped
+// token is meant for exactly one narrow endpoint (requireScopedApiToken
+// below) and must not also work here, or "narrow" would be a lie the moment
+// someone reused this middleware on a new route without thinking about it.
+async function requireApiToken(req, res, next) {
   try {
-    const token = await prisma.apiToken.findUnique({ where: { tokenHash }, include: { user: true } });
-    if (!token || token.revokedAt || !token.user || token.user.isActive === false) {
-      return res.status(401).json({ error: 'invalid_token' });
-    }
+    const token = await loadBearerApiToken(req);
+    if (!token) return res.status(401).json({ error: 'invalid_token' });
+    if (token.scope) return res.status(403).json({ error: 'token_scope_mismatch' });
     req.apiUser = { id: token.user.id, username: token.user.username, role: token.user.role, displayName: token.user.displayName };
-    prisma.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } }).catch(() => null);
     return next();
   } catch (error) {
     console.error('API token auth failed:', error.message || error);
     return res.status(500).json({ error: 'auth_failed' });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Session revalidation
+//
+// requireAuth used to trust the session alone, and the session carries a copy
+// of role and username taken at login. That copy never expires, so three
+// things that are supposed to remove access did not:
+//
+//   - deactivating a user left their open session working for up to 12 hours
+//   - demoting an admin left them with admin routes until they logged out
+//   - a password reset ended only the session that performed it
+//
+// API tokens already checked isActive on every call (requireApiToken), so the
+// cookie path was the odd one out. Now both re-read the user, and the session's
+// role is refreshed from the row rather than believed.
+//
+// Cached briefly because this runs on every authenticated request, including
+// the SSE stream and the polling the board does on its own. The window is short
+// enough that a deactivation takes effect in seconds rather than hours.
+const AUTH_REVALIDATE_MS = 15 * 1000;
+const authUserCache = new Map();
+
+function invalidateAuthCache(userId) {
+  if (userId == null) authUserCache.clear();
+  else authUserCache.delete(Number(userId));
+}
+
+async function loadAuthUser(userId) {
+  const id = Number(userId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const cached = authUserCache.get(id);
+  if (cached && cached.at > Date.now() - AUTH_REVALIDATE_MS) return cached.user;
+  const user = await prisma.user.findUnique({
+    where: { id },
+    select: { id: true, username: true, role: true, isActive: true }
+  });
+  authUserCache.set(id, { at: Date.now(), user });
+  return user;
+}
+
+// Every session-authenticated request goes through this. A failure to reach the
+// database is deliberately NOT treated as "log everyone out" - the board would
+// empty itself on a blip - but it is also not treated as a fresh check: the
+// cached answer stands, and if there is none the request is refused.
+async function revalidateSession(req, res, next) {
+  if (!isAuthed(req)) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const user = await loadAuthUser(req.session.userId);
+    if (!user || user.isActive === false) {
+      req.session.destroy(() => {});
+      return res.status(401).json({ error: 'session_revoked' });
+    }
+    // The row is the authority on both, so a demotion applies to the request
+    // being served rather than the next login.
+    req.session.role = user.role;
+    req.session.username = user.username;
+    return next();
+  } catch (error) {
+    console.error('Session revalidation failed:', error?.message || error);
+    return res.status(503).json({ error: 'auth_unavailable' });
+  }
+}
+
+// Ends every session belonging to one user, across every browser they are
+// signed in on. connect-pg-simple stores the session as JSON in one table, so
+// the userId inside it is queryable. Used after a password reset and after an
+// admin deactivates or demotes someone - the point of both is that access stops
+// now, not when a cookie happens to expire.
+async function revokeAllSessionsForUser(userId, { keepSid = null } = {}) {
+  const id = Number(userId);
+  if (!Number.isInteger(id) || id <= 0) return 0;
+  invalidateAuthCache(id);
+  try {
+    const result = keepSid
+      ? await sessionPool.query(`DELETE FROM session WHERE (sess->>'userId')::int = $1 AND sid <> $2`, [id, keepSid])
+      : await sessionPool.query(`DELETE FROM session WHERE (sess->>'userId')::int = $1`, [id]);
+    return result.rowCount || 0;
+  } catch (error) {
+    console.warn('Session revocation failed:', error?.message || error);
+    return 0;
+  }
+}
+
+// A password reset that leaves the old API tokens working has not locked anyone
+// out - a token is a standing credential, and "I changed my password" is the
+// one moment a person expects everything else to stop.
+async function revokeApiTokensForUser(userId) {
+  const id = Number(userId);
+  if (!Number.isInteger(id) || id <= 0) return 0;
+  const result = await prisma.apiToken.updateMany({
+    where: { userId: id, revokedAt: null },
+    data: { revokedAt: new Date() }
+  }).catch(() => ({ count: 0 }));
+  return result.count || 0;
+}
+
+// ---------------------------------------------------------------------------
+// Which mailboxes this board may read
+//
+// /api/mcp-proxy took the mailbox to read from the request body
+// (args.mailboxOwnerEmail, and ?owner= on a mail:// URI) and passed it to
+// Graph. Every other Graph call in this file hardcodes SUPPORT_MAILBOX; that
+// one endpoint let any signed-in user - any role, including the read-only ones
+// - name any mailbox in the tenant the connected identity can open, and read
+// its mail through the board.
+//
+// The board only ever needs the helpdesk mailbox and the addresses already
+// configured as legitimate reply identities.
+function allowedReadMailboxes() {
+  return new Set([SUPPORT_MAILBOX, KANBAN_MAILBOX, ...REPLY_FROM_ADDRESSES].filter(Boolean).map(a => String(a).toLowerCase()));
+}
+function resolveReadableMailbox(requested) {
+  const wanted = normalizeEmailAddress(requested) || '';
+  if (!wanted) return SUPPORT_MAILBOX;
+  return allowedReadMailboxes().has(wanted) ? wanted : null;
+}
+
 function avatarFilenameForUserId(id) {
   if (!id) return null;
   try {
@@ -464,11 +671,17 @@ function sanitizeUser(user) {
     isActive: user.isActive !== false,
     displayName: user.displayName || null,
     email: user.email || null,
+    team: user.team || null,
     avatarUrl: avatarUrlForUserId(user.id),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt
   };
 }
+// How close together two identical audit rows have to be before the second is
+// taken as a duplicate write rather than a real repeat. A person cannot set the
+// same field to the same value twice inside this window; two racing saves do it
+// routinely.
+const AUDIT_WRITE_DEDUPE_MS = 5000;
 async function createTicketAuditEvent({
   ticketId,
   userId = null,
@@ -479,6 +692,23 @@ async function createTicketAuditEvent({
 }) {
   try {
     if (!ticketId || !eventType) return null;
+
+    // Two board tabs saving at once both read the same "before" row and both
+    // write the same diff, ~100ms apart, which is why the log holds two
+    // identical rows for every change anyone has ever made. Nothing downstream
+    // could tell them apart, so every count taken off the log read double.
+    // Guarded here rather than at each call site: this is the only door in.
+    const duplicate = await prisma.ticketEvent.findFirst({
+      where: {
+        ticketId,
+        eventType,
+        oldValue: oldValue === undefined || oldValue === null ? null : String(oldValue),
+        newValue: newValue === undefined || newValue === null ? null : String(newValue),
+        createdAt: { gte: new Date(Date.now() - AUDIT_WRITE_DEDUPE_MS) }
+      },
+      select: { id: true }
+    }).catch(() => null);
+    if (duplicate) return null;
 
     return await prisma.ticketEvent.create({
       data: {
@@ -528,6 +758,66 @@ function normalizeRole(role) {
   if (value === 'agent' || value === 'viewer') return 'support';
   return ['owner', 'admin', 'cs', 'support'].includes(value) ? value : null;
 }
+// '' means on no roster; undefined means the value was not recognised.
+function normalizeTeam(team) {
+  const value = String(team ?? '').trim().toLowerCase();
+  if (!value || value === 'none') return '';
+  return value === 'cs' || value === 'support' ? value : undefined;
+}
+// A user's agent code is their username when it is a trigram, otherwise the
+// local part of their email - the same order the board resolves it in.
+function userAgentCode(user) {
+  for (const candidate of [user?.username, String(user?.email || '').split('@')[0]]) {
+    const code = String(candidate || '').trim().toUpperCase();
+    if (/^[A-Z]{3}$/.test(code)) return code;
+  }
+  return String(user?.username || '').trim().toUpperCase();
+}
+
+/* Rebuild the rosters from the users table: every active user with a team.
+   Run at start-up and after every Manage Users change, so adding, moving,
+   disabling or deleting someone changes the dropdowns straight away.
+
+   If nobody has a team yet (the migration seeds it, so that means it has not
+   run) or the read fails, the rosters are left as they are rather than emptied
+   - an empty roster would unassign the whole board. */
+let agentRosterLoadedAt = 0;
+async function refreshAgentRoster() {
+  let users;
+  try {
+    users = await prisma.user.findMany({ where: { team: { in: ['cs', 'support'] } }, orderBy: { username: 'asc' }, select: { username: true, email: true, team: true, isActive: true } });
+  } catch (error) {
+    console.warn('Agent roster: could not read users, keeping the current roster:', error?.message || error);
+    return false;
+  }
+  if (!users.length) return false;
+  const next = { support: new Set(), cs: new Set() };
+  const inactive = { support: new Set(), cs: new Set() };
+  for (const user of users) {
+    const code = userAgentCode(user);
+    if (!code) continue;
+    (user.isActive === false ? inactive : next)[user.team].add(code);
+  }
+  for (const kind of ['support', 'cs']) {
+    const live = kind === 'support' ? SUPPORT_AGENT_CODES : CS_AGENT_CODES;
+    const legacy = kind === 'support' ? LEGACY_SUPPORT_AGENT_CODES : LEGACY_CS_AGENT_CODES;
+    const former = FORMER_AGENT_CODES[kind];
+    [...live, ...legacy, ...inactive[kind]].forEach(code => { if (!next[kind].has(code)) former.add(code); });
+    next[kind].forEach(code => former.delete(code));
+    live.clear();
+    next[kind].forEach(code => live.add(code));
+  }
+  agentRosterLoadedAt = Date.now();
+  return true;
+}
+function agentRosterPayload() {
+  return {
+    support: [...SUPPORT_AGENT_CODES],
+    cs: [...CS_AGENT_CODES],
+    former: { support: [...FORMER_AGENT_CODES.support], cs: [...FORMER_AGENT_CODES.cs] },
+    loadedAt: agentRosterLoadedAt || null
+  };
+}
 function normalizeBoardStatusForDb(stage) {
   const value = String(stage || 'new').trim().toLowerCase();
   if (value === 'new') return 'New';
@@ -550,60 +840,189 @@ function normalizeDbStatusForBoard(status) {
 function startOfLocalDay(date = new Date()) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
-function kpiDateBounds(range) {
-  const now = new Date();
-  const dayStart = startOfLocalDay(now);
-  const dayMs = 24 * 60 * 60 * 1000;
+/* The ranges the dashboard offers, and the only ones it accepts: seven
+   calendar periods, and Since launch for the whole life of the board.
+
+   Each is a calendar period, not a rolling count of days: "this week" is the
+   week you are in, "last month" is the month before this one. A period that
+   has finished ends on its own last millisecond; a period still running ends
+   now, because there is nothing yet to report past that.
+
+   `label` is what the dashboard prints, so the heading and the figures under it
+   can only ever come from the same entry. An unrecognised key falls back to
+   today - and says so, by returning today's label with it, which is what stops
+   the old failure where picking a quarter showed a single day of data under a
+   quarter's heading.
+
+   Weeks start Monday: `(day + 6) % 7` turns JS's Sunday-is-0 into a
+   Monday-is-0 offset. */
+const KPI_RANGE_KEYS = ['today', 'this_week', 'last_week', 'this_month', 'last_month', 'this_quarter', 'last_quarter', 'since_launch'];
+// Aliases kept so an older client, or a session that stored one of the ranges
+// this list replaced, still resolves to a real period instead of silently
+// reading as Today.
+const KPI_RANGE_ALIASES = {
+  day: 'today', week: 'this_week', month: 'this_month', quarter: 'this_quarter',
+  last_30_days: 'this_month', this_year: 'this_quarter', all_time: 'since_launch'
+};
+
+/* When the board went live, for the "Since launch" range and the all-time
+   total admins see on the KPI dashboard. KANBAN_LIVE_SINCE (an ISO date) pins
+   it; otherwise it is the first ticket the database holds, which on a board
+   that started empty is the same moment. Looked up once and refreshed hourly -
+   kpiDateBounds is synchronous and called on every KPI request. */
+const KANBAN_LIVE_SINCE = (() => {
+  const raw = String(process.env.KANBAN_LIVE_SINCE || '').trim();
+  const at = raw ? new Date(raw) : null;
+  return at && !Number.isNaN(at.getTime()) ? at : null;
+})();
+let kpiLaunchAt = KANBAN_LIVE_SINCE;
+async function refreshKpiLaunchAt() {
+  if (KANBAN_LIVE_SINCE) return KANBAN_LIVE_SINCE;
+  try {
+    const first = await prisma.ticket.findFirst({ orderBy: { createdAt: 'asc' }, select: { createdAt: true } });
+    if (first?.createdAt) kpiLaunchAt = new Date(first.createdAt);
+  } catch (error) {
+    console.warn('Launch date lookup failed:', error?.message || error);
+  }
+  return kpiLaunchAt;
+}
+setTimeout(() => { void refreshKpiLaunchAt(); }, 0);
+setInterval(() => { void refreshKpiLaunchAt(); }, 60 * 60 * 1000).unref?.();
+function normalizeKpiRange(range) {
   const key = String(range || 'today').trim().toLowerCase();
-  if (key === 'today' || key === 'day') return { start: dayStart, end: now, label: 'Today' };
-  if (key === 'this_week' || key === 'week') {
-    const dow = (dayStart.getDay() + 6) % 7;
-    return { start: new Date(dayStart.getTime() - dow * dayMs), end: now, label: 'This week' };
-  }
+  if (KPI_RANGE_KEYS.includes(key)) return key;
+  return KPI_RANGE_ALIASES[key] || 'today';
+}
+function endOfPeriod(startOfNext) { return new Date(startOfNext.getTime() - 1); }
+/* tzOffset is the browser's Date#getTimezoneOffset() (minutes, UTC minus
+   local). With it, "today" starts at the agent's midnight; without it, at the
+   server's - which in the cluster is UTC, so a Paris agent's Today began at
+   02:00 and the KPI disagreed with the board about what was resolved today. */
+function kpiDateBounds(range, tzOffset) {
+  const offsetRaw = tzOffset === undefined || tzOffset === null || tzOffset === '' ? NaN : Number(tzOffset);
+  const offsetMs = Number.isFinite(offsetRaw) && Math.abs(offsetRaw) <= 14 * 60 ? offsetRaw * 60_000 : null;
+  // Calendar fields of an instant, and the instant a calendar day starts, in
+  // the asker's timezone (or the server's when it is unknown).
+  const fields = (date) => {
+    if (offsetMs === null) return { y: date.getFullYear(), m: date.getMonth(), d: date.getDate(), wd: date.getDay() };
+    const wall = new Date(date.getTime() - offsetMs);
+    return { y: wall.getUTCFullYear(), m: wall.getUTCMonth(), d: wall.getUTCDate(), wd: wall.getUTCDay() };
+  };
+  const dayAt = (y, m, d) => (offsetMs === null ? new Date(y, m, d) : new Date(Date.UTC(y, m, d) + offsetMs));
+  const now = new Date();
+  const today = fields(now);
+  const dayStart = dayAt(today.y, today.m, today.d);
+  const year = today.y;
+  const month = today.m;
+  const mondayOffset = (today.wd + 6) % 7;
+  const thisWeekStart = dayAt(today.y, today.m, today.d - mondayOffset);
+  const key = normalizeKpiRange(range);
+
+  if (key === 'today') return { key, start: dayStart, end: now, label: 'Today' };
+  if (key === 'this_week') return { key, start: thisWeekStart, end: now, label: 'This week' };
   if (key === 'last_week') {
-    const dow = (dayStart.getDay() + 6) % 7;
-    const thisWeekStart = dayStart.getTime() - dow * dayMs;
-    return { start: new Date(thisWeekStart - 7 * dayMs), end: new Date(thisWeekStart - 1), label: 'Last week' };
+    return { key, start: dayAt(today.y, today.m, today.d - mondayOffset - 7), end: endOfPeriod(thisWeekStart), label: 'Last week' };
   }
-  if (key === 'this_month' || key === 'month') return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now, label: 'This month' };
-  if (key === 'last_30_days') return { start: new Date(dayStart.getTime() - 29 * dayMs), end: now, label: 'Last 30 days' };
-  if (key === 'this_quarter' || key === 'quarter') {
-    return { start: new Date(now.getFullYear(), quarterStartMonth(now.getMonth()), 1), end: now, label: 'This quarter' };
+  if (key === 'this_month') return { key, start: dayAt(year, month, 1), end: now, label: 'This month' };
+  if (key === 'last_month') {
+    return { key, start: dayAt(year, month - 1, 1), end: endOfPeriod(dayAt(year, month, 1)), label: 'Last month' };
+  }
+  if (key === 'this_quarter') {
+    return { key, start: dayAt(year, quarterStartMonth(month), 1), end: now, label: 'This quarter' };
   }
   if (key === 'last_quarter') {
-    const thisQuarterStart = new Date(now.getFullYear(), quarterStartMonth(now.getMonth()), 1);
-    const start = new Date(thisQuarterStart.getFullYear(), thisQuarterStart.getMonth() - 3, 1);
-    return { start, end: new Date(thisQuarterStart.getTime() - 1), label: 'Last quarter' };
+    const thisQuarterStart = dayAt(year, quarterStartMonth(month), 1);
+    return {
+      key,
+      start: dayAt(year, quarterStartMonth(month) - 3, 1),
+      end: endOfPeriod(thisQuarterStart),
+      label: 'Last quarter'
+    };
   }
-  if (key === 'this_year') return { start: new Date(now.getFullYear(), 0, 1), end: now, label: 'This year' };
-  return { start: dayStart, end: now, label: 'Today' };
+  // From the start of the day the board went live. Before the launch date is
+  // known (the first seconds after a restart) it starts at the epoch, which
+  // for a board with nothing older is the same answer.
+  if (key === 'since_launch') {
+    const launch = kpiLaunchAt ? fields(kpiLaunchAt) : null;
+    return { key, start: launch ? dayAt(launch.y, launch.m, launch.d) : new Date(0), end: now, label: 'Since launch' };
+  }
+  return { key: 'today', start: dayStart, end: now, label: 'Today' };
 }
-// The client offers quarter ranges in its dropdown. They were missing above, so
-// picking "This quarter" silently fell through to Today and the dashboard
-// showed a day of data under a quarter's heading.
 function quarterStartMonth(month) { return Math.floor(month / 3) * 3; }
 function isDateInBounds(value, bounds) {
   if (!value || !bounds?.start || !bounds?.end) return false;
   const date = value instanceof Date ? value : new Date(value);
   return !Number.isNaN(date.getTime()) && date >= bounds.start && date <= bounds.end;
 }
+/* Which range a ticket counts in: exactly one, decided by one date.
+
+   An open ticket belongs to the range it arrived in. A resolved one belongs to
+   the range it was resolved in, not the one it arrived in - that is the figure
+   "resolved this week" is asking for.
+
+   Every ticket therefore has a single date that places it, which is what makes
+   the ranges add up: a ticket created in March and resolved in April is in
+   March's Created and April's Resolved, and in neither range twice.
+
+   `updatedAt` is deliberately NOT one of those dates. It used to be: a ticket
+   counted if it was created OR last touched inside the range, and since
+   `updatedAt` moves on every save - a note, a priority change, a mail sync -
+   a ticket from January reappeared in Today's figures the moment anyone
+   touched it, and the same ticket was counted again in every range it had ever
+   been edited in. That is what made the numbers drift from the board.
+
+   The one place it survives is a resolved ticket with no `resolvedAt`.
+   That column is nullable and everything resolved before it started being
+   written still has NULL in it. Keying those on nothing at all dropped them
+   out of Total, Resolved and every by-category/company/CS figure at once - the
+   same board showed 57 tickets and 52 resolved for an agent, then 43 and 32,
+   with nothing resolved in between. For those rows the last time the row was
+   touched is the closest thing to a resolution date we hold. */
 function kpiTicketInRange(ticket, bounds) {
   const statusKey = normalizeDbStatusForBoard(ticket?.status);
-  if (statusKey === 'res') return isDateInBounds(ticket?.resolvedAt, bounds);
-  return isDateInBounds(ticket?.createdAt, bounds) || isDateInBounds(ticket?.updatedAt, bounds);
+  if (statusKey === 'res') return isDateInBounds(kpiResolvedDate(ticket), bounds);
+  return isDateInBounds(ticket?.createdAt, bounds);
 }
-function resolvedAtFromState(state, ticketId) {
-  const touched = Number(state?.ticketStageTouchedAt?.[ticketId] || 0);
-  if (touched > 0) return touched;
-  const created = Date.parse(state?.ticketCreatedAt?.[ticketId] || '');
-  return Number.isFinite(created) ? created : 0;
+/* The date a resolved ticket counts on: resolvedAt, else updatedAt - never
+   before the ticket arrived, never after now. A resolvedAt written from a
+   board clock a little ahead, or a stage time older than the row, put a
+   ticket outside every range, so "Since launch" resolved fewer tickets than
+   the launch banner over the very same tickets. */
+function kpiResolvedDate(ticket) {
+  const created = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+  const raw = new Date(ticket?.resolvedAt || ticket?.updatedAt || 0).getTime();
+  let at = Number.isFinite(raw) && raw > 0 ? raw : created;
+  if (Number.isFinite(created) && at < created) at = created;
+  at = Math.min(at, Date.now());
+  return Number.isFinite(at) ? new Date(at) : null;
 }
-function isResolvedHiddenInState(state, ticketId, now = Date.now()) {
-  if (normalizeBoardStatusForDb(state?.ticketState?.[ticketId] || 'new') !== 'Resolved') return false;
-  const meta = (state?.ticketResolutionMeta && typeof state.ticketResolutionMeta === 'object') ? state.ticketResolutionMeta[ticketId] : null;
-  if (meta?.confirmedAt) return true;
-  const resolvedAt = resolvedAtFromState(state, ticketId);
-  return !!resolvedAt && now - resolvedAt >= RESOLVED_RETENTION_MS;
+/* SLA met % started over for these agents. A ticket they resolved before the
+   moment still counts as resolved, and in the resolve times, but not as on
+   time or late for them. */
+// SFA's reset of 2026-10-15 is covered by SLA_BASELINE_AT now: everything
+// resolved before the baseline counts as met, for everyone. Add
+// { CODE: <ms> } to start one agent's percentage over on top of that.
+const SLA_COUNTED_FROM_BY_AGENT = {};
+// True when every agent the figure is about has had their SLA reset since this
+// ticket was resolved, so it drops out of that figure's met/late count.
+function kpiSlaResetFor(ticket, agentKeys) {
+  const keys = (agentKeys || []).map(k => String(k || '').trim().toUpperCase()).filter(Boolean);
+  if (!keys.length) return false;
+  const resolvedMs = kpiResolvedDate(ticket)?.getTime();
+  if (!Number.isFinite(resolvedMs)) return false;
+  return keys.every(k => resolvedMs < Number(SLA_COUNTED_FROM_BY_AGENT[k] || 0));
+}
+// Whose figures a KPI ticket counts towards: the agent the dashboard is pinned
+// to, or else the rows of the breakdown table it fans out to.
+function kpiSlaAgentKeys(ticket, team, slaAgent) {
+  if (slaAgent) return [slaAgent];
+  const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
+  const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
+  if (team === 'cs') return [csOwner || 'Unassigned'];
+  if (team === 'support') return [assignee || 'Unassigned'];
+  const keys = [assignee || 'Unassigned'];
+  if (csOwner && csOwner !== assignee) keys.push(csOwner);
+  return keys;
 }
 function safeDateForDb(value) {
   if (!value) return null;
@@ -807,19 +1226,22 @@ async function jiraApiRequest(config, pathname, options = {}) {
   const url = `${config.baseUrl}${pathname.startsWith('/') ? '' : '/'}${pathname}`;
   const modes = config.authMode === 'basic'
     ? ['basic']
-    : (config.authMode === 'bearer' ? ['bearer'] : ['basic', 'bearer']);
+    : (config.authMode === 'bearer' ? ['bearer'] : (config.accessToken ? ['bearer', 'basic'] : ['basic', 'bearer']));
   let lastStatus = 0;
   let lastText = '';
   for (const mode of modes) {
     if (mode === 'basic' && (!config.email || !config.apiToken)) continue;
     if (mode === 'bearer' && !(config.accessToken || config.apiToken)) continue;
+    // Bounded: a Jira that never answers used to hold the board's details
+    // request open indefinitely, and the panel sat on "Loading..." for good.
     const response = await fetch(url, {
       method: options.method || 'GET',
       headers: {
         ...jiraAuthHeaders(config, mode),
         ...(options.headers || {})
       },
-      body: options.body
+      body: options.body,
+      signal: AbortSignal.timeout(JIRA_REQUEST_TIMEOUT_MS)
     });
     if (response.ok) {
       if (response.status === 204) return null;
@@ -874,9 +1296,12 @@ function jiraIssueSummary(issue) {
 async function jiraFetchIssue(config, issueKey) {
   const key = normalizeJiraKey(issueKey);
   if (!key) throw new Error('missing_jira_issue_key');
+  // v2 first: it answers on Jira Cloud and on a self-hosted Jira alike, while a
+  // self-hosted one answers v3 with a 200 login page - a wasted round trip per
+  // issue before falling through to v2 anyway.
   const paths = [
-    `/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`,
     `/rest/api/2/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`,
+    `/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`,
     `/rest/api/latest/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,reporter,issuelinks,comment`
   ];
   let lastError = null;
@@ -902,7 +1327,7 @@ async function findTicketRecordByKanbanId(kanbanTicketId) {
     }
   });
 }
-// Server-owned board fields (ticketJira, ticketDuplicateOf) are written here
+// Server-owned board fields (ticketJira, ticketDuplicateOf, ticketVelmaBug) are written here
 // rather than by whatever board snapshot happens to arrive next. Every link,
 // unlink and duplicate marking goes through an endpoint that calls this, so
 // this is the only writer - see the note on safeWriteState for why a client
@@ -913,7 +1338,9 @@ function writeServerOwnedFieldIntoState(field, externalId, nextValue) {
   try {
     const state = safeReadState();
     const map = (state[field] && typeof state[field] === 'object') ? state[field] : {};
-    if (String(map[id] || '') === String(nextValue || '')) return null;
+    // By content, not String(): a Velma link is an object, and every object
+    // stringifies to the same "[object Object]".
+    if (JSON.stringify(map[id] || null) === JSON.stringify(nextValue || null)) return null;
     if (nextValue) map[id] = nextValue; else delete map[id];
     state[field] = map;
     fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
@@ -1079,6 +1506,139 @@ function persistShiftStore() {
   } catch (error) {
     console.warn('Shift store write failed:', error.message || error);
   }
+  scheduleShiftStoreDbSave();
+}
+
+/* The shift store is also kept in Postgres (OAuthToken "shift-store", the same
+   key-value use the leave rows make of it).
+
+   data/ is not a persistent volume: every deploy starts the container on an
+   empty one. The board state is rebuilt from the database at boot, but the
+   shift history was not, so each deploy wiped every agent's logged-in time -
+   and with it every resolved ticket's SLA measure, which then read "met in 0h".
+
+   The file stays the fast local copy. The database is written a few seconds
+   after a change (a heartbeat a minute per agent does not need a row write
+   each), and once more on shutdown. At boot the two are merged, so a
+   heartbeat that lands before the database answers is not lost either.
+
+   `since` is when the history became complete: a ticket whose clock started
+   before it cannot be measured, and is reported as such rather than as met. */
+const SHIFT_STORE_DB_KEY = 'shift-store';
+const SHIFT_STORE_DB_SAVE_DELAY_MS = 10 * 1000;
+let shiftStoreDbReady = false;
+let shiftStoreDbTimer = null;
+
+function scheduleShiftStoreDbSave() {
+  // Not before the database copy has been merged in: writing the bare file
+  // over it would be the very wipe this exists to prevent.
+  if (!shiftStoreDbReady || shiftStoreDbTimer) return;
+  shiftStoreDbTimer = setTimeout(() => { shiftStoreDbTimer = null; void saveShiftStoreToDb(); }, SHIFT_STORE_DB_SAVE_DELAY_MS);
+  shiftStoreDbTimer.unref?.();
+}
+async function saveShiftStoreToDb() {
+  try {
+    const metadata = JSON.parse(JSON.stringify(shiftStore));
+    await prisma.oAuthToken.upsert({
+      where: { provider: SHIFT_STORE_DB_KEY },
+      create: { provider: SHIFT_STORE_DB_KEY, metadata },
+      update: { metadata }
+    });
+  } catch (error) {
+    console.warn('Shift store database write failed:', error.message || error);
+  }
+}
+
+// One interval list from two copies of it, keyed by start. Where both have the
+// same interval, a closed end beats an open one (the copy that saw it close is
+// the newer), and two closed ends keep the later.
+function mergeIntervals(a = [], b = [], mergeExtra = (x) => x) {
+  const byStart = new Map();
+  for (const item of [...a, ...b]) {
+    const key = Number(item?.start || 0);
+    if (!key) continue;
+    const seen = byStart.get(key);
+    if (!seen) { byStart.set(key, { ...item }); continue; }
+    const openA = seen.end === null || seen.end === undefined;
+    const openB = item.end === null || item.end === undefined;
+    const end = openA && openB ? null : openA ? item.end : openB ? seen.end : Math.max(Number(seen.end), Number(item.end));
+    byStart.set(key, mergeExtra({ ...seen, ...item, end }, seen, item));
+  }
+  return [...byStart.values()].sort((x, y) => x.start - y.start);
+}
+function mergeShiftStores(a, b, now = Date.now()) {
+  const out = { agents: {} };
+  const sinces = [a?.since, b?.since].map(Number).filter(v => v > 0);
+  if (sinces.length) out.since = Math.min(...sinces);
+  const codes = new Set([...Object.keys(a?.agents || {}), ...Object.keys(b?.agents || {})]);
+  for (const code of codes) {
+    const ra = a?.agents?.[code] || {};
+    const rb = b?.agents?.[code] || {};
+    // An open session remembers the last heartbeat its copy saw, in case it
+    // turns out to be one the container stopped in the middle of.
+    const withSeen = rec => (rec.sessions || []).map(s => (s.end === null || s.end === undefined) ? { ...s, seen: Number(rec.lastSeen || 0) } : s);
+    const sessions = mergeIntervals(withSeen(ra), withSeen(rb), (merged, x, y) => ({
+      ...merged,
+      breaks: mergeIntervals(x.breaks, y.breaks)
+    })).map(s => ({ ...s, breaks: s.breaks || [] }));
+    // Only the last session can still be running. One left open in the older
+    // copy ends at that copy's last heartbeat - not when the next one began,
+    // which would count the time the board was down as worked.
+    for (let i = 0; i < sessions.length - 1; i++) {
+      const s = sessions[i];
+      if (s.end === null || s.end === undefined) s.end = Math.max(s.start, Math.min(sessions[i + 1].start, s.seen || sessions[i + 1].start));
+    }
+    sessions.forEach(s => { delete s.seen; });
+    const rec = { lastSeen: Math.max(Number(ra.lastSeen || 0), Number(rb.lastSeen || 0)), sessions };
+    const leaves = mergeIntervals(ra.leaves, rb.leaves);
+    if (leaves.length) rec.leaves = leaves;
+    out.agents[code] = rec;
+  }
+  if (!out.since) {
+    const starts = Object.values(out.agents).flatMap(r => r.sessions.map(s => Number(s.start))).filter(v => v > 0);
+    out.since = starts.length ? Math.min(...starts) : now;
+  }
+  // Set by rebuildShiftHistoryFromActivity. measuredSince is when live
+  // tracking began; the rest records the rebuild that filled in before it.
+  const measured = [a?.measuredSince, b?.measuredSince].map(Number).filter(v => v > 0);
+  if (measured.length) out.measuredSince = Math.min(...measured);
+  for (const key of ['rebuiltAt', 'rebuiltFrom']) {
+    const v = Math.max(Number(a?.[key] || 0), Number(b?.[key] || 0));
+    if (v > 0) out[key] = v;
+  }
+  return out;
+}
+async function loadShiftStoreFromDb() {
+  try {
+    const row = await prisma.oAuthToken.findUnique({ where: { provider: SHIFT_STORE_DB_KEY } });
+    const stored = row?.metadata && typeof row.metadata === 'object' && row.metadata.agents ? row.metadata : null;
+    shiftStore = mergeShiftStores(stored, shiftStore);
+    shiftStoreDbReady = true;
+    persistShiftStore();
+    void saveShiftStoreToDb();
+    console.log(`Shift history loaded (${Object.keys(shiftStore.agents).length} agent(s), complete since ${new Date(shiftStore.since).toISOString()}).`);
+    if (!shiftStore.rebuiltAt) {
+      rebuildShiftHistoryFromActivity()
+        .then(r => console.log('Shift history rebuilt from the activity log:', JSON.stringify(r)))
+        .catch(e => console.warn('Shift history rebuild failed:', e?.message || e));
+    }
+  } catch (error) {
+    // Try again rather than start saving over a copy we could not read.
+    console.warn('Shift store database read failed, retrying:', error.message || error);
+    setTimeout(() => { void loadShiftStoreFromDb(); }, 30 * 1000).unref?.();
+  }
+}
+// Kubernetes stops a pod with SIGTERM: save the last few seconds first.
+let shiftStoreFlushedOnExit = false;
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.once(signal, async () => {
+    if (!shiftStoreFlushedOnExit && shiftStoreDbReady) {
+      shiftStoreFlushedOnExit = true;
+      clearTimeout(shiftStoreDbTimer);
+      await Promise.race([saveShiftStoreToDb(), new Promise(resolve => setTimeout(resolve, 3000))]);
+    }
+    process.exit(0);
+  });
 }
 
 function shiftAgentRecord(code) {
@@ -1137,21 +1697,291 @@ function shiftAgentFromRequest(req, bodyAgent) {
   return null;
 }
 
+/* A break is fifteen minutes, and there is one every two hours.
+
+   Enforced on read rather than by a timer: a break that was started and never
+   ended is simply treated as having ended fifteen minutes after it began, so
+   an agent who closes the laptop mid-break does not get an open-ended pause on
+   their SLA clock. The cooldown is measured from the START of the last break -
+   from the end would let someone take fifteen minutes, come back, and be
+   eligible again two hours later having actually paused twice in that window. */
+const SHIFT_BREAK_MS = Number(process.env.SHIFT_BREAK_MS || 15 * 60 * 1000);
+const SHIFT_BREAK_COOLDOWN_MS = Number(process.env.SHIFT_BREAK_COOLDOWN_MS || 2 * 60 * 60 * 1000);
+
+// The moment a break actually finished, capped at its fifteen minutes.
+function breakEndMs(b, now = Date.now()) {
+  const start = Number(b?.start || 0);
+  if (!start) return 0;
+  const cap = start + SHIFT_BREAK_MS;
+  const ended = (b.end === null || b.end === undefined) ? now : Number(b.end);
+  return Math.min(ended, cap);
+}
+// Closes any break that has run past its cap, so the stored history matches
+// what the clock already assumes.
+function capExpiredBreaks(rec, now = Date.now()) {
+  let changed = false;
+  (rec?.sessions || []).forEach(session => {
+    (session.breaks || []).forEach(b => {
+      if ((b.end === null || b.end === undefined) && Number(b.start || 0) + SHIFT_BREAK_MS <= now) {
+        b.end = Number(b.start) + SHIFT_BREAK_MS;
+        changed = true;
+      }
+    });
+  });
+  return changed;
+}
+function lastBreakStart(rec) {
+  let latest = 0;
+  (rec?.sessions || []).forEach(session => {
+    (session.breaks || []).forEach(b => { latest = Math.max(latest, Number(b.start || 0)); });
+  });
+  return latest;
+}
+// How long until this agent may take another break. 0 means now.
+function breakCooldownRemaining(rec, now = Date.now()) {
+  const last = lastBreakStart(rec);
+  if (!last) return 0;
+  return Math.max(0, (last + SHIFT_BREAK_COOLDOWN_MS) - now);
+}
+
 function shiftSnapshotFor(code) {
   const rec = shiftStore.agents[code];
   if (!rec) return { agent: code, onShift: false, onBreak: false, sessions: [] };
+  const now = Date.now();
+  capExpiredBreaks(rec, now);
   const last = rec.sessions[rec.sessions.length - 1];
+  const openBreak = last && last.end === null ? last.breaks.find(b => b.end === null) : null;
   return {
     agent: code,
     onShift: !!(last && last.end === null),
-    onBreak: !!(last && last.end === null && last.breaks.some(b => b.end === null)),
+    onBreak: !!openBreak,
+    // What the button needs to draw itself without knowing the rules.
+    breakEndsAt: openBreak ? Number(openBreak.start) + SHIFT_BREAK_MS : 0,
+    breakMs: SHIFT_BREAK_MS,
+    cooldownMs: SHIFT_BREAK_COOLDOWN_MS,
+    cooldownRemainingMs: breakCooldownRemaining(rec, now),
     lastSeen: rec.lastSeen || 0,
-    sessions: rec.sessions
+    sessions: rec.sessions.filter(s => s.end === null || s.end === undefined || Number(s.end) >= now - SHIFT_STATE_WINDOW_MS),
+    leaves: rec.leaves || []
   };
 }
 
+/* Shift history before live tracking, rebuilt from the activity log.
+
+   Until shifts were kept in the database, every deploy wiped data/shifts.json,
+   and with it every agent's logged-in time from launch to then. That cannot be
+   read back - but what each agent DID on the board can: every save, move,
+   assignment, comment and reply is in TicketEvent / TicketComment with the
+   user and the time, back to launch. An open board saves by itself as it works
+   (assignments, CS owners), so that log follows a person's presence closely.
+
+   Each agent's actions are grouped into sessions: actions less than
+   REBUILD_GAP_MS apart are one session, which then runs from REBUILD_PAD_MS
+   before the first to REBUILD_PAD_MS after the last. Days with no action at
+   all get no session - the agent was off, which stops the clock just as a
+   day off does in live tracking. Shift time is still clipped to office hours
+   by shiftElapsedMs, like any session.
+
+   Only the time before live tracking (measuredSince) is filled, so real
+   heartbeats are never overwritten. Rebuilt sessions carry rebuilt: true;
+   running it again replaces them. */
+const REBUILD_GAP_MS = 90 * 60 * 1000;
+const REBUILD_PAD_MS = 15 * 60 * 1000;
+async function rebuildShiftHistoryFromActivity() {
+  if (!shiftStoreDbReady) throw new Error('the shift history has not loaded from the database yet');
+  const launch = kpiLaunchAt || await refreshKpiLaunchAt();
+  const measuredSince = Number(shiftStore.measuredSince || shiftStore.since || Date.now());
+  const from = launch ? startOfLocalDay(launch).getTime() : measuredSince - SHIFT_RETENTION_MS;
+  if (!(measuredSince > from)) return { ok: true, sessions: 0, note: 'live tracking already covers everything since launch' };
+
+  const fromDate = new Date(from);
+  const untilDate = new Date(measuredSince);
+  const rows = await prisma.$queryRaw`
+    SELECT UPPER(TRIM(u."username")) AS "code", e."createdAt" AS "at"
+    FROM "TicketEvent" e JOIN "User" u ON u."id" = e."userId"
+    WHERE e."createdAt" >= ${fromDate} AND e."createdAt" < ${untilDate}
+    UNION ALL
+    SELECT UPPER(TRIM(u."username")) AS "code", c."createdAt" AS "at"
+    FROM "TicketComment" c JOIN "User" u ON u."id" = c."userId"
+    WHERE c."createdAt" >= ${fromDate} AND c."createdAt" < ${untilDate}`;
+
+  const byAgent = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const code = String(row.code || '');
+    if (!SUPPORT_AGENT_CODES.has(code) && !CS_AGENT_CODES.has(code)) continue;
+    const at = new Date(row.at).getTime();
+    if (!Number.isFinite(at)) continue;
+    if (!byAgent.has(code)) byAgent.set(code, []);
+    byAgent.get(code).push(at);
+  }
+
+  const summary = {};
+  let total = 0;
+  for (const code of new Set([...Object.keys(shiftStore.agents), ...byAgent.keys()])) {
+    const rec = shiftAgentRecord(code);
+    // Replace an earlier rebuild; never touch a live session.
+    rec.sessions = rec.sessions.filter(s => !s.rebuilt);
+    const times = (byAgent.get(code) || []).sort((a, b) => a - b);
+    const built = [];
+    for (const at of times) {
+      const last = built[built.length - 1];
+      const sameDay = last && startOfLocalDay(new Date(last.lastAt)).getTime() === startOfLocalDay(new Date(at)).getTime();
+      if (last && sameDay && at - last.lastAt <= REBUILD_GAP_MS) last.lastAt = at;
+      else built.push({ firstAt: at, lastAt: at });
+    }
+    const sessions = built.map(b => ({
+      start: Math.max(from, b.firstAt - REBUILD_PAD_MS),
+      end: Math.min(measuredSince, b.lastAt + REBUILD_PAD_MS),
+      breaks: [],
+      rebuilt: true
+    })).filter(s => s.end > s.start);
+    rec.sessions = [...sessions, ...rec.sessions].sort((a, b) => a.start - b.start);
+    if (sessions.length) {
+      summary[code] = { sessions: sessions.length, days: new Set(sessions.map(s => startOfLocalDay(new Date(s.start)).getTime())).size };
+      total += sessions.length;
+    }
+  }
+  shiftStore.measuredSince = measuredSince;
+  shiftStore.since = Math.min(Number(shiftStore.since || measuredSince), from);
+  shiftStore.rebuiltAt = Date.now();
+  shiftStore.rebuiltFrom = from;
+  persistShiftStore();
+  await saveShiftStoreToDb();
+  return { ok: true, from: fromDate.toISOString(), until: untilDate.toISOString(), sessions: total, agents: summary };
+}
+
 shiftStore = loadShiftStore();
+void loadShiftStoreFromDb();
 setInterval(sweepIdleShifts, SHIFT_SWEEP_MS).unref?.();
+
+/* Leave: a support agent who is off (holiday, sick, off for the day).
+
+   While off, an agent cannot be given tickets - not by the board's automatic
+   distribution, not from the assign menu, not by the SGU redistribution and
+   not through the Claude connector. Tickets they already hold stay with them.
+
+   Set by an admin for anyone, or by the agent for themselves, with an optional
+   return date: the day they are back, so the leave ends at the start of that
+   day and nobody has to remember to switch them on again. No return date means
+   off until someone turns it off.
+
+   Kept in Postgres (OAuthToken, provider "agent-leave:<CODE>", the same
+   key-value use the Jira settings make of it) rather than in data/shifts.json:
+   leave runs for days or weeks, and must not be forgotten by a redeploy that
+   starts on an empty volume. Held in memory as well, because every board reads
+   it on each shift poll. */
+const AGENT_LEAVE_PREFIX = 'agent-leave:';
+const AGENT_LEAVE_MAX_MS = 366 * 24 * 60 * 60 * 1000;
+let agentLeave = {};
+const isLeaveActive = (leave, now = Date.now()) => !!leave && (!leave.until || Number(leave.until) > now);
+function activeAgentLeave(now = Date.now()) {
+  return Object.fromEntries(Object.entries(agentLeave).filter(([, leave]) => isLeaveActive(leave, now)));
+}
+const isAgentOnLeave = (code, now = Date.now()) => isLeaveActive(agentLeave[String(code || '').trim().toUpperCase()], now);
+async function loadAgentLeave() {
+  try {
+    const rows = await prisma.oAuthToken.findMany({ where: { provider: { startsWith: AGENT_LEAVE_PREFIX } } });
+    const next = {};
+    const now = Date.now();
+    for (const row of rows) {
+      const code = row.provider.slice(AGENT_LEAVE_PREFIX.length);
+      const meta = (row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)) ? row.metadata : null;
+      if (!meta || !SUPPORT_AGENT_CODES.has(code)) continue;
+      // A leave that has run out is removed rather than kept around, so the
+      // table only ever holds who is off now or later.
+      if (!isLeaveActive(meta, now)) { await prisma.oAuthToken.delete({ where: { provider: row.provider } }).catch(() => null); continue; }
+      next[code] = meta;
+    }
+    agentLeave = next;
+    syncLeavePeriods();
+  } catch (error) {
+    console.warn('Agent leave load failed:', error?.message || error);
+  }
+  return agentLeave;
+}
+/* The SLA clock is on hold while the assigned agent is off, so it needs to
+   know when they were off, not only whether they are now - and the leave
+   rows above are deleted when a leave ends. So every leave is also kept as a
+   period next to the agent's shift sessions: rec.leaves = [{ start, until,
+   end }], where end is null while it runs and until is the return date it was
+   given. Kept in the shift store because that is what the clock is computed
+   from, and the board receives it with the sessions.
+
+   Brought into line with agentLeave after every change and on startup, which
+   also opens a period for anyone already off when this first runs. */
+function leavePeriodEnd(period, now = Date.now()) {
+  if (period.end !== null && period.end !== undefined) return Number(period.end);
+  const until = Number(period.until || 0);
+  return until && until < now ? until : now;
+}
+function syncLeavePeriods(now = Date.now()) {
+  let changed = false;
+  const codes = new Set([...Object.keys(agentLeave), ...Object.keys(shiftStore.agents)]);
+  for (const code of codes) {
+    const leave = agentLeave[code];
+    const active = isLeaveActive(leave, now);
+    const existing = shiftStore.agents[code];
+    if (!active && !existing?.leaves?.length) continue;
+    const rec = shiftAgentRecord(code);
+    rec.leaves = Array.isArray(rec.leaves) ? rec.leaves : [];
+    const open = rec.leaves.find(p => p.end === null || p.end === undefined);
+    if (active) {
+      const until = leave.until ? Number(leave.until) : null;
+      if (!open) {
+        rec.leaves.push({ start: Number(leave.since) || now, until, end: null });
+        changed = true;
+      } else if (open.until !== until) {
+        open.until = until;
+        changed = true;
+      }
+    } else if (open) {
+      open.end = leavePeriodEnd(open, now);
+      changed = true;
+    }
+  }
+  if (changed) persistShiftStore();
+}
+async function setAgentLeave(code, leave) {
+  const provider = `${AGENT_LEAVE_PREFIX}${code}`;
+  if (leave) {
+    await prisma.oAuthToken.upsert({
+      where: { provider },
+      create: { provider, metadata: leave },
+      update: { metadata: leave }
+    });
+    agentLeave[code] = leave;
+  } else {
+    await prisma.oAuthToken.delete({ where: { provider } }).catch(() => null);
+    delete agentLeave[code];
+  }
+  syncLeavePeriods();
+  // Every open board greys the agent out (or back in) straight away, rather
+  // than on its next shift poll.
+  sseBroadcast('agent_leave', { leave: activeAgentLeave() });
+}
+void loadAgentLeave();
+// A leave whose return date has passed simply stops counting; this tidies the
+// rows and tells open boards, so the agent turns back on without a reload.
+setInterval(async () => {
+  const expired = Object.keys(agentLeave).filter(code => !isLeaveActive(agentLeave[code]));
+  for (const code of expired) await setAgentLeave(code, null).catch(() => null);
+}, 60 * 1000).unref?.();
+
+// The roster code this login is, from its username or its email's local part
+// - the two places the rest of the app reads an agent code from. Unlike
+// shiftAgentFromRequest this never takes a code the browser sends: it decides
+// whose leave a non-admin may change, so it has to come from the account.
+async function ownSupportAgentCode(req) {
+  const fromSession = String(req.session?.username || '').trim().toUpperCase();
+  if (SUPPORT_AGENT_CODES.has(fromSession)) return fromSession;
+  try {
+    const user = await prisma.user.findUnique({ where: { id: Number(req.session?.userId) }, select: { email: true } });
+    const local = String(user?.email || '').split('@')[0].trim().toUpperCase();
+    return SUPPORT_AGENT_CODES.has(local) ? local : null;
+  } catch (_) {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // SLA, measured in shift time
@@ -1186,6 +2016,67 @@ function isWeekendDate(date) {
 // Milliseconds of [from,to) landing on a weekday. Walks day by day via setDate
 // rather than adding a fixed 86400000 so a daylight-saving change cannot drift
 // the day boundaries.
+/* The hours the SLA clock actually runs.
+
+   08:00-12:00 and 14:00-17:00, weekdays: seven hours a day, not twenty-four and
+   not the nine between the first and last. The lunch gap matters - counting
+   through it made a ticket that arrived at 11:50 look an hour older by 14:00
+   than the work anyone could have done on it.
+
+   Walked a day at a time with setHours rather than by adding 86400000, so a
+   daylight-saving change moves the window with the clock instead of shifting it
+   by an hour. */
+const BUSINESS_WINDOWS = [[8, 0, 12, 0], [14, 0, 17, 0]];
+const BUSINESS_MS_PER_DAY = BUSINESS_WINDOWS.reduce((total, [sh, sm, eh, em]) => total + ((eh * 60 + em) - (sh * 60 + sm)) * 60000, 0);
+function businessMsInRange(from, to) {
+  if (!(to > from)) return 0;
+  let total = 0;
+  const cursor = new Date(from);
+  cursor.setHours(0, 0, 0, 0);
+  while (cursor.getTime() < to) {
+    const next = new Date(cursor);
+    next.setDate(next.getDate() + 1);
+    next.setHours(0, 0, 0, 0);
+    if (!isWeekendDate(cursor)) {
+      for (const [sh, sm, eh, em] of BUSINESS_WINDOWS) {
+        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
+        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
+        const start = Math.max(windowStart.getTime(), from);
+        const end = Math.min(windowEnd.getTime(), to);
+        if (end > start) total += end - start;
+      }
+    }
+    cursor.setTime(next.getTime());
+  }
+  return total;
+}
+// The inverse: the latest moment from which `amount` of working time has run
+// by `to`. Walks the windows backwards a day at a time, weekends skipped.
+function businessPointBefore(to, amount) {
+  let left = amount;
+  if (!(left > 0)) return to;
+  const cursor = new Date(to);
+  cursor.setHours(0, 0, 0, 0);
+  // Ten years of days: far past any SLA, and a stop if the windows are empty.
+  for (let day = 0; day < 3660; day++) {
+    if (!isWeekendDate(cursor)) {
+      for (let i = BUSINESS_WINDOWS.length - 1; i >= 0; i--) {
+        const [sh, sm, eh, em] = BUSINESS_WINDOWS[i];
+        const windowStart = new Date(cursor); windowStart.setHours(sh, sm, 0, 0);
+        const windowEnd = new Date(cursor); windowEnd.setHours(eh, em, 0, 0);
+        const end = Math.min(windowEnd.getTime(), to);
+        const start = windowStart.getTime();
+        if (!(end > start)) continue;
+        if (end - start >= left) return end - left;
+        left -= end - start;
+      }
+    }
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return to - amount;
+}
+// Superseded by businessMsInRange - kept because the shift report still counts
+// presence in whole weekdays, which is a different question from SLA time.
 function weekdayMsInRange(from, to) {
   if (!(to > from)) return 0;
   let total = 0;
@@ -1208,25 +2099,76 @@ function weekdayMsInRange(from, to) {
 }
 
 // Worked milliseconds for one agent within [fromMs,toMs): their shift sessions,
-// clipped to weekdays, minus any overlapping break.
+// clipped to working hours, minus any overlapping break and any time they were
+// off. Breaks and leave are merged first, so a break taken on a day marked off
+// is not taken away twice.
 function shiftElapsedMs(fromMs, toMs, agentCode) {
   const rec = shiftStore.agents[String(agentCode || '').trim().toUpperCase()];
   if (!rec || !Array.isArray(rec.sessions)) return 0;
   const now = Date.now();
+  const leaves = (rec.leaves || []).map(p => [Number(p.start || 0), leavePeriodEnd(p, now)]);
   let total = 0;
   rec.sessions.forEach((s) => {
     const start = Math.max(Number(s.start || 0), fromMs);
     const end = Math.min(s.end === null || s.end === undefined ? now : Number(s.end), toMs);
     if (!(end > start)) return;
-    let worked = weekdayMsInRange(start, end);
-    (s.breaks || []).forEach((b) => {
-      const bs = Math.max(Number(b.start || 0), start);
-      const be = Math.min(b.end === null || b.end === undefined ? now : Number(b.end), end);
-      if (be > bs) worked -= weekdayMsInRange(bs, be);
-    });
+    const excluded = [...(s.breaks || []).map(b => [Number(b.start || 0), breakEndMs(b, now)]), ...leaves]
+      .map(([a, b]) => [Math.max(a, start), Math.min(b, end)])
+      .filter(([a, b]) => b > a)
+      .sort((x, y) => x[0] - y[0]);
+    let worked = businessMsInRange(start, end);
+    let cursor = start;
+    for (const [a, b] of excluded) {
+      const from = Math.max(a, cursor);
+      if (b > from) { worked -= businessMsInRange(from, b); cursor = b; }
+    }
     total += Math.max(0, worked);
   });
   return total;
+}
+/* The time an open or resolved ticket's SLA has run. The agent's shift time,
+   unless they have no shift logged on this board at all inside the window:
+   then office hours, less their time off, flagged as estimated. Counting only
+   shift time, a ticket held by someone who never logs in to this board (every
+   agent, on preprod) never moved, so Overdue read 0 next to resolved tickets
+   from the same weeks reading late on office hours. Kept out of shiftElapsedMs
+   itself, which shiftPointBefore needs to only grow as the window widens. */
+function agentHasShiftIn(fromMs, toMs, agentCode) {
+  const rec = shiftStore.agents[String(agentCode || '').trim().toUpperCase()];
+  if (!rec || !Array.isArray(rec.sessions)) return false;
+  const now = Date.now();
+  return rec.sessions.some(s => Number(s.start || 0) < toMs && (s.end === null || s.end === undefined ? now : Number(s.end)) > fromMs);
+}
+function slaClockMs(fromMs, toMs, agentCode) {
+  // Until the shift history has loaded, every agent looks like they never
+  // logged in; the shift clock is the lesser evil for that moment.
+  if (!shiftStoreDbReady || agentHasShiftIn(fromMs, toMs, agentCode)) return { ms: shiftElapsedMs(fromMs, toMs, agentCode), estimated: false };
+  const rec = shiftStore.agents[String(agentCode || '').trim().toUpperCase()];
+  const now = Date.now();
+  let ms = businessMsInRange(fromMs, toMs);
+  let cursor = fromMs;
+  (rec?.leaves || []).map(p => [Math.max(Number(p.start || 0), fromMs), Math.min(leavePeriodEnd(p, now), toMs)])
+    .filter(([a, b]) => b > a)
+    .sort((x, y) => x[0] - y[0])
+    .forEach(([a, b]) => {
+      const from = Math.max(a, cursor);
+      if (b > from) { ms -= businessMsInRange(from, b); cursor = b; }
+    });
+  return { ms: Math.max(0, ms), estimated: true };
+}
+// The inverse of shiftElapsedMs: the latest moment, no earlier than floor,
+// from which `amount` of the agent's shift time has run by `to`. Shift time
+// only grows as the start moves back, so a binary search finds it.
+function shiftPointBefore(to, amount, agentCode, floor) {
+  if (!(amount > 0)) return to;
+  let lo = floor;
+  let hi = to;
+  if (shiftElapsedMs(lo, to, agentCode) <= amount) return lo;
+  while (hi - lo > 1000) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (shiftElapsedMs(mid, to, agentCode) >= amount) lo = mid; else hi = mid;
+  }
+  return lo;
 }
 
 // One ticket's SLA position. `state` is the honest answer, not a guess:
@@ -1238,28 +2180,128 @@ function shiftElapsedMs(fromMs, toMs, agentCode) {
 //                     "4h left" for a ticket nobody owns would be a fiction, so
 //                     these are counted and reported separately rather than
 //                     folded into compliance.
+//   jira_hold       - linked to a Jira issue, so the clock is off entirely.
+//   velma_hold      - linked to a row of the Velma bug sheet. Same reasoning
+//                     and same treatment as jira_hold.
+//   contact_hold    - open and in Waiting on Contact, so the clock is frozen
+//                     until the client answers. The board moves slaResetAt
+//                     forward by the length of the wait when the ticket
+//                     leaves the column (setTicketStage in index.html), so
+//                     once it is back with us the count resumes from where it
+//                     stopped and the wait never reaches met/breached either.
+//   met / breached with estimated: true
+//                   - resolved, but its clock started before the shift history
+//                     was complete (shiftStore.since): the deploys that wiped
+//                     data/ took the logged-in time with them, and it cannot be
+//                     recovered. Leaving all of those unmeasured blanked the SLA
+//                     card for every range since launch. They are measured on
+//                     office hours instead (the windows the shift clock runs
+//                     in, no nights or weekends). That never undercounts: an
+//                     agent cannot have been on shift outside office hours, so
+//                     an estimate can only read later than the truth, never
+//                     flatter it. Reported as estimated, so the card says so.
+//   leave_hold      - open, and the assigned agent is marked off. The days
+//                     off are cut out of the clock (rec.leaves), so it
+//                     resumes where it stopped.
+//
+// The last one is a commitment we are no longer the ones able to keep. Once a
+// ticket is handed to engineering, the time it takes is theirs, and the
+// support agent holding it cannot answer any faster by being told they are
+// late. Left running it did two wrong things at once: it drove agents to chase
+// tickets nobody on the team could move, and it counted every engineering
+// turnaround against support's compliance figure. So a Jira-linked ticket is
+// reported under its own heading and kept out of the percentage - the same
+// treatment no_clock already gets, and for the same reason.
+
+/* The SLA baseline. Everything resolved before this moment is counted as met
+   (the board's SLA history from launch was not measured reliably), and every
+   ticket still open at it had its clock restarted from it
+   (restartOpenSlaClocksAtBaselineOnce). From here on the SLA is measured
+   live, and the KPI dashboard reports it at each checkpoint (KPI checkpoints).
+   SLA_BASELINE_AT overrides; empty turns it off. */
+const SLA_BASELINE_AT = (() => {
+  const raw = String(process.env.SLA_BASELINE_AT ?? '2026-10-16T08:00:00+01:00').trim();
+  const ms = raw ? new Date(raw).getTime() : NaN;
+  return Number.isFinite(ms) ? ms : 0;
+})();
 function ticketSlaSnapshot(ticket, now = Date.now()) {
-  const createdMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+  const snapshot = liveTicketSlaSnapshot(ticket, now);
+  if (snapshot.state === 'breached' && SLA_BASELINE_AT && (kpiResolvedDate(ticket)?.getTime() ?? Infinity) < SLA_BASELINE_AT) {
+    return { ...snapshot, state: 'met', overdueMs: 0, baseline: true };
+  }
+  return snapshot;
+}
+function liveTicketSlaSnapshot(ticket, now = Date.now()) {
+  const arrivedMs = ticket?.createdAt ? new Date(ticket.createdAt).getTime() : NaN;
+  const resetMs = ticket?.slaResetAt ? new Date(ticket.slaResetAt).getTime() : NaN;
+  // The later of the two: a thread that has been replied to is measured from
+  // its last reply, an untouched one from when it arrived. Mirrors the board.
+  const createdMs = Number.isFinite(resetMs) && (!Number.isFinite(arrivedMs) || resetMs > arrivedMs) ? resetMs : arrivedMs;
   const targetHours = slaTargetHoursFor(ticket?.priority);
   const targetMs = targetHours * 3600000;
   const resolved = normalizeDbStatusForBoard(ticket?.status) === 'res';
   const agent = String(ticket?.assignedAgent || '').trim().toUpperCase();
-  const base = { targetHours, resolved, state: 'no_clock', shiftMs: 0, wallMs: 0, overdueMs: 0 };
+  const base = { targetHours, resolved, state: 'no_clock', shiftMs: 0, wallMs: 0, ageMs: 0, overdueMs: 0 };
   if (!Number.isFinite(createdMs)) return base;
 
-  const endMs = resolved
-    ? (ticket?.resolvedAt ? new Date(ticket.resolvedAt).getTime() : now)
-    : now;
+  // Frozen by an admin: the clock stopped when the hold began. Released, it
+  // restarts from the release with a fresh SLA (see /api/tickets/:id/sla-hold).
+  const holdMs = ticket?.slaHoldAt ? new Date(ticket.slaHoldAt).getTime() : NaN;
+  const held = Number.isFinite(holdMs);
+  const endMs = Math.min(resolved
+    ? (kpiResolvedDate(ticket)?.getTime() ?? now)
+    : now, held ? Math.max(holdMs, createdMs) : Infinity);
+  if (held && !resolved) {
+    return { ...base, state: 'admin_hold', ageMs: businessMsInRange(createdMs, endMs), wallMs: Math.max(0, endMs - createdMs), heldBy: ticket.slaHoldBy || null };
+  }
+  // Snoozed: held the same way, from the moment it was snoozed. When the
+  // snooze ends the restart point moves forward (applySnoozeRules), so the
+  // clock resumes where it stopped. ticket.snooze is the board's entry, laid
+  // on the row by the KPI snapshot.
+  const snoozeAt = Number(ticket?.snooze?.at || 0);
+  if (!resolved && snoozeAt && Number(ticket.snooze.until) > now) {
+    const frozenAt = Math.min(now, Math.max(snoozeAt, createdMs));
+    return { ...base, state: 'snooze_hold', ageMs: businessMsInRange(createdMs, frozenAt), wallMs: Math.max(0, frozenAt - createdMs) };
+  }
   const wallMs = Math.max(0, (Number.isFinite(endMs) ? endMs : now) - createdMs);
+  // The ticket's age in the hours the SLA runs: no nights, lunch or weekends.
+  // What "oldest open" and "h open" report, so a Monday dashboard does not
+  // read the weekend as time the ticket sat waiting on us.
+  const ageMs = businessMsInRange(createdMs, Number.isFinite(endMs) ? endMs : now);
+  base.ageMs = ageMs;
+  // Checked before the assignee, and before resolved/open is decided: a
+  // Jira-linked ticket has no SLA position at all, so there is nothing for
+  // either branch below to say about it.
+  if (String(ticket?.jiraTicketKey || '').trim()) return { ...base, state: 'jira_hold', wallMs };
+  // Until the sheet marks the bug DONE; from then the clock runs again, from
+  // the restart point the Velma sync moved forward by the length of the hold.
+  if (String(ticket?.velmaBugId || '').trim() && !ticket?.velmaBugRow?.done) return { ...base, state: 'velma_hold', wallMs };
+  if (!resolved && normalizeDbStatusForBoard(ticket?.status) === 'wct') return { ...base, state: 'contact_hold', wallMs };
   if (!agent) return { ...base, wallMs };
+  // The agent holding it is off. Their time off is taken out of the clock
+  // (shiftElapsedMs), so it carries on from where it stopped when they are
+  // back, or as soon as the ticket is given to someone who is in.
+  if (!resolved && isAgentOnLeave(agent, now)) return { ...base, state: 'leave_hold', wallMs };
 
-  const shiftMs = shiftElapsedMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
+  // Its clock started before the shift history was complete, so the time
+  // worked on it is not known - not zero. Reporting it as met in 0h is what
+  // made the dashboard read 100% after every deploy wiped the history. It is
+  // measured on office hours instead, and flagged as an estimate.
+  if (resolved && Number(shiftStore.since) > 0 && createdMs < Number(shiftStore.since)) {
+    const officeMs = businessMsInRange(createdMs, Number.isFinite(endMs) ? endMs : now);
+    const left = targetMs - officeMs;
+    return { ...base, state: left >= 0 ? 'met' : 'breached', estimated: true, shiftMs: officeMs, wallMs, overdueMs: Math.max(0, -left) };
+  }
+
+  const clock = slaClockMs(createdMs, Number.isFinite(endMs) ? endMs : now, agent);
+  const shiftMs = clock.ms;
+  const estimated = clock.estimated ? { estimated: true } : {};
   const remaining = targetMs - shiftMs;
   if (resolved) {
-    return { ...base, state: remaining >= 0 ? 'met' : 'breached', shiftMs, wallMs, overdueMs: Math.max(0, -remaining) };
+    return { ...base, state: remaining >= 0 ? 'met' : 'breached', ...estimated, shiftMs, wallMs, overdueMs: Math.max(0, -remaining) };
   }
-  if (remaining <= 0) return { ...base, state: 'overdue', shiftMs, wallMs, overdueMs: -remaining };
-  return { ...base, state: remaining / targetMs <= 0.25 ? 'at_risk' : 'on_track', shiftMs, wallMs };
+  if (remaining <= 0) return { ...base, state: 'overdue', ...estimated, shiftMs, wallMs, overdueMs: -remaining };
+  return { ...base, state: remaining / targetMs <= 0.25 ? 'at_risk' : 'on_track', ...estimated, shiftMs, wallMs };
 }
 
 const hoursFromMs = ms => Math.round((Number(ms || 0) / 3600000) * 10) / 10;
@@ -1284,8 +2326,24 @@ function medianOf(values) {
    - moving a ticket into Resolved. Support finishes the work; CS signs it off.
    - the FIRST assignment of a ticket that has nobody on it, because that is the
      client's auto-assign for a newly ingested ticket and every open tab runs
-     it, not a person handing work around. Only changing an existing assignment
-     is CS's call. */
+     it, not a person handing work around.
+   - taking a ticket for themselves. Picking up work is not the decision this
+     guard exists to protect; passing work to somebody else is. So a support
+     agent may reassign a ticket to their own code and to no other. */
+/* A refused CS-owner change has to take its companions back with it: the
+   "a person chose this" flag and the CS clock describe the choice that was just
+   refused, and left behind they would protect a value nobody decided. */
+function revertCsFlags(nextState, currentState, ticketId) {
+  const isMap = (value) => !!value && typeof value === 'object';
+  ['manualCSOverride', 'ticketCSTouchedAt'].forEach((field) => {
+    const incoming = isMap(nextState[field]) ? nextState[field] : null;
+    if (!incoming) return;
+    const current = isMap(currentState[field]) ? currentState[field] : {};
+    if (Object.prototype.hasOwnProperty.call(current, ticketId)) incoming[ticketId] = current[ticketId];
+    else delete incoming[ticketId];
+  });
+}
+
 function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
   const role = normalizeRole(actor?.role) || 'support';
   const username = actor?.username || '';
@@ -1325,15 +2383,32 @@ function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
       else delete incomingArchived[ticketId];
       refused.push({ field: 'ticketArchived', id: ticketId, claims: ['resolved_confirmed'] });
     });
+
+    // The My Alerts entry Send back writes alongside the meta. Refused for the
+    // same reason: it tells a support agent that CS rejected their resolution.
+    const currentSendBacks = isMap(currentState.ticketSendBackAlerts) ? currentState.ticketSendBackAlerts : {};
+    const incomingSendBacks = isMap(nextState.ticketSendBackAlerts) ? nextState.ticketSendBackAlerts : {};
+    Object.keys(incomingSendBacks).forEach((ticketId) => {
+      const before = currentSendBacks[ticketId];
+      if (Number(incomingSendBacks[ticketId]?.at || 0) === Number(before?.at || 0)) return;
+      if (before) incomingSendBacks[ticketId] = before;
+      else delete incomingSendBacks[ticketId];
+      refused.push({ field: 'ticketSendBackAlerts', id: ticketId, claims: ['sentBack'] });
+    });
   }
 
-  if (!canAssignSupportAgent(role, username)) {
+  {
     const currentAssignee = isMap(currentState.ticketAssignee) ? currentState.ticketAssignee : {};
     const incomingAssignee = isMap(nextState.ticketAssignee) ? nextState.ticketAssignee : {};
     Object.keys(incomingAssignee).forEach((ticketId) => {
       const before = String(currentAssignee[ticketId] || '').trim();
       const after = String(incomingAssignee[ticketId] || '').trim();
       if (!before || before === after) return;
+      // Checked per ticket rather than once for the whole save, because a
+      // support agent taking a ticket for themselves is allowed and handing
+      // one to somebody else is not - so it is the destination that decides,
+      // and one save can legitimately contain both.
+      if (canAssignSupportAgentTo(role, username, after)) return;
       incomingAssignee[ticketId] = currentAssignee[ticketId];
       // manualSupportOverride and ticketAssignmentMode describe the assignment
       // and are merged on its clock, so a refused reassignment must not leave
@@ -1350,10 +2425,143 @@ function applyRolePermissionsToStateWrite(currentState, nextState, actor) {
     });
   }
 
+  /* Re-pointing a ticket at a different CS is an admin decision.
+
+     What marks it as a human decision is manualCSOverride: every automatic
+     path (HubSpot company default, sender-derived CS, the first-assignment
+     auto-assign every open tab runs) only writes the owner while that flag is
+     unset, so an owner change that arrives WITH the flag set is a person
+     choosing, and the person has to be an admin. Automatic changes and the
+     first assignment of an unowned ticket are left alone - refusing those
+     would stop HubSpot corrections reaching any tab that is not an admin's.
+
+     Manual tickets are exempt: their edit modal sets the CS owner and is open
+     to everyone on purpose (see currentUserCanEditManualTicket).
+
+     This is as strong as the flag is honest: a hand-built request that changes
+     the owner without setting it looks like automation and is not caught here.
+     The board never produces one. */
+  {
+    const currentCs = isMap(currentState.ticketCSOwner) ? currentState.ticketCSOwner : {};
+    const incomingCs = isMap(nextState.ticketCSOwner) ? nextState.ticketCSOwner : {};
+    const currentOverride = isMap(currentState.manualCSOverride) ? currentState.manualCSOverride : {};
+    const incomingOverride = isMap(nextState.manualCSOverride) ? nextState.manualCSOverride : {};
+
+    /* Only someone on the CS roster can be put on a ticket, whoever asks.
+
+       The board a person is looking at can be a couple of minutes behind the
+       roster (admins move people between teams), so a stale picker can offer
+       somebody who has just left CS. Saved as it stands, the write looks fine
+       and then the database upsert quietly nulls the owner. Put the previous
+       owner back instead, and say so when a person was the one choosing. An
+       owner the ticket already has is left alone: leaving the roster does not
+       take tickets away. */
+    Object.keys(incomingCs).forEach((ticketId) => {
+      const before = String(currentCs[ticketId] || '').trim();
+      const after = String(incomingCs[ticketId] || '').trim();
+      if (!after || before === after || CS_AGENT_CODES.has(after.toUpperCase())) return;
+      const chosen = incomingOverride[ticketId] === true;
+      if (Object.prototype.hasOwnProperty.call(currentCs, ticketId)) incomingCs[ticketId] = currentCs[ticketId];
+      else delete incomingCs[ticketId];
+      if (!chosen) return;
+      revertCsFlags(nextState, currentState, ticketId);
+      refused.push({ field: 'ticketCSOwner', id: ticketId, claims: [after], reason: 'roster' });
+    });
+  }
+
+  if (effectiveTeam(role, username) !== 'admin') {
+    const currentCs = isMap(currentState.ticketCSOwner) ? currentState.ticketCSOwner : {};
+    const incomingCs = isMap(nextState.ticketCSOwner) ? nextState.ticketCSOwner : {};
+    const currentOverride = isMap(currentState.manualCSOverride) ? currentState.manualCSOverride : {};
+    const incomingOverride = isMap(nextState.manualCSOverride) ? nextState.manualCSOverride : {};
+    const currentTouched = isMap(currentState.ticketCSTouchedAt) ? currentState.ticketCSTouchedAt : {};
+    const incomingTouched = isMap(nextState.ticketCSTouchedAt) ? nextState.ticketCSTouchedAt : {};
+    const manualTicketIds = new Set((Array.isArray(currentState.allTickets) ? currentState.allTickets : [])
+      .filter(t => t && (t.isManual || t.email?.isManual))
+      .map(t => String(t.id)));
+    Object.keys(incomingCs).forEach((ticketId) => {
+      const before = String(currentCs[ticketId] || '').trim();
+      const after = String(incomingCs[ticketId] || '').trim();
+      if (before === after) return;
+      // A first assignment of an unowned ticket is left alone, unless a person
+      // decided it was unowned: "No CS" chosen on purpose is as much the
+      // admin's call as a name is, and a stale tab must not fill it back in.
+      if (!before && currentOverride[ticketId] !== true) return;
+      // A person choosing, as far as the request says: the flag, or a CS clock
+      // newer than the stored one. Either alone is enough, so leaving the flag
+      // off does not turn a decision into automation.
+      const stamped = Number(incomingTouched[ticketId] || 0);
+      const chosen = incomingOverride[ticketId] === true
+        || (stamped > 0 && stamped >= Number(currentTouched[ticketId] || 0));
+      if (!chosen) return;
+      if (manualTicketIds.has(ticketId)) return;
+      if (Object.prototype.hasOwnProperty.call(currentCs, ticketId)) incomingCs[ticketId] = currentCs[ticketId];
+      else delete incomingCs[ticketId];
+      // The flag and the clock describe the choice that was just refused, so
+      // they go back too - left behind they would stop the automatic CS
+      // default from ever correcting this ticket again.
+      revertCsFlags(nextState, currentState, ticketId);
+      refused.push({ field: 'ticketCSOwner', id: ticketId, claims: [after || '(cleared)'] });
+    });
+  }
+
   if (refused.length) {
     console.warn(`[permissions] dropped ${refused.length} CS-only change(s) from a ${effectiveTeam(role, username)} save by ${actor?.username || 'unknown'}: ${refused.slice(0, 5).map(r => `${r.field}/${r.id}`).join(', ')}`);
   }
   return refused;
+}
+
+/* Makes state.ticketNumbers one number per ticket and one ticket per number.
+
+   dbRows, when given, are Postgres's displayNumbers and always win - that
+   sequence is what the MCP tools, the KPI exports and every past reference
+   use. Anything the database does not know yet (the ticket's row is written
+   right after this save, or the database is down) keeps its number only while
+   no other ticket holds it. A ticket left without one gets the next number
+   above everything in use, so it can never repeat one. */
+function assignUniqueTicketNumbers(state, dbRows = null) {
+  const before = (state.ticketNumbers && typeof state.ticketNumbers === 'object') ? state.ticketNumbers : {};
+  const numbers = {};
+  const holder = new Map();
+  const take = (id, n) => { numbers[id] = n; holder.set(n, id); };
+  (Array.isArray(dbRows) ? dbRows : []).forEach((row) => {
+    const id = String(row?.externalId || '').trim();
+    const n = Number(row?.displayNumber || 0);
+    if (id && n > 0 && !holder.has(n)) take(id, n);
+  });
+  Object.entries(before).forEach(([id, num]) => {
+    const n = Number(num || 0);
+    if (!id || numbers[id] || !(n > 0) || holder.has(n)) return;
+    take(id, n);
+  });
+  let next = Math.max(0, ...holder.keys());
+  (Array.isArray(state.allTickets) ? state.allTickets : []).forEach((t) => {
+    const id = String(t?.id || '').trim();
+    if (!id || numbers[id]) return;
+    next += 1;
+    take(id, next);
+  });
+  const changed = Object.keys(numbers).length !== Object.keys(before).length
+    || Object.entries(numbers).some(([id, n]) => Number(before[id] || 0) !== n);
+  state.ticketNumbers = numbers;
+  state.ticketNumberCounter = Math.max(Number(state.ticketNumberCounter || 0), next);
+  return changed;
+}
+
+// After the ticket rows are written, bring the saved board's numbers into line
+// with Postgres's. Re-reads the file after the query rather than trusting a
+// copy from before it, so a save that landed during the await is not undone.
+async function reconcileTicketNumbersWithDatabase() {
+  const rows = await prisma.ticket.findMany({
+    where: { displayNumber: { not: null } },
+    select: { externalId: true, displayNumber: true }
+  });
+  const state = safeReadState();
+  if (assignUniqueTicketNumbers(state, rows)) {
+    fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
+    fs.writeFileSync(DATA_PATH, JSON.stringify(state, null, 2), 'utf8');
+  }
+  return state;
 }
 
 async function safeWriteState(state, actor = null) {
@@ -1393,24 +2601,23 @@ async function safeWriteState(state, actor = null) {
   nextState.ticketState = mergedStages;
   nextState.ticketStageTouchedAt = mergedTouched;
 
-  // Ticket numbers must never regress: a browser tab/session that hasn't caught
-  // up with numbers assigned elsewhere would otherwise reassign a lower number
-  // (or a duplicate) to a ticket that already has a higher one recorded.
-  const currentNumbers = (currentState.ticketNumbers && typeof currentState.ticketNumbers === 'object') ? currentState.ticketNumbers : {};
+  // Ticket numbers: a number once given to a ticket is kept, and no number is
+  // ever held by two tickets. Each tab used to make its own numbers up as mail
+  // arrived and the merge kept whichever was higher, so two agents' tabs
+  // numbering two different new tickets at the same moment both landed "#0412"
+  // - two open tickets, two people, one number. The board no longer invents
+  // numbers at all; the server hands them out here (and Postgres, which owns
+  // them, overrides after the ticket rows are written - see
+  // reconcileTicketNumbersWithDatabase).
+  const mergedNumbers = { ...((currentState.ticketNumbers && typeof currentState.ticketNumbers === 'object') ? currentState.ticketNumbers : {}) };
   const incomingNumbers = (nextState.ticketNumbers && typeof nextState.ticketNumbers === 'object') ? nextState.ticketNumbers : {};
-  const mergedNumbers = { ...currentNumbers };
   Object.entries(incomingNumbers).forEach(([ticketId, num]) => {
+    if (Number(mergedNumbers[ticketId] || 0) > 0) return;
     const n = Number(num || 0);
-    if (n > Number(mergedNumbers[ticketId] || 0)) mergedNumbers[ticketId] = n;
+    if (n > 0) mergedNumbers[ticketId] = n;
   });
-  const mergedCounter = Math.max(
-    Number(currentState.ticketNumberCounter || 0),
-    Number(nextState.ticketNumberCounter || 0),
-    ...Object.values(mergedNumbers).map(n => Number(n) || 0),
-    0
-  );
   nextState.ticketNumbers = mergedNumbers;
-  nextState.ticketNumberCounter = mergedCounter;
+  nextState.ticketNumberCounter = Math.max(Number(currentState.ticketNumberCounter || 0), Number(nextState.ticketNumberCounter || 0), 0);
 
   // Union tickets by id so a session that hasn't polled/merged every ticket yet
   // can never make tickets known to other sessions vanish from the saved board.
@@ -1427,6 +2634,7 @@ async function safeWriteState(state, actor = null) {
   const seenIdSet = new Set(Array.isArray(currentState.seenIds) ? currentState.seenIds : []);
   (Array.isArray(nextState.seenIds) ? nextState.seenIds : []).forEach(id => seenIdSet.add(id));
   nextState.seenIds = [...seenIdSet];
+  assignUniqueTicketNumbers(nextState);
 
   const mergeTicketMap = (field) => ({
     ...((currentState[field] && typeof currentState[field] === 'object') ? currentState[field] : {}),
@@ -1444,6 +2652,16 @@ async function safeWriteState(state, actor = null) {
   // they describe the assignment and must not be split from it.
   const currentAssignTouched = (currentState.ticketAssigneeTouchedAt && typeof currentState.ticketAssigneeTouchedAt === 'object') ? currentState.ticketAssigneeTouchedAt : {};
   const incomingAssignTouched = (nextState.ticketAssigneeTouchedAt && typeof nextState.ticketAssigneeTouchedAt === 'object') ? nextState.ticketAssigneeTouchedAt : {};
+  /* What the request itself says about the CS owner, kept before the
+     assignment merge below replaces it. The owner rides that merge's clock
+     for automatic writes, but a person's choice has a clock of its own
+     (ticketCSTouchedAt): sharing the support assignee's meant an admin changing
+     only the CS owner had to re-stamp - and so re-send - a support assignee
+     the tab may not have heard was changed, undoing it. */
+  const asMap = (value) => (value && typeof value === 'object') ? value : {};
+  const incomingCsOwner = { ...asMap(nextState.ticketCSOwner) };
+  const incomingCsOverride = { ...asMap(nextState.manualCSOverride) };
+  const incomingCsTouched = { ...asMap(nextState.ticketCSTouchedAt) };
   const assignFields = ['ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride'];
   const mergedAssign = {};
   assignFields.forEach((field) => {
@@ -1471,6 +2689,59 @@ async function safeWriteState(state, actor = null) {
   assignFields.forEach((field) => { nextState[field] = mergedAssign[field]; });
   nextState.ticketAssigneeTouchedAt = mergedAssignTouched;
 
+  /* The CS owner, decided per ticket.
+
+     Once a person has set it (manualCSOverride in the stored state - "No CS"
+     included, an empty owner is a decision too) only a newer decision replaces
+     it: one that carries a CS clock at least as new as the stored one. Anything
+     else - a stale tab doing something ordinary and dragging its old owner
+     along with a fresh support-assignment stamp, or an automatic write - is
+     put back. A first decision on a ticket nobody has decided yet is taken as
+     it comes, whatever the assignment clock says. Unflagged, unstamped writes
+     (HubSpot's company default, the auto-assign every tab runs) keep going
+     through the assignment merge above, as before. */
+  {
+    const curCs = asMap(currentState.ticketCSOwner);
+    const curOv = asMap(currentState.manualCSOverride);
+    const curTouched = asMap(currentState.ticketCSTouchedAt);
+    const mergedCsTouched = { ...curTouched };
+    const keepFlag = [];
+    const ids = new Set([...Object.keys(incomingCsOwner), ...Object.keys(incomingCsTouched)]);
+    ids.forEach((ticketId) => {
+      const hasIncoming = Object.prototype.hasOwnProperty.call(incomingCsOwner, ticketId);
+      const stamp = Number(incomingCsTouched[ticketId] || 0);
+      const stored = Number(curTouched[ticketId] || 0);
+      const accept = () => {
+        nextState.ticketCSOwner[ticketId] = incomingCsOwner[ticketId];
+        mergedCsTouched[ticketId] = stamp;
+      };
+      if (curOv[ticketId] === true) {
+        keepFlag.push(ticketId);
+        // Strictly newer: an equal stamp with another owner is not a later
+        // decision, it is somebody replaying the stored one.
+        if (hasIncoming && stamp > 0 && stamp > stored) accept();
+        else {
+          if (Object.prototype.hasOwnProperty.call(curCs, ticketId)) nextState.ticketCSOwner[ticketId] = curCs[ticketId];
+          else delete nextState.ticketCSOwner[ticketId];
+          // A flagged change with no clock is a person on a board loaded
+          // before the CS clock existed (or one that has not reloaded). Not
+          // silently: tell them, or the card just snaps back.
+          if (hasIncoming && incomingCsOverride[ticketId] === true && stamp === 0
+            && String(incomingCsOwner[ticketId] || '') !== String(curCs[ticketId] || '')) {
+            refusedChanges.push({ field: 'ticketCSOwner', id: ticketId, claims: [String(incomingCsOwner[ticketId] || '') || '(cleared)'], reason: 'stale' });
+          }
+        }
+      } else if (hasIncoming && incomingCsOverride[ticketId] === true && stamp > 0) {
+        accept();
+      }
+    });
+    nextState.ticketCSTouchedAt = mergedCsTouched;
+    if (keepFlag.length) {
+      nextState.manualCSOverride = { ...asMap(nextState.manualCSOverride) };
+      keepFlag.forEach((ticketId) => { nextState.manualCSOverride[ticketId] = true; });
+    }
+  }
+
   // Jira links and duplicate markings are server-owned: their endpoints are the
   // only writers, because a board snapshot cannot distinguish "this ticket has
   // no Jira link" from "my tab has not heard about the link yet". Taking
@@ -1486,25 +2757,62 @@ async function safeWriteState(state, actor = null) {
   };
   keepServerOwned('ticketJira');
   keepServerOwned('ticketDuplicateOf');
+  keepServerOwned('ticketVelmaBug');
+  // Only the admin hold endpoint sets or clears a freeze.
+  keepServerOwned('ticketSlaHold');
+
+  // The point each ticket's SLA clock counts from only ever moves forward: a
+  // client reply, the end of a hold, or a reset all push it later, and nothing
+  // pulls it back. So the later of the two wins, per ticket. Taking the
+  // payload whole let any tab saving an older snapshot undo a reset it had not
+  // heard about yet - and the ticket went back to overdue.
+  const currentSlaReset = (currentState.ticketSlaResetAt && typeof currentState.ticketSlaResetAt === 'object') ? currentState.ticketSlaResetAt : {};
+  const mergedSlaReset = { ...currentSlaReset };
+  Object.entries((nextState.ticketSlaResetAt && typeof nextState.ticketSlaResetAt === 'object') ? nextState.ticketSlaResetAt : {})
+    .forEach(([ticketId, at]) => {
+      if (Number(at || 0) > Number(mergedSlaReset[ticketId] || 0)) mergedSlaReset[ticketId] = Number(at);
+    });
+  nextState.ticketSlaResetAt = mergedSlaReset;
+  // After the restart points are merged, so the end of a snooze moves them on
+  // from the latest one. A stale save keeps the stored snoozes (ticketSnooze
+  // is not one of its reconciled fields), so there is nothing to apply.
+  if (!isStale) refusedChanges.push(...applySnoozeRules(currentState, nextState));
 
   nextState.ticketHubspotId = mergeTicketMap('ticketHubspotId');
   nextState.manualCSOverride = mergeTicketMap('manualCSOverride');
   nextState.ticketCreatedBy = mergeTicketMap('ticketCreatedBy');
   nextState.ticketResolutionMeta = mergeTicketMap('ticketResolutionMeta');
   nextState.ticketArchived = mergeTicketMap('ticketArchived');
+  // Merged rather than taken from the payload: entries are only ever added,
+  // and a tab that has not heard about a send-back yet must not erase the
+  // alert before the agent it is for has seen it.
+  nextState.ticketSendBackAlerts = mergeTicketMap('ticketSendBackAlerts');
+  // Same: only ever stamped, so a tab that missed the reopen must not erase it.
+  nextState.ticketReopenedAt = mergeTicketMap('ticketReopenedAt');
+  // Re-open requests (a client reply on a resolved ticket, waiting for someone
+  // to re-open it, keep it closed or open it as new). Per reply: a decision
+  // always beats a pending copy, so a tab that has not heard the answer yet
+  // cannot put the question back. Decided ones are kept 30 days for that
+  // reason, then dropped.
+  nextState.ticketReopenRequests = (() => {
+    const asMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+    const out = { ...asMap(currentState.ticketReopenRequests) };
+    for (const [key, req] of Object.entries(asMap(nextState.ticketReopenRequests))) {
+      if (!req || typeof req !== 'object') continue;
+      const have = out[key];
+      if (!have || have.status === 'pending') out[key] = req;
+    }
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    for (const [key, req] of Object.entries(out)) {
+      if (!req || (req.status !== 'pending' && Number(req.decidedAt || req.at || 0) < cutoff)) delete out[key];
+    }
+    return out;
+  })();
 
-  const pruneResolvedHiddenTickets = (stateToPrune) => {
-    const nowForPrune = Date.now();
-    const hiddenIds = new Set(
-      (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : [])
-        .filter(t => t && t.id && isResolvedHiddenInState(stateToPrune, String(t.id), nowForPrune))
-        .map(t => String(t.id))
-    );
-    if (!hiddenIds.size) return stateToPrune;
-    stateToPrune.allTickets = (Array.isArray(stateToPrune.allTickets) ? stateToPrune.allTickets : []).filter(t => !hiddenIds.has(String(t?.id || '')));
-    return stateToPrune;
-  };
-  pruneResolvedHiddenTickets(nextState);
+  // Every ticket stays in the saved board, resolved or not. Resolved tickets
+  // used to be cut from it once CS confirmed them or 72 hours had passed; the
+  // board only hides those (isResolvedTicketHidden in index.html), and "My
+  // resolved" is where a support agent finds every one they resolved.
 
   // The "Resolved" Teams DM is no longer tracked here at all - it moved to
   // an atomic, DB-level claim in upsertBoardTicketsToDatabase (a dedicated
@@ -1521,11 +2829,10 @@ async function safeWriteState(state, actor = null) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketResolutionMeta', 'ticketArchived', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketCSTouchedAt', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketReopenRequests', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf', 'ticketVelmaBug', 'ticketSlaResetAt'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
-  pruneResolvedHiddenTickets(finalState);
 
   fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
   fs.writeFileSync(DATA_PATH, JSON.stringify(finalState, null, 2), 'utf8');
@@ -1541,6 +2848,35 @@ async function safeWriteState(state, actor = null) {
 
   return { saved: true, partial: isStale, backupCreated, refused: refusedChanges, state: finalState };
 }
+/* When each ticket's status and support assignee last actually changed in the
+   database, from the audit events every writer records. Not Ticket.updatedAt:
+   that moves on any write at all (a cached email body, a Jira link, a
+   comment), and using it as the status clock is how a stale database status
+   came to overwrite a ticket the board had resolved.
+
+   Losing the clocks must not lose the board. Empty maps mean every ticket
+   falls back to its creation time, which is the conservative direction: the
+   board's own value keeps winning rather than being overwritten. */
+async function loadTicketFieldClocks() {
+  const lastAssignChangeAt = new Map();
+  const lastStatusChangeAt = new Map();
+  try {
+    const fieldEvents = await prisma.ticketEvent.groupBy({
+      by: ['ticketId', 'eventType'],
+      where: { eventType: { in: ['ticket_assignedAgent_changed', 'ticket_status_changed'] } },
+      _max: { createdAt: true }
+    });
+    fieldEvents.forEach((row) => {
+      const at = new Date(row._max?.createdAt || 0).getTime() || 0;
+      const target = row.eventType === 'ticket_status_changed' ? lastStatusChangeAt : lastAssignChangeAt;
+      if (at > (target.get(row.ticketId) || 0)) target.set(row.ticketId, at);
+    });
+  } catch (error) {
+    console.error('Ticket field clock lookup failed:', error?.message || error);
+  }
+  return { lastAssignChangeAt, lastStatusChangeAt };
+}
+
 async function hydrateStateFromDatabase(baseState = {}) {
   const state = (baseState && typeof baseState === 'object') ? JSON.parse(JSON.stringify(baseState)) : {};
   const tickets = await prisma.ticket.findMany({
@@ -1577,25 +2913,7 @@ async function hydrateStateFromDatabase(baseState = {}) {
      defect, so both clocks are read here.
 
      One groupBy for the whole board rather than a query per ticket. */
-  let lastAssignChangeAt = new Map();
-  let lastStatusChangeAt = new Map();
-  try {
-    const fieldEvents = await prisma.ticketEvent.groupBy({
-      by: ['ticketId', 'eventType'],
-      where: { eventType: { in: ['ticket_assignedAgent_changed', 'ticket_status_changed'] } },
-      _max: { createdAt: true }
-    });
-    fieldEvents.forEach((row) => {
-      const at = new Date(row._max?.createdAt || 0).getTime() || 0;
-      const target = row.eventType === 'ticket_status_changed' ? lastStatusChangeAt : lastAssignChangeAt;
-      if (at > (target.get(row.ticketId) || 0)) target.set(row.ticketId, at);
-    });
-  } catch (error) {
-    // Losing the clocks must not lose the board. Empty maps mean every ticket
-    // falls back to its creation time, which is the conservative direction: the
-    // board's own value keeps winning rather than being overwritten.
-    console.error('Ticket field clock lookup failed:', error?.message || error);
-  }
+  const { lastAssignChangeAt, lastStatusChangeAt } = await loadTicketFieldClocks();
 
   const existingTickets = Array.isArray(state.allTickets) ? state.allTickets : [];
   const ticketsById = new Map(
@@ -1620,8 +2938,11 @@ async function hydrateStateFromDatabase(baseState = {}) {
   state.ticketJira = (state.ticketJira && typeof state.ticketJira === 'object') ? state.ticketJira : {};
   state.ticketHubspotId = (state.ticketHubspotId && typeof state.ticketHubspotId === 'object') ? state.ticketHubspotId : {};
   state.ticketDuplicateOf = (state.ticketDuplicateOf && typeof state.ticketDuplicateOf === 'object') ? state.ticketDuplicateOf : {};
+  state.ticketVelmaBug = (state.ticketVelmaBug && typeof state.ticketVelmaBug === 'object') ? state.ticketVelmaBug : {};
+  state.ticketSlaHold = (state.ticketSlaHold && typeof state.ticketSlaHold === 'object') ? state.ticketSlaHold : {};
   state.ticketArchived = (state.ticketArchived && typeof state.ticketArchived === 'object') ? state.ticketArchived : {};
   state.manualCSOverride = (state.manualCSOverride && typeof state.manualCSOverride === 'object') ? state.manualCSOverride : {};
+  state.ticketCSTouchedAt = (state.ticketCSTouchedAt && typeof state.ticketCSTouchedAt === 'object') ? state.ticketCSTouchedAt : {};
   state.ticketCreatedBy = (state.ticketCreatedBy && typeof state.ticketCreatedBy === 'object') ? state.ticketCreatedBy : {};
   // Postgres (Ticket.displayNumber) is the source of truth for this, not
   // whatever the client last sent - always overwritten below so the board
@@ -1677,7 +2998,13 @@ async function hydrateStateFromDatabase(baseState = {}) {
     const dbAssignedAt = lastAssignChangeAt.get(ticket.id) || createdAtMs;
     if (dbAssignedAt >= assignTouchedAt) {
       if (ticket.assignedAgent) state.ticketAssignee[externalId] = ticket.assignedAgent;
-      if (ticket.csAgent) state.ticketCSOwner[externalId] = ticket.csAgent;
+      // The CS owner of a ticket nobody has put a CS clock on yet. One that has
+      // one is a person's decision held in the board state, and the database
+      // row only ever trails it (the save is still on its way, or its audit
+      // event lands later than the decision it records), so the row never
+      // replaces it: updates through the API write straight into the state, on
+      // that same clock.
+      if (ticket.csAgent && !Number(state.ticketCSTouchedAt[externalId] || 0)) state.ticketCSOwner[externalId] = ticket.csAgent;
       // The assignment's own clock, not the row's. Stamping the JSON with the
       // row modification time inflated it - it is always >= the real
       // assignment time - which then made the board's copy look newer than it
@@ -1689,10 +3016,21 @@ async function hydrateStateFromDatabase(baseState = {}) {
     if (ticket.createdAt) state.ticketCreatedAt[externalId] = ticket.createdAt.toISOString();
     if (ticket.jiraTicketKey) state.ticketJira[externalId] = ticket.jiraTicketKey;
     if (ticket.duplicateOfExternalId) state.ticketDuplicateOf[externalId] = ticket.duplicateOfExternalId;
+    if (ticket.velmaBugId && !state.ticketVelmaBug[externalId]) {
+      state.ticketVelmaBug[externalId] = { id: ticket.velmaBugId, ...((ticket.velmaBugRow && typeof ticket.velmaBugRow === 'object') ? ticket.velmaBugRow : {}) };
+    }
+    if (ticket.slaHoldAt && !state.ticketSlaHold[externalId]) {
+      state.ticketSlaHold[externalId] = { at: new Date(ticket.slaHoldAt).getTime(), by: ticket.slaHoldBy || null };
+    }
     if (ticket.hubspotTicketId) state.ticketHubspotId[externalId] = ticket.hubspotTicketId;
     if (ticket.displayNumber) state.ticketNumbers[externalId] = ticket.displayNumber;
     if (Array.isArray(ticket.comments) && ticket.comments.length) {
+      // The row has no author or edit marker; the board's own copy of the note,
+      // matched on its timestamp, still does.
+      const boardCopies = new Map((Array.isArray(state.ticketComments[externalId]) ? state.ticketComments[externalId] : [])
+        .map(c => [safeDateForDb(c?.ts || c?.createdAt)?.getTime(), c]));
       state.ticketComments[externalId] = ticket.comments.map(comment => ({
+        ...(boardCopies.get(comment.createdAt?.getTime?.()) || {}),
         text: comment.comment,
         comment: comment.comment,
         ts: comment.createdAt?.toISOString?.() || new Date().toISOString(),
@@ -1705,6 +3043,10 @@ async function hydrateStateFromDatabase(baseState = {}) {
 
   state.allTickets = [...ticketsById.values()].sort((a, b) => new Date(b?.email?.receivedDateTime || 0) - new Date(a?.email?.receivedDateTime || 0));
   state.seenIds = [...seenIds];
+  // The database's numbers were laid over the file's above; this drops any
+  // number the file still had on a different ticket, so a board loading now
+  // cannot show two tickets under one number.
+  assignUniqueTicketNumbers(state, tickets.map(t => ({ externalId: String(t.externalId || t.emailMessageId || t.id), displayNumber: t.displayNumber })));
   return state;
 }
 
@@ -2087,6 +3429,10 @@ function mapMessage(msg) {
     subject: msg.subject || '',
     summary: msg.bodyPreview || '',
     sender: msg.from?.emailAddress?.address?.toLowerCase() || '',
+    // The sender's display name, so the board can tell a client signing their
+    // own name from a client naming one of our agents (see
+    // supportAgentNamedInEmail in index.html).
+    senderName: msg.from?.emailAddress?.name || '',
     recipients: [...new Set(recipients)],
     conversationId: msg.conversationId || '',
     internetMessageId: msg.internetMessageId || '',
@@ -2689,8 +4035,7 @@ function refreshDataHygieneCache(token) {
 }
 
 
-async function upsertBoardTicketsToDatabase(state, req) {
-  if (!state || typeof state !== 'object') return { count: 0 };
+async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof state !== 'object') return { count: 0 };
 
   const allTickets = Array.isArray(state.allTickets) ? state.allTickets : [];
   const ticketState = state.ticketState || {};
@@ -2705,6 +4050,11 @@ async function upsertBoardTicketsToDatabase(state, req) {
   const ticketDuplicateOf = state.ticketDuplicateOf || {};
   const ticketHubspotId = state.ticketHubspotId || {};
   const ticketComments = state.ticketComments || {};
+  const ticketStageTouchedAt = state.ticketStageTouchedAt || {};
+  // When each ticket's SLA clock was last restarted by a reply. Written by the
+  // board; mirrored into the row so the KPI dashboard measures the same thing
+  // the badges do.
+  const ticketSlaResetAt = state.ticketSlaResetAt || {};
 
   const externalIds = [...new Set(allTickets.filter(t => t && t.id).map(t => String(t.id)))];
   // Fetch every existing ticket (and its comments) in one round trip instead of
@@ -2727,17 +4077,26 @@ async function upsertBoardTicketsToDatabase(state, req) {
     const subject = String(email.subject || item.subject || '(No subject)').slice(0, 1000);
     const senderEmail = normalizeEmailForDb(ticketClientEmail[externalId] || email.sender || email.from || email.fromAddress || '');
     const senderName = String(email.senderName || email.fromName || '').trim() || null;
-    const status = normalizeBoardStatusForDb(ticketState[externalId] || 'new');
+    // A ticket the board holds no stage for keeps the status the database has.
+    // Defaulting it to New is how a resolved ticket, saved by a board that had
+    // lost (or never loaded) its stage, came back as New.
+    const status = ticketState[externalId]
+      ? normalizeBoardStatusForDb(ticketState[externalId])
+      : (existingByExternalId.get(externalId)?.status || 'New');
     const priority = String(ticketPriority[externalId] || item.priority || 'Normal').trim() || 'Normal';
     const category = String(ticketCategory[externalId] || ticketSubtype[externalId] || '').trim() || null;
     const rawAssignedAgent = String(ticketAssignee[externalId] || '').trim().toUpperCase();
     const rawCsAgent = String(ticketCSOwner[externalId] || '').trim().toUpperCase();
-    const assignedAgent = SUPPORT_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null;
-    const csAgent = CS_AGENT_CODES.has(rawCsAgent) ? rawCsAgent : (CS_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null);
+    const existingTicket = existingByExternalId.get(externalId) || null;
+    // An agent taken off the roster keeps the tickets they already held: the
+    // roster decides who can be given a ticket, not who used to have one.
+    const keepsAgent = (code, roster, held) => !!code && (roster.has(code) || code === String(held || '').trim().toUpperCase());
+    const assignedAgent = keepsAgent(rawAssignedAgent, SUPPORT_AGENT_CODES, existingTicket?.assignedAgent) ? rawAssignedAgent : null;
+    const csAgent = keepsAgent(rawCsAgent, CS_AGENT_CODES, existingTicket?.csAgent) ? rawCsAgent : (CS_AGENT_CODES.has(rawAssignedAgent) ? rawAssignedAgent : null);
     const createdAt = safeDateForDb(email.receivedDateTime || ticketCreatedAt[externalId]) || new Date();
+    const slaResetAt = safeDateForDb(Number(ticketSlaResetAt[externalId] || 0) || null);
     const body = String(email.bodyPreview || email.preview || email.summary || email.body || email.text || '').trim() || null;
     const companyName = extractCompanyNameFromEmail(senderEmail);
-    const existingTicket = existingByExternalId.get(externalId) || null;
 
     // A board snapshot that carries no Jira key, HubSpot id or duplicate
     // marking for a ticket is stating "I have nothing to say about this",
@@ -2757,14 +4116,41 @@ async function upsertBoardTicketsToDatabase(state, req) {
       : (existingTicket?.duplicateOfExternalId || null);
     const comments = Array.isArray(ticketComments[externalId]) ? ticketComments[externalId] : [];
     const existingCommentTexts = new Set((existingTicket?.comments || []).map(c => c.comment));
-    const newComments = comments
-      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt, tags: Array.isArray(c?.tags) ? c.tags.map(t => String(t)).filter(Boolean) : [] }))
-      .filter(c => c.text && !existingCommentTexts.has(c.text));
+    // A note keeps its original timestamp when it is edited, and the row was
+    // written with that timestamp, so this is how an edited note finds its row
+    // - matching on text would file the edit as a second note.
+    const existingCommentsByTs = new Map((existingTicket?.comments || []).map(c => [new Date(c.createdAt).getTime(), c]));
+    const boardComments = comments
+      .map(c => ({ text: String(c?.text || c?.comment || '').trim(), ts: c?.ts || c?.createdAt, edited: !!c?.editedAt, tags: Array.isArray(c?.tags) ? c.tags.map(t => String(t)).filter(Boolean) : [] }))
+      .filter(c => c.text);
+    const editedComments = [];
+    const newComments = [];
+    for (const c of boardComments) {
+      const at = safeDateForDb(c.ts);
+      const row = c.edited && at ? existingCommentsByTs.get(at.getTime()) : null;
+      if (row) {
+        if (row.comment !== c.text) editedComments.push({ id: row.id, text: c.text });
+      } else if (!existingCommentTexts.has(c.text)) {
+        newComments.push(c);
+      }
+    }
 
     const previousStatus = existingTicket?.status || null;
     const wasResolved = previousStatus === 'Resolved';
+    /* When the card was moved to Resolved on the board - the same moment the
+       board's Resolved column and "My resolved" go by - rather than when this
+       save reached the server. They used to differ by however long the save
+       took, and a ticket first written to the database already resolved got
+       the sync time, which put old resolutions into today's KPIs. A resolved
+       row still missing the date is backfilled here too (see fieldsUnchanged),
+       so the KPI no longer has to fall back to updatedAt, which every comment
+       or link moves. */
+    const boardResolvedAt = (() => {
+      const touched = Number(ticketStageTouchedAt[externalId] || 0);
+      return touched > 0 && touched <= Date.now() + 60_000 ? new Date(touched) : null;
+    })();
     const resolvedAtForDb = status === 'Resolved'
-      ? (wasResolved ? existingTicket?.resolvedAt || new Date() : new Date())
+      ? (wasResolved && existingTicket?.resolvedAt ? existingTicket.resolvedAt : (boardResolvedAt || new Date()))
       : null;
 
     const fieldsUnchanged = existingTicket
@@ -2772,6 +4158,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
       && existingTicket.senderEmail === (senderEmail || null)
       && existingTicket.companyName === companyName
       && existingTicket.status === status
+      && (status !== 'Resolved' || !!existingTicket.resolvedAt)
       && existingTicket.priority === priority
       && existingTicket.category === category
       && existingTicket.assignedAgent === assignedAgent
@@ -2779,9 +4166,10 @@ async function upsertBoardTicketsToDatabase(state, req) {
       && existingTicket.hubspotTicketId === hubspotTicketId
       && existingTicket.jiraTicketKey === jiraTicketKey
       && existingTicket.duplicateOfExternalId === duplicateOfExternalId
-      && existingTicket.body === body;
+      && existingTicket.body === body
+      && Number(existingTicket.slaResetAt ? new Date(existingTicket.slaResetAt).getTime() : 0) === Number(slaResetAt ? slaResetAt.getTime() : 0);
 
-    if (fieldsUnchanged && !newComments.length) continue;
+    if (fieldsUnchanged && !newComments.length && !editedComments.length) continue;
 
     // If only new comments arrived and every other field already matches, we
     // already have the ticket id from the batch fetch - no need to upsert.
@@ -2806,6 +4194,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         body,
         emailRaw: email,
         createdAt,
+        slaResetAt,
         resolvedAt: resolvedAtForDb
       },
       update: {
@@ -2825,6 +4214,7 @@ async function upsertBoardTicketsToDatabase(state, req) {
         duplicateOfExternalId,
         body,
         emailRaw: email,
+        slaResetAt,
         resolvedAt: resolvedAtForDb,
         // Leave untouched (undefined) while staying Resolved - the atomic
         // claim above owns setting it. Reset to null on leaving Resolved so
@@ -2892,6 +4282,9 @@ async function upsertBoardTicketsToDatabase(state, req) {
         }
       });
     }
+    for (const comment of editedComments) {
+      await prisma.ticketComment.update({ where: { id: comment.id }, data: { comment: comment.text } });
+    }
 
     count += 1;
   }
@@ -2928,6 +4321,25 @@ app.get('/favicon.ico', (req, res) => {
 });
 
 app.get('/login', (req, res) => isAuthed(req) ? res.redirect('/') : res.type('html').sendFile(path.join(__dirname, 'public', 'login.html')));
+
+/* Public, no sign-in: Google requires a privacy policy URL before an OAuth app
+   can be published, and this is what the "Sign in with Google" app's
+   Branding page points at. It describes the one thing that sign-in is for. */
+app.get('/privacy', (req, res) => {
+  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Privacy - Support Kanban</title>
+<style>body{margin:0;font-family:Inter,'Segoe UI',Arial,sans-serif;background:#f6f7fb;color:#1c1f3a;line-height:1.6}main{max-width:720px;margin:0 auto;padding:40px 20px}h1{font-size:26px;margin:0 0 6px}h2{font-size:17px;margin:28px 0 6px}p,li{font-size:15px;color:#3b4063}</style></head>
+<body><main>
+<h1>Privacy policy</h1>
+<p>Support Kanban is Quinta's internal support board. Only Quinta staff with a board account can use it.</p>
+<h2>Google sign-in</h2>
+<p>An agent may connect a Google account so the board can read the Velma bug Google Sheet. The board asks for read-only access to Google Sheets and for the account's email address, and uses them only to look up rows of that sheet and check their status. It never writes to Google, and never reads any other file.</p>
+<p>The access token Google issues is stored encrypted on the board's server. Disconnecting the account on the board deletes it and revokes it at Google; it can also be removed at any time from myaccount.google.com &gt; Security &gt; Third-party access.</p>
+<h2>Sharing</h2>
+<p>Nothing obtained from Google is sold, shared with third parties, or used for advertising. The board's use of information received from Google APIs adheres to the Google API Services User Data Policy, including the Limited Use requirements.</p>
+<h2>Contact</h2>
+<p>Questions: your Quinta support lead.</p>
+</main></body></html>`);
+});
 
 function renderResetPasswordPage(token) {
   // Base64-encode (not JSON.stringify) before embedding in the inline
@@ -3114,6 +4526,15 @@ app.post('/auth/reset-password', passwordResetLimiter, async (req, res) => {
       prisma.$executeRaw`UPDATE "PasswordResetToken" SET "usedAt" = ${new Date()} WHERE "id" = ${Number(reset.id)}`
     ]);
 
+    // Everything the old password could still reach: other browsers, and any
+    // standing API token. Resetting a password because it leaked and leaving
+    // those alive defeats the reset.
+    const killedSessions = await revokeAllSessionsForUser(user.id);
+    const killedTokens = await revokeApiTokensForUser(user.id);
+    if (killedSessions || killedTokens) {
+      console.log(`[auth] password reset for ${user.username}: ${killedSessions} session(s) and ${killedTokens} API token(s) revoked`);
+    }
+
     if (req.session) {
       req.session.authenticated = false;
       delete req.session.userId;
@@ -3155,10 +4576,21 @@ app.post('/auth/login', authLimiter, async (req, res) => {
       return res.status(401).json({ error: 'invalid_credentials' });
     }
 
+    // A new session id at the moment privilege changes. Without this the
+    // session the browser arrived with - which anyone able to set the cookie
+    // could have chosen - becomes an authenticated one, which is session
+    // fixation. regenerate() issues a fresh id and drops the old row.
+    await new Promise((resolve, reject) => req.session.regenerate(err => (err ? reject(err) : resolve())));
+
     req.session.authenticated = true;
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.role = user.role;
+    invalidateAuthCache(user.id);
+
+    // Persist before replying, so the very next request (the board loads
+    // immediately) is guaranteed to find the session already stored.
+    await new Promise((resolve, reject) => req.session.save(err => (err ? reject(err) : resolve())));
 
     return res.json({ ok: true, user: sanitizeUser(user) });
   } catch (error) {
@@ -3316,9 +4748,22 @@ app.post('/api/shift/break', requireAuth, (req, res) => {
   const rec = shiftAgentRecord(code);
   rec.lastSeen = now;
   const session = openShiftSession(rec, now);
+  capExpiredBreaks(rec, now);
   const openBreak = session.breaks.find(b => b.end === null);
-  if (openBreak) openBreak.end = now;
-  else session.breaks.push({ start: now, end: null });
+  if (openBreak) {
+    // Coming back early is always allowed; the cap only ever shortens a break.
+    openBreak.end = Math.min(now, Number(openBreak.start) + SHIFT_BREAK_MS);
+  } else {
+    const remaining = breakCooldownRemaining(rec, now);
+    if (remaining > 0) {
+      return res.status(429).json({
+        error: 'break_cooldown',
+        cooldownRemainingMs: remaining,
+        ...shiftSnapshotFor(code)
+      });
+    }
+    session.breaks.push({ start: now, end: null });
+  }
   persistShiftStore();
   return res.json({ ok: true, ...shiftSnapshotFor(code) });
 });
@@ -3330,7 +4775,78 @@ app.get('/api/shift/state', requireAuth, (req, res) => {
   const me = shiftAgentFromRequest(req, req.query?.agent);
   const agents = {};
   Object.keys(shiftStore.agents).forEach((code) => { agents[code] = shiftSnapshotFor(code); });
-  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now() });
+  // slaTimeZone: the zone the SLA's working hours are read in, so every board
+  // counts 08:00-12:00 / 14:00-17:00 the same way the server does.
+  return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now(), slaTimeZone: process.env.TZ || null, leave: activeAgentLeave() });
+});
+
+// Re-run the rebuild of shift history from the activity log (admins). Safe to
+// repeat: it replaces only the sessions an earlier rebuild made.
+app.post('/api/shift/rebuild-history', requireAdmin, async (req, res) => {
+  try {
+    return res.json(await rebuildShiftHistoryFromActivity());
+  } catch (error) {
+    console.error('Shift history rebuild failed:', error?.message || error);
+    return res.status(500).json({ error: 'shift_rebuild_failed', message: String(error?.message || error) });
+  }
+});
+
+// Who is off, and whose leave this login may change.
+app.get('/api/agents/leave', requireAuth, async (req, res) => {
+  res.json({
+    leave: activeAgentLeave(),
+    canManageAll: isAdminRole(req.session.role),
+    me: await ownSupportAgentCode(req)
+  });
+});
+
+/* Put an agent on leave, or change their return date.
+
+   Body: { until: <ms timestamp> | null, note?: string }. until is the moment
+   they are back - the board sends the start of the chosen day - and null
+   means off until someone turns it off. Admins may set anyone; anybody else
+   only themselves. */
+app.put('/api/agents/:code/leave', requireAuth, async (req, res) => {
+  try {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    if (!SUPPORT_AGENT_CODES.has(code)) return res.status(400).json({ error: 'not_a_support_agent' });
+    const own = await ownSupportAgentCode(req);
+    if (!isAdminRole(req.session.role) && own !== code) return res.status(403).json({ error: 'only_admins_can_set_others' });
+    const now = Date.now();
+    const rawUntil = req.body?.until;
+    let until = null;
+    if (rawUntil !== null && rawUntil !== undefined && rawUntil !== '') {
+      until = Number(rawUntil);
+      if (!Number.isFinite(until) || until <= now) return res.status(400).json({ error: 'return_date_must_be_in_the_future' });
+      if (until - now > AGENT_LEAVE_MAX_MS) return res.status(400).json({ error: 'return_date_too_far' });
+    }
+    const previous = agentLeave[code] && isLeaveActive(agentLeave[code], now) ? agentLeave[code] : null;
+    const leave = {
+      // Changing the return date of a leave already running keeps its start.
+      since: previous?.since || now,
+      until,
+      note: String(req.body?.note || '').trim().slice(0, 200) || null,
+      setBy: String(req.session.username || '').toUpperCase() || null,
+      setAt: now
+    };
+    await setAgentLeave(code, leave);
+    return res.json({ ok: true, code, leave, all: activeAgentLeave() });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.delete('/api/agents/:code/leave', requireAuth, async (req, res) => {
+  try {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    if (!SUPPORT_AGENT_CODES.has(code)) return res.status(400).json({ error: 'not_a_support_agent' });
+    const own = await ownSupportAgentCode(req);
+    if (!isAdminRole(req.session.role) && own !== code) return res.status(403).json({ error: 'only_admins_can_set_others' });
+    await setAgentLeave(code, null);
+    return res.json({ ok: true, code, all: activeAgentLeave() });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
 });
 
 app.post('/auth/logout', (req, res) => {
@@ -3354,8 +4870,67 @@ app.get('/healthz', async (req, res) => {
   }
 });
 
+/* Patch notes, shown in the Feedback bubble. patch-notes.json is written by
+   hand with every commit - one plain-English line per commit, grouped into a
+   patch per day - because the commit messages are written for the people who
+   maintain the board, not the people who use it. Read per request rather than
+   once at boot so an edit on a running dev server shows up without a restart;
+   it is a few KB. A missing or broken file is an empty list, never a 500: the
+   bubble still has to work for feedback. */
+const PATCH_NOTE_TYPES = new Set(['new', 'improved', 'fixed', 'maintenance']);
+app.get('/api/patch-notes', requireAuth, async (req, res) => {
+  let patches = [];
+  try {
+    const raw = JSON.parse(await fs.promises.readFile(path.join(__dirname, 'patch-notes.json'), 'utf8'));
+    patches = (Array.isArray(raw?.patches) ? raw.patches : [])
+      .filter(p => /^\d{4}-\d{2}-\d{2}$/.test(String(p?.date || '')) && Array.isArray(p.notes))
+      .map(p => ({
+        date: p.date,
+        title: String(p.title || '').slice(0, 60),
+        notes: p.notes
+          .filter(n => n && String(n.text || '').trim())
+          .map(n => ({ type: PATCH_NOTE_TYPES.has(n.type) ? n.type : 'improved', text: String(n.text).trim().slice(0, 400) }))
+      }))
+      .filter(p => p.notes.length)
+      .sort((a, b) => b.date.localeCompare(a.date));
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn('[patch-notes] could not read patch-notes.json:', error.message);
+  }
+  res.json({ build: APP_BUILD_VERSION, patches });
+});
+
+// The support roster's display names, so the board can recognise an agent
+// named in an email ("Hi Zied, ...") and give them the ticket. Keyed by roster
+// code, matched from the account's username or its email's local part - the
+// same two places the rest of the app reads an agent code from. Names only:
+// nothing here says anything about roles or permissions.
+app.get('/api/support-agents/names', requireAuth, async (req, res) => {
+  try {
+    const users = await prisma.user.findMany({
+      where: { isActive: true },
+      select: { username: true, displayName: true, email: true }
+    });
+    const agents = {};
+    users.forEach((user) => {
+      const candidates = [user.username, String(user.email || '').split('@')[0]]
+        .map(v => String(v || '').trim().toUpperCase());
+      const code = candidates.find(c => SUPPORT_AGENT_CODES.has(c));
+      const displayName = String(user.displayName || '').trim();
+      if (code && displayName && !agents[code]) agents[code] = displayName;
+    });
+    return res.json({ agents });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
 app.get('/auth/me', requireAuth, (req, res) => {
-  res.json({ user: { id: req.session.userId, username: req.session.username, role: req.session.role, avatarUrl: avatarUrlForUserId(req.session.userId) } });
+  res.json({ user: { id: req.session.userId, username: req.session.username, role: req.session.role, avatarUrl: avatarUrlForUserId(req.session.userId) }, roster: agentRosterPayload() });
+});
+// The CS and Support rosters, for the board to refresh its dropdowns without
+// a reload when an admin changes someone in Manage Users.
+app.get('/api/roster', requireAuth, (req, res) => {
+  res.json(agentRosterPayload());
 });
 
 app.patch('/api/profile', requireAuth, async (req, res) => {
@@ -3552,16 +5127,1320 @@ app.delete('/api/jira/link/:kanbanTicketId', requireAuth, async (req, res) => {
   try {
     const kanbanTicketId = String(req.params.kanbanTicketId || '').trim();
     if (!kanbanTicketId) return res.status(400).json({ error: 'missing_kanban_ticket_id' });
+    // When the link was made, so the board can resume the SLA clock where the
+    // Jira hold stopped it rather than counting the whole engineering wait
+    // against support the moment the link comes off.
+    let linkedAt = null;
+    try {
+      const record = await findTicketRecordByKanbanId(kanbanTicketId);
+      if (record?.jiraTicketKey) {
+        const linkEvent = await prisma.ticketEvent.findFirst({
+          where: { ticketId: record.id, eventType: 'ticket_jira_linked' },
+          orderBy: { createdAt: 'desc' },
+          select: { createdAt: true }
+        });
+        linkedAt = linkEvent?.createdAt ? linkEvent.createdAt.getTime() : null;
+      }
+    } catch (_) {}
     await setTicketJiraLink({
       kanbanTicketId,
       jiraTicketKey: null,
       userId: req.session.userId || null,
       metadata: { source: 'manual' }
     });
-    return res.json({ ok: true });
+    return res.json({ ok: true, linkedAt });
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
   }
+});
+// ---------------------------------------------------------------------------
+// Velma bugs
+//
+// Bugs on the Velma side are tracked in a Google Sheet rather than in Jira. A
+// ticket waiting on one of them is in the same position as one waiting on a
+// Jira issue: the fix is not support's to make, so linking it puts the SLA on
+// hold (velma_hold in ticketSlaSnapshot, and getSLAStatus on the board).
+//
+// The agent types the bug's ID; the server finds that row in the sheet and
+// keeps a copy of it on the ticket, so the card can show what the bug is
+// without anyone opening the sheet.
+//
+// The sheet is private, so the server needs a Google identity that can read
+// it. Two ways to give it one, and the first that works is used:
+//
+//   1. A service account: create a key, share the sheet with its email
+//      (Viewer is enough), set GOOGLE_SERVICE_ACCOUNT_JSON to the key file's
+//      contents (raw or base64). Nobody has to stay signed in.
+//   2. A person's Google account, connected from the board (Account > Google
+//      account). Needs GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET for
+//      a Web OAuth client whose redirect URI is <board>/auth/google/callback.
+//      Whoever already has access to the sheet signs in once; their refresh
+//      token is stored encrypted and reads are made as them.
+//
+// The second exists because a service account needs someone with Google Cloud
+// admin rights to create, while an agent who can already open the sheet can
+// connect their own account in two clicks.
+// ---------------------------------------------------------------------------
+const VELMA_BUG_SHEET_ID = String(process.env.VELMA_BUG_SHEET_ID || '1do2eeXmIog5af-HX_VtrVHpLGyY5GxMkn2JX96pL3NI').trim();
+const VELMA_BUG_SHEET_GID = String(process.env.VELMA_BUG_SHEET_GID || '601357266').trim();
+/* Every sheet a Velma bug can be looked up in, in the order they are searched:
+   the one above, then VELMA_BUG_EXTRA_SHEETS ("<spreadsheet id>:<gid>",
+   comma separated). A bug ID found in an earlier sheet wins; a link keeps the
+   sheet it was found in, and its status is read from there. */
+const VELMA_BUG_SHEETS = [
+  `${VELMA_BUG_SHEET_ID}:${VELMA_BUG_SHEET_GID}`,
+  ...String(process.env.VELMA_BUG_EXTRA_SHEETS ?? '1NEMGFrVtEPJUqdfUX53lfKxAD3J87E_YikYj0y41_JA:1291300537').split(',')
+]
+  .map(v => v.trim()).filter(Boolean)
+  .map(v => { const [id, gid = '0'] = v.split(':'); return { id: id.trim(), gid: gid.trim() }; })
+  .filter((sheet, i, all) => sheet.id && all.findIndex(o => o.id === sheet.id && o.gid === sheet.gid) === i);
+// Header of the column holding the bug ID. Optional: without it the column is
+// guessed from the headers, and failing that any cell in the row may match.
+const VELMA_BUG_ID_COLUMN = String(process.env.VELMA_BUG_ID_COLUMN || '').trim();
+// Header of the bug's status dropdown. Optional, guessed like the ID column.
+const VELMA_BUG_STATUS_COLUMN = String(process.env.VELMA_BUG_STATUS_COLUMN || '').trim();
+// Status values that mean the bug is fixed and the ticket is support's again.
+const VELMA_DONE_STATUSES = String(process.env.VELMA_DONE_STATUSES || 'DONE')
+  .split(',')
+  .map(v => v.trim().toUpperCase())
+  .filter(Boolean);
+const VELMA_SHEET_CACHE_MS = 60 * 1000;
+const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
+const GOOGLE_OAUTH_CLIENT_ID = String(process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
+const GOOGLE_OAUTH_CLIENT_SECRET = String(process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
+const GOOGLE_OAUTH_REDIRECT_URI = String(process.env.GOOGLE_OAUTH_REDIRECT_URI || '').trim();
+const GOOGLE_PROVIDER_PREFIX = 'google:';
+const googleProviderKey = userId => `${GOOGLE_PROVIDER_PREFIX}${Number(userId)}`;
+
+function parseGoogleServiceAccountKey(raw) {
+  raw = String(raw || '').trim();
+  if (!raw) return null;
+  try {
+    const json = raw.startsWith('{') ? raw : Buffer.from(raw, 'base64').toString('utf8');
+    const key = JSON.parse(json);
+    if (!key.client_email || !key.private_key) return null;
+    return { email: key.client_email, privateKey: String(key.private_key).replace(/\\n/g, '\n') };
+  } catch (_) {
+    return null;
+  }
+}
+
+/* The service account the board reads the Velma sheet with - no one signs in.
+
+   Set in the environment (GOOGLE_SERVICE_ACCOUNT_JSON, which wins) or uploaded
+   once by an admin from Account > Google account, stored in OAuthToken as
+   "google-service-account" with the whole key file encrypted. */
+const GOOGLE_SERVICE_ACCOUNT_PROVIDER = 'google-service-account';
+let googleServiceAccountCache = { at: 0, value: null };
+async function googleServiceAccount() {
+  const fromEnv = parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  if (fromEnv) return { ...fromEnv, source: 'env' };
+  if (googleServiceAccountCache.at && Date.now() - googleServiceAccountCache.at < 60 * 1000) return googleServiceAccountCache.value;
+  const row = await getStoredOAuthTokens(GOOGLE_SERVICE_ACCOUNT_PROVIDER);
+  const parsed = parseGoogleServiceAccountKey(decryptClaudeCredential(row?.accessToken || ''));
+  const value = parsed ? { ...parsed, source: 'board', savedBy: row?.metadata?.savedBy || null } : null;
+  googleServiceAccountCache = { at: Date.now(), value };
+  return value;
+}
+
+let googleTokenCache = { token: '', expiresAt: 0 };
+async function googleServiceAccountToken(account) {
+  if (googleTokenCache.token && googleTokenCache.email === account.email && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const encode = obj => Buffer.from(JSON.stringify(obj)).toString('base64url');
+  const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({
+    iss: account.email,
+    scope: GOOGLE_SHEETS_SCOPE,
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: nowSec,
+    exp: nowSec + 3600
+  })}`;
+  const signature = crypto.createSign('RSA-SHA256').update(unsigned).sign(account.privateKey).toString('base64url');
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: `${unsigned}.${signature}` })
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok || !out.access_token) throw new Error(`google_auth_failed: ${out.error_description || out.error || res.status}`);
+  googleTokenCache = { token: out.access_token, email: account.email, expiresAt: Date.now() + Number(out.expires_in || 3600) * 1000 };
+  return googleTokenCache.token;
+}
+
+// ---- Google accounts connected from the board ------------------------------
+
+// Every connected account, newest first. The sheet is the same for everyone,
+// so any account that can read it will do; the most recently connected one is
+// tried first because it is the one most likely to still be valid.
+async function listGoogleConnections() {
+  try {
+    const rows = await prisma.oAuthToken.findMany({
+      where: { provider: { startsWith: GOOGLE_PROVIDER_PREFIX } },
+      orderBy: { updatedAt: 'desc' }
+    });
+    return rows
+      .map(row => ({
+        provider: row.provider,
+        userId: Number(row.provider.slice(GOOGLE_PROVIDER_PREFIX.length)) || null,
+        refreshToken: decryptClaudeCredential(row.refreshToken || ''),
+        accessToken: decryptClaudeCredential(row.accessToken || ''),
+        expiresAt: row.expiresAt ? new Date(row.expiresAt).getTime() : 0,
+        metadata: (row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)) ? row.metadata : {}
+      }))
+      .filter(row => row.refreshToken);
+  } catch (_) {
+    return [];
+  }
+}
+
+async function saveGoogleConnection(userId, { accessToken, refreshToken, expiresAt, metadata }) {
+  await setStoredOAuthTokens(googleProviderKey(userId), {
+    accessToken: encryptClaudeCredential(accessToken || ''),
+    refreshToken: encryptClaudeCredential(refreshToken || ''),
+    expiresAt,
+    metadata
+  });
+}
+
+/* The Google OAuth client the sign-in uses.
+
+   Set either in the environment (GOOGLE_OAUTH_CLIENT_ID / _SECRET, which win)
+   or by an admin from the board itself (Account > Google account), stored in
+   OAuthToken as "google-oauth-client" with the secret encrypted. The second
+   exists so that turning Google sign-in on is pasting two values into the
+   board, not a server config change and a redeploy. */
+const GOOGLE_OAUTH_CLIENT_PROVIDER = 'google-oauth-client';
+let googleOAuthClientCache = { at: 0, value: null };
+async function googleOAuthClient() {
+  if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) {
+    return { clientId: GOOGLE_OAUTH_CLIENT_ID, clientSecret: GOOGLE_OAUTH_CLIENT_SECRET, source: 'env' };
+  }
+  if (googleOAuthClientCache.at && Date.now() - googleOAuthClientCache.at < 60 * 1000) return googleOAuthClientCache.value;
+  const row = await getStoredOAuthTokens(GOOGLE_OAUTH_CLIENT_PROVIDER);
+  const clientId = String(row?.metadata?.clientId || '').trim();
+  const clientSecret = decryptClaudeCredential(row?.accessToken || '');
+  const value = clientId && clientSecret ? { clientId, clientSecret, source: 'board', savedBy: row?.metadata?.savedBy || null } : null;
+  googleOAuthClientCache = { at: Date.now(), value };
+  return value;
+}
+
+// A fresh access token for one connection, refreshing it when it is about to
+// expire. A refresh Google refuses (the person revoked access, or the token
+// went unused for six months) removes the connection, so the board stops
+// reporting an account as connected when it cannot read anything.
+async function googleConnectionToken(connection) {
+  if (connection.accessToken && connection.expiresAt > Date.now() + 60000) return connection.accessToken;
+  const client = await googleOAuthClient();
+  if (!client) throw new Error('google_auth_failed: Google sign-in is not set up');
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: connection.refreshToken,
+      client_id: client.clientId,
+      client_secret: client.clientSecret
+    })
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok || !out.access_token) {
+    if (out.error === 'invalid_grant') {
+      await prisma.oAuthToken.delete({ where: { provider: connection.provider } }).catch(() => null);
+    }
+    throw new Error(`google_refresh_failed: ${out.error_description || out.error || res.status}`);
+  }
+  const expiresAt = Date.now() + Number(out.expires_in || 3600) * 1000;
+  await saveGoogleConnection(connection.userId, {
+    accessToken: out.access_token,
+    refreshToken: connection.refreshToken,
+    expiresAt,
+    metadata: connection.metadata
+  });
+  return out.access_token;
+}
+
+// The credentials to try for a sheet read, in order. preferUserId puts the
+// caller's own account first, so the person linking a bug reads with the
+// account they just connected.
+async function googleSheetCredentials(preferUserId = null) {
+  const out = [];
+  const account = await googleServiceAccount();
+  if (account) out.push({ kind: 'service_account', label: account.email, token: () => googleServiceAccountToken(account) });
+  if (await googleOAuthClient()) {
+    const connections = await listGoogleConnections();
+    connections.sort((x, y) => (y.userId === preferUserId) - (x.userId === preferUserId));
+    connections.forEach(connection => out.push({
+      kind: 'google_user',
+      label: String(connection.metadata.email || `user ${connection.userId}`),
+      token: () => googleConnectionToken(connection)
+    }));
+  }
+  return out;
+}
+
+async function googleSheetsGet(pathAndQuery, { preferUserId = null, spreadsheetId = VELMA_BUG_SHEET_ID } = {}) {
+  const credentials = await googleSheetCredentials(preferUserId);
+  if (!credentials.length) {
+    throw new Error('velma_sheet_not_configured: sign in with a Google account that can open the Velma bug sheet (Account > Google account), upload a service account key there, or share the sheet as "Anyone with the link can view"');
+  }
+  // Each credential in turn: a person who connected but was never given
+  // access to the sheet must not stop the next one from being tried.
+  const denied = [];
+  let lastError = null;
+  for (const credential of credentials) {
+    let token;
+    try {
+      token = await credential.token();
+    } catch (error) {
+      lastError = error;
+      continue;
+    }
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}${pathAndQuery}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const out = await res.json().catch(() => ({}));
+    if (res.ok) return out;
+    // 403/404 almost always means this identity cannot see the sheet.
+    if (res.status === 403 || res.status === 404) { denied.push(credential.label); continue; }
+    lastError = new Error(`velma_sheet_read_failed: ${out?.error?.message || res.status}`);
+  }
+  if (denied.length) throw new Error(`velma_sheet_not_shared: ${denied.join(', ')} cannot open the Velma bug sheet - share it with that account (Viewer is enough)`);
+  throw lastError || new Error('velma_sheet_read_failed');
+}
+
+// The whole tab, cached briefly: a link is a handful of lookups a minute at
+// most, and re-reading the sheet for each one buys nothing. Read as displayed
+// values (the API default), which is what a dropdown cell shows - "DONE", not
+// an internal option id.
+let velmaSheetCache = { at: 0, sheets: null };
+// Every Velma bug sheet. One that cannot be read is left out (and logged) as
+// long as another one could be; only when none can is that an error.
+async function readVelmaBugSheet({ preferUserId = null, fresh = false } = {}) {
+  if (!fresh && velmaSheetCache.sheets && Date.now() - velmaSheetCache.at < VELMA_SHEET_CACHE_MS) return velmaSheetCache;
+  const results = await Promise.allSettled(VELMA_BUG_SHEETS.map(sheet => readOneVelmaBugSheet(sheet, preferUserId)));
+  const sheets = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+  const failed = results.map((r, i) => r.status === 'rejected' ? { ...VELMA_BUG_SHEETS[i], error: String(r.reason?.message || r.reason) } : null).filter(Boolean);
+  if (!sheets.length) throw new Error(failed[0]?.error || 'velma_sheet_read_failed');
+  failed.forEach(f => console.warn(`Velma bug sheet ${f.id} (gid ${f.gid}) skipped: ${f.error}`));
+  velmaSheetCache = { at: Date.now(), sheets, failed, title: sheets.map(s => s.title).join(', ') };
+  return velmaSheetCache;
+}
+async function readOneVelmaBugSheet({ id, gid }, preferUserId) {
+  try {
+    const meta = await googleSheetsGet('?fields=sheets.properties(sheetId,title)', { preferUserId, spreadsheetId: id });
+    const tab = (meta.sheets || []).map(s => s.properties || {}).find(p => String(p.sheetId) === gid);
+    if (!tab) throw new Error(`velma_sheet_tab_missing: no tab with gid ${gid}`);
+    const quoted = `'${String(tab.title).replace(/'/g, "''")}'`;
+    const values = await googleSheetsGet(`/values/${encodeURIComponent(quoted)}?majorDimension=ROWS`, { preferUserId, spreadsheetId: id });
+    return { id, gid, rows: Array.isArray(values.values) ? values.values : [], title: tab.title };
+  } catch (error) {
+    // No account could read it: the sheet's link is the last way in, for a
+    // sheet shared as "Anyone with the link can view". If that fails too,
+    // the account's reason is the one worth showing - it says what to fix.
+    if (/velma_sheet_tab_missing/.test(String(error.message))) throw error;
+    try {
+      return { id, gid, ...(await readSheetByLink({ id, gid })) };
+    } catch (_) {
+      throw error;
+    }
+  }
+}
+
+// RFC 4180 CSV: quoted fields may hold commas, newlines and "" for a quote.
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/* The sheet as anyone with its link sees it: the tab's CSV export, displayed
+   values ("DONE", as the dropdown shows it). A sheet not shared by link
+   answers with a sign-in page or a 401 rather than CSV. */
+async function readSheetByLink({ id, gid }) {
+  const url = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(id)}/export?format=csv&gid=${encodeURIComponent(gid)}`;
+  // Redirects followed: a shared sheet's export is served from
+  // googleusercontent.com.
+  const res = await fetch(url);
+  const type = String(res.headers.get('content-type') || '');
+  if (res.status === 401 || res.status === 403 || (res.ok && !/csv|text\/plain/i.test(type))) {
+    throw new Error('velma_sheet_not_shared: the Velma bug sheet is not shared by link');
+  }
+  if (!res.ok) throw new Error(`velma_sheet_read_failed: ${res.status}`);
+  return { rows: parseCsv(await res.text()), title: 'Velma bug sheet' };
+}
+
+const normalizeVelmaBugId = value => String(value || '').trim().replace(/^#/, '').toUpperCase();
+function velmaColumnLetter(index) {
+  let n = index + 1;
+  let out = '';
+  while (n > 0) { out = String.fromCharCode(65 + ((n - 1) % 26)) + out; n = Math.floor((n - 1) / 26); }
+  return out;
+}
+const velmaHeaderName = v => String(v || '').trim().toLowerCase().replace(/[^a-z0-9#]+/g, ' ').trim();
+// "DONE", "Done", "done ✅" and " DONE " are the same answer; a dropdown is
+// typed by whoever set up the sheet, and an emoji or stray space must not keep
+// a fixed bug's ticket on hold.
+const velmaStatusKey = v => String(v || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+const isVelmaStatusDone = status => !!status && VELMA_DONE_STATUSES.some(done => velmaStatusKey(status) === velmaStatusKey(done));
+
+/* Find one bug's row in the sheet's values.
+
+   The sheet's layout is not under our control, so nothing here assumes it.
+   The header row is the first of the top few rows that names an ID column
+   (VELMA_BUG_ID_COLUMN if set, otherwise a header like "ID", "Bug ID" or
+   "Ticket ID"). The bug is the first row below it with the ID in that column.
+   If no ID column can be found, the first row with any cell equal to the ID
+   is taken instead - an exact whole-cell match, so "12" does not find "123".
+
+   The status is the cell under a "Status" header (or VELMA_BUG_STATUS_COLUMN)
+   in that row. A sheet with no such column simply has no status, and its
+   links behave as before: on hold until removed. */
+function findVelmaBugRow(rows, bugId, sheet = { id: VELMA_BUG_SHEET_ID, gid: VELMA_BUG_SHEET_GID }) {
+  const wanted = normalizeVelmaBugId(bugId);
+  if (!wanted || !Array.isArray(rows)) return null;
+  const isIdHeader = (h) => {
+    if (VELMA_BUG_ID_COLUMN) return h === velmaHeaderName(VELMA_BUG_ID_COLUMN);
+    return /^(velma )?(bug |ticket |issue )?(id|n|no|number|#)$/.test(h);
+  };
+  const isStatusHeader = (h) => {
+    if (VELMA_BUG_STATUS_COLUMN) return h === velmaHeaderName(VELMA_BUG_STATUS_COLUMN);
+    return /^(bug |ticket |dev |fix )?(status|state)$/.test(h);
+  };
+  let headerIndex = -1;
+  let idColumn = -1;
+  for (let r = 0; r < Math.min(rows.length, 10) && idColumn < 0; r++) {
+    const col = (rows[r] || []).map(velmaHeaderName).findIndex(isIdHeader);
+    if (col >= 0) { headerIndex = r; idColumn = col; }
+  }
+  const headers = headerIndex >= 0 ? rows[headerIndex] : [];
+  const statusColumn = headers.map(velmaHeaderName).findIndex(isStatusHeader);
+  for (let r = headerIndex + 1; r < rows.length; r++) {
+    const row = rows[r] || [];
+    const hit = idColumn >= 0
+      ? normalizeVelmaBugId(row[idColumn]) === wanted
+      : row.some(cell => normalizeVelmaBugId(cell) === wanted);
+    if (!hit) continue;
+    const fields = {};
+    row.forEach((cell, i) => {
+      const value = String(cell ?? '').trim();
+      if (!value) return;
+      const label = String(headers[i] || '').trim() || `Column ${velmaColumnLetter(i)}`;
+      fields[label] = value.slice(0, 2000);
+    });
+    const rowNumber = r + 1;
+    const lastColumn = velmaColumnLetter(Math.max(row.length, headers.length, 1) - 1);
+    const status = statusColumn >= 0 ? String(row[statusColumn] ?? '').trim().slice(0, 120) : '';
+    return {
+      row: rowNumber,
+      fields,
+      status: status || null,
+      sheetId: sheet.id,
+      sheetGid: sheet.gid,
+      sheetTitle: sheet.title || null,
+      url: `https://docs.google.com/spreadsheets/d/${sheet.id}/edit#gid=${sheet.gid}&range=A${rowNumber}:${lastColumn}${rowNumber}`
+    };
+  }
+  return null;
+}
+// A bug in any of the sheets. A linked bug is only looked for in the sheet it
+// was found in, so the same ID in another sheet never takes it over; a link
+// made before there was more than one sheet has no sheetId and is from the
+// first sheet.
+function findVelmaBugInSheets(cache, bugId, previous = null) {
+  const sheets = cache?.sheets || [];
+  if (previous) {
+    const home = sheets.find(s => s.id === (previous.sheetId || VELMA_BUG_SHEET_ID) && s.gid === (previous.sheetGid || VELMA_BUG_SHEET_GID));
+    return home ? findVelmaBugRow(home.rows, bugId, home) : null;
+  }
+  for (const sheet of sheets) {
+    const found = findVelmaBugRow(sheet.rows, bugId, sheet);
+    if (found) return found;
+  }
+  return null;
+}
+
+/* A link's hold, from its status.
+
+   A Velma bug holds the ticket's SLA while engineering owns the fix. Once the
+   sheet says DONE the ticket is support's again, so the hold ends and the clock
+   resumes from where the link stopped it - not from zero, and not as if it had
+   run all along. If the bug is re-opened (DONE taken off again) the hold comes
+   back from that moment.
+
+     done          - the hold is over (status is one of VELMA_DONE_STATUSES)
+     holdStartedAt - when the current hold began; the clock resumes by the
+                     length of the hold measured from here
+     doneAt        - when DONE was first seen, for the card and the audit */
+function velmaLinkWithStatus(previous, found, now = Date.now()) {
+  const done = isVelmaStatusDone(found.status);
+  const wasDone = !!previous?.done;
+  const wasHeldSince = Number(previous?.holdStartedAt || previous?.linkedAt || 0) || null;
+  return {
+    ...(previous || {}),
+    ...found,
+    done,
+    doneAt: done ? (wasDone ? (Number(previous.doneAt) || now) : now) : null,
+    holdStartedAt: done ? null : (previous && !wasDone && wasHeldSince ? wasHeldSince : now),
+    statusCheckedAt: now
+  };
+}
+// The ticket ids whose link this changes from held to released.
+const velmaHoldEnded = (previous, next) => !!previous && !previous.done && !!next?.done;
+
+// Move one ticket's SLA restart point forward past a hold that has just ended,
+// the server's copy of resumeSlaAfterHold in index.html. Skipped
+// while a Jira link or Waiting on Contact still holds the ticket - those settle
+// the clock themselves when they end, and resuming here as well would count
+// the overlap twice. Returns the new restart point, or null for no change.
+function slaResumePointAfterHold(state, externalId, since, now) {
+  since = Number(since || 0);
+  if (!since || since >= now) return null;
+  if (String(state.ticketJira?.[externalId] || '').trim()) return null;
+  if (String(state.ticketState?.[externalId] || '') === 'wct') return null;
+  const created = new Date(state.ticketCreatedAt?.[externalId] || 0).getTime() || 0;
+  const base = Math.max(created, Number(state.ticketSlaResetAt?.[externalId] || 0));
+  if (!base || base >= since) return null;
+  /* Carried over in the agent's shift time, which is what the clock counts:
+     it resumes with exactly the time worked on it when the hold began. This
+     used office hours, and an agent is on shift for fewer hours than that,
+     so the restart point landed inside the hold and every shift the agent
+     worked while it was held was counted - a frozen ticket came back
+     overdue. Office hours are left only for a ticket whose agent has no
+     shift record. */
+  const agent = String(state.ticketAssignee?.[externalId] || '').trim().toUpperCase();
+  if (agent && shiftStore.agents[agent]) {
+    const resumeAt = shiftPointBefore(now, shiftElapsedMs(base, since, agent), agent, base);
+    return resumeAt > base ? resumeAt : null;
+  }
+  return businessPointBefore(now, businessMsInRange(base, since));
+}
+
+/* Snoozes. The board writes them, but two rules are kept here, where every
+   save passes, rather than trusted to each tab:
+   - a support agent has at most SNOOZE_MAX_PER_AGENT snoozed tickets at once,
+     counted on the ticket's assignee whoever pressed Snooze. A snooze over the
+     limit is dropped from the save and reported back as refused; snoozes that
+     were already there when the limit came in are left alone.
+   - a snoozed ticket's SLA is held: it counts as snooze_hold while snoozed,
+     and when the snooze ends - cleared, replaced, or run out - the restart
+     point moves forward so the clock resumes with exactly the working time it
+     had when the ticket was snoozed, like the admin hold. */
+const SNOOZE_MAX_PER_AGENT = Math.max(1, Number(process.env.SNOOZE_MAX_PER_AGENT || 5) || 5);
+function snoozeIsActive(entry, now) { return !!entry && Number(entry.at) > 0 && Number(entry.until) > now; }
+// The support agent a snoozed ticket counts against, or null for a ticket with
+// none (unassigned, or held by someone outside the support team).
+function snoozeLimitAgent(state, id) {
+  const code = String(state.ticketAssignee?.[id] || '').trim().toUpperCase();
+  return SUPPORT_AGENT_CODES.has(code) ? code : null;
+}
+// The restart point a snooze held since `since` and ended at `endedAt` leaves.
+function snoozeResumePoint(state, id, since, endedAt) {
+  const resumeAt = slaResumePointAfterHold(state, id, since, endedAt);
+  return resumeAt && resumeAt > Number(state.ticketSlaResetAt?.[id] || 0) ? resumeAt : null;
+}
+// Applied to a save's merged state, after ticketSlaResetAt is merged. Mutates
+// nextState.ticketSnooze and nextState.ticketSlaResetAt; returns what it refused.
+function applySnoozeRules(currentState, nextState, now = Date.now()) {
+  const prev = (currentState.ticketSnooze && typeof currentState.ticketSnooze === 'object') ? currentState.ticketSnooze : {};
+  const next = { ...((nextState.ticketSnooze && typeof nextState.ticketSnooze === 'object') ? nextState.ticketSnooze : {}) };
+  nextState.ticketSlaResetAt = (nextState.ticketSlaResetAt && typeof nextState.ticketSlaResetAt === 'object') ? nextState.ticketSlaResetAt : {};
+  // A snooze that ran out stays out: a tab that has not swept it yet must not
+  // bring it back.
+  for (const [id, entry] of Object.entries(next)) if (!snoozeIsActive(entry, now)) delete next[id];
+
+  // Every snooze that ended since the last save gives its held time back.
+  for (const [id, entry] of Object.entries(prev)) {
+    const since = Number(entry?.at || 0);
+    if (!since) continue;
+    const after = next[id];
+    const replaced = !!after && Number(after.at) !== since;
+    if (after && !replaced) continue;
+    const endedAt = Math.min(now, Number(entry.until) || now, replaced ? (Number(after.at) || now) : now);
+    const resumeAt = snoozeResumePoint(nextState, id, since, endedAt);
+    if (resumeAt) nextState.ticketSlaResetAt[id] = resumeAt;
+  }
+
+  // The limit, on snoozes this save adds. Kept ones count first; new ones are
+  // let in oldest first while there is room.
+  const counts = new Map();
+  const added = [];
+  for (const [id, entry] of Object.entries(next)) {
+    const agent = snoozeLimitAgent(nextState, id);
+    if (!agent) continue;
+    const kept = prev[id] && Number(prev[id].at) === Number(entry.at) && snoozeIsActive(prev[id], now);
+    if (kept) counts.set(agent, (counts.get(agent) || 0) + 1);
+    else added.push({ id, entry, agent });
+  }
+  const refused = [];
+  added.sort((a, b) => Number(a.entry.at) - Number(b.entry.at));
+  for (const { id, agent } of added) {
+    const count = counts.get(agent) || 0;
+    if (count >= SNOOZE_MAX_PER_AGENT) {
+      delete next[id];
+      refused.push({ field: 'ticketSnooze', id, claims: [agent], limit: SNOOZE_MAX_PER_AGENT });
+    } else counts.set(agent, count + 1);
+  }
+  nextState.ticketSnooze = next;
+  if (refused.length) console.warn(`[snooze] refused ${refused.length} snooze(s) over the limit of ${SNOOZE_MAX_PER_AGENT}: ${refused.slice(0, 5).map(r => `${r.id} (${r.claims[0]})`).join(', ')}`);
+  return refused;
+}
+// A snooze that runs out while no board is open still has to give its held
+// time back, and leave the board, without waiting for someone to save.
+async function releaseExpiredSnoozes() {
+  const state = safeReadState();
+  const now = Date.now();
+  const entries = [];
+  const resumed = [];
+  for (const [id, entry] of Object.entries(state.ticketSnooze || {})) {
+    if (!entry || Number(entry.until) > now) continue;
+    entries.push({ field: 'ticketSnooze', id, value: null });
+    const since = Number(entry.at || 0);
+    const resumeAt = since ? snoozeResumePoint(state, id, since, Math.min(now, Number(entry.until) || now)) : null;
+    if (resumeAt) {
+      entries.push({ field: 'ticketSlaResetAt', id, value: resumeAt });
+      resumed.push({ id, resumeAt });
+    }
+  }
+  if (!entries.length) return;
+  writeServerFieldsIntoState(entries);
+  for (const { id, resumeAt } of resumed) {
+    await prisma.ticket.updateMany({ where: { externalId: id }, data: { slaResetAt: new Date(resumeAt) } })
+      .catch(error => console.error('Snooze SLA resume write failed:', error?.message || error));
+  }
+}
+
+// Write several server-owned values into the board state in one synchronous
+// read-modify-write, so no board save can land in between, and push them to
+// every open board. Each entry is { field, id, value }; null removes.
+function writeServerFieldsIntoState(entries) {
+  const changes = [];
+  try {
+    const state = safeReadState();
+    for (const { field, id, value } of entries) {
+      const key = String(id || '').trim();
+      if (!key) continue;
+      const map = (state[field] && typeof state[field] === 'object') ? state[field] : {};
+      if (JSON.stringify(map[key] ?? null) === JSON.stringify(value ?? null)) continue;
+      if (value === null || value === undefined) delete map[key]; else map[key] = value;
+      state[field] = map;
+      changes.push({ id: key, field, value: value ?? null });
+    }
+    if (changes.length) {
+      fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
+      fs.writeFileSync(DATA_PATH, JSON.stringify(state, null, 2), 'utf8');
+      sseBroadcast('board_patch', { actor: null, origin: null, changes, added: [], removed: [] });
+    }
+  } catch (error) {
+    console.warn('Board state write failed:', error.message || error);
+  }
+  return changes;
+}
+
+async function setTicketVelmaBug({ kanbanTicketId, link, userId = null }) {
+  const externalId = String(kanbanTicketId || '').trim();
+  const ticket = await findTicketRecordByKanbanId(externalId);
+  // State first, even when the ticket has no database row yet - same reason
+  // as setTicketJiraLink.
+  const stateChange = writeServerOwnedFieldIntoState('ticketVelmaBug', externalId, link || null);
+  broadcastServerOwnedFieldChange(stateChange);
+  if (!ticket) return { ticket: null, updated: !!stateChange };
+  const nextId = link ? link.id : null;
+  const { id: _id, ...rowSnapshot } = link || {};
+  const updated = await prisma.ticket.update({
+    where: { id: ticket.id },
+    data: { velmaBugId: nextId, velmaBugRow: link ? rowSnapshot : Prisma.DbNull }
+  });
+  if (String(ticket.velmaBugId || '') !== String(nextId || '')) {
+    await createTicketAuditEvent({
+      ticketId: ticket.id,
+      userId,
+      eventType: nextId ? 'ticket_velma_bug_linked' : 'ticket_velma_bug_unlinked',
+      oldValue: ticket.velmaBugId || null,
+      newValue: nextId,
+      metadata: link ? { row: link.row, status: link.status || null } : undefined
+    });
+  }
+  return { ticket: updated, updated: true };
+}
+
+app.post('/api/velma-bug/link', requireAuth, async (req, res) => {
+  try {
+    const kanbanTicketId = String(req.body?.kanbanTicketId || '').trim();
+    const bugId = normalizeVelmaBugId(req.body?.bugId);
+    if (!kanbanTicketId || !bugId) return res.status(400).json({ error: 'missing_ticket_or_bug_id' });
+    let sheet;
+    try {
+      sheet = await readVelmaBugSheet({ preferUserId: Number(req.session.userId) || null, fresh: true });
+    } catch (error) {
+      return res.status(502).json({ error: String(error.message || error) });
+    }
+    const found = findVelmaBugInSheets(sheet, bugId);
+    if (!found) return res.status(404).json({ error: `No row with ID ${bugId} in the Velma bug sheets (${sheet.title}).` });
+    // Re-linking a ticket that is already on hold keeps the hold's start, so
+    // the time it has already spent waiting is not counted as ours when it
+    // ends. A ticket linked to a bug that is already DONE never goes on hold.
+    const previous = safeReadState().ticketVelmaBug?.[kanbanTicketId] || null;
+    const now = Date.now();
+    const link = {
+      id: bugId,
+      ...velmaLinkWithStatus(previous && !previous.done ? { holdStartedAt: previous.holdStartedAt || previous.linkedAt } : null, found, now),
+      linkedAt: now,
+      linkedBy: String(req.session.username || '').toUpperCase() || null
+    };
+    await setTicketVelmaBug({ kanbanTicketId, link, userId: req.session.userId || null });
+    return res.json({ ok: true, link });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+app.delete('/api/velma-bug/link/:kanbanTicketId', requireAuth, async (req, res) => {
+  try {
+    const kanbanTicketId = String(req.params.kanbanTicketId || '').trim();
+    if (!kanbanTicketId) return res.status(400).json({ error: 'missing_kanban_ticket_id' });
+    // When the current hold began, so the board can resume the SLA clock where
+    // the hold stopped it - the same as a Jira unlink. Nothing when the bug is
+    // already DONE: that hold has ended and its time was given back then, so
+    // returning it again would resume the clock twice.
+    const current = safeReadState().ticketVelmaBug?.[kanbanTicketId] || null;
+    await setTicketVelmaBug({ kanbanTicketId, link: null, userId: req.session.userId || null });
+    const heldSince = current && !current.done ? Number(current.holdStartedAt || current.linkedAt || 0) : 0;
+    return res.json({ ok: true, linkedAt: heldSince || null });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+/* Admin freeze of a ticket's SLA clock. Body: { hold: true | false }.
+
+   Held, the clock stops where it is: the badge says who froze it, and the
+   ticket drops out of overdue and at risk (admin_hold in ticketSlaSnapshot).
+   Released, the ticket gets a fresh SLA: the clock restarts from the moment
+   of release with its full target, whatever it had used before the freeze.
+   This is the admin freeze only - snooze, Waiting on Contact, Jira and Velma
+   holds still resume where they stopped (slaResumePointAfterHold). */
+app.post('/api/tickets/:externalId/sla-hold', requireAdmin, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const hold = req.body?.hold === true;
+    const actor = String(req.session.username || '').trim().toUpperCase() || null;
+    const now = Date.now();
+    const state = safeReadState();
+    const current = state.ticketSlaHold?.[externalId] || null;
+    if (hold && current) return res.json({ ok: true, hold: current });
+    if (!hold && !current) return res.json({ ok: true, hold: null });
+
+    const value = hold ? { at: now, by: actor } : null;
+    const entries = [{ field: 'ticketSlaHold', id: externalId, value }];
+    const resumeAt = hold ? null : now;
+    if (resumeAt) entries.push({ field: 'ticketSlaResetAt', id: externalId, value: resumeAt });
+    writeServerFieldsIntoState(entries);
+
+    const ticket = await findTicketRecordByKanbanId(externalId).catch(() => null);
+    if (ticket) {
+      await prisma.ticket.update({
+        where: { id: ticket.id },
+        data: {
+          slaHoldAt: hold ? new Date(now) : null,
+          slaHoldBy: hold ? actor : null,
+          ...(resumeAt ? { slaResetAt: new Date(resumeAt) } : {})
+        }
+      });
+      await createTicketAuditEvent({
+        ticketId: ticket.id,
+        userId: req.session.userId || null,
+        eventType: hold ? 'ticket_sla_hold' : 'ticket_sla_released',
+        oldValue: hold ? null : new Date(Number(current.at || now)).toISOString(),
+        newValue: hold ? new Date(now).toISOString() : null,
+        metadata: { actor, ...(resumeAt ? { slaResetAt: new Date(resumeAt).toISOString() } : {}) }
+      }).catch(() => null);
+    }
+    return res.json({ ok: true, hold: value, slaResetAt: resumeAt || null });
+  } catch (error) {
+    console.error('SLA hold failed:', error);
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+/* One-off at the SLA baseline: every ticket still open restarts its clock
+   from SLA_BASELINE_AT, so the backlog is measured live from there instead
+   of carrying time from before it. The restart point only ever moves
+   forward, so a ticket replied to after the baseline keeps its later point.
+   Runs by itself at start-up, once per database - a SyncLog row records it.
+   POST /api/admin/sla/restart-at-baseline (the button in Manage Users) runs
+   it too, or reports when it ran. */
+const SLA_BASELINE_SYNC_TYPE = 'sla_baseline_restart_v1';
+async function restartOpenSlaClocksAtBaselineOnce() {
+  if (!SLA_BASELINE_AT) return { ok: false, error: 'no_baseline' };
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_BASELINE_SYNC_TYPE, status: 'success' } });
+  if (done) return { ok: true, alreadyDone: true, at: done.createdAt, message: done.message };
+  const state = safeReadState();
+  const stages = (state.ticketState && typeof state.ticketState === 'object') ? state.ticketState : {};
+  const resetAt = (state.ticketSlaResetAt && typeof state.ticketSlaResetAt === 'object') ? state.ticketSlaResetAt : {};
+  const createdAt = (state.ticketCreatedAt && typeof state.ticketCreatedAt === 'object') ? state.ticketCreatedAt : {};
+  const ids = Object.keys(stages).filter((id) => {
+    if (normalizeDbStatusForBoard(stages[id]) === 'res' || stages[id] === 'res') return false;
+    const base = Math.max(new Date(createdAt[id] || 0).getTime() || 0, Number(resetAt[id] || 0));
+    return base < SLA_BASELINE_AT;
+  });
+  if (ids.length) writeServerFieldsIntoState(ids.map(id => ({ field: 'ticketSlaResetAt', id, value: SLA_BASELINE_AT })));
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_BASELINE_SYNC_TYPE,
+      status: 'success',
+      message: `SLA clock restarted at the baseline for ${ids.length} open ticket(s).`,
+      metadata: { baselineAt: new Date(SLA_BASELINE_AT).toISOString(), tickets: ids }
+    }
+  }).catch((error) => console.error('SLA baseline marker write failed:', error?.message || error));
+  // The database copy too, for tickets whose row is open - by status rather
+  // than by the state's ids alone, so a row the state does not hold is included.
+  const rows = await prisma.ticket.updateMany({
+    where: {
+      NOT: [{ status: 'Resolved' }],
+      OR: [{ slaResetAt: null }, { slaResetAt: { lt: new Date(SLA_BASELINE_AT) } }],
+      createdAt: { lt: new Date(SLA_BASELINE_AT) }
+    },
+    data: { slaResetAt: new Date(SLA_BASELINE_AT) }
+  }).catch((error) => { console.error('SLA baseline database update failed:', error?.message || error); return { count: 0 }; });
+  console.log(`SLA baseline: clock restarted for ${ids.length} open ticket(s) on the board, ${rows.count} row(s) in the database.`);
+  return { ok: true, board: ids.length, database: rows.count, baselineAt: new Date(SLA_BASELINE_AT).toISOString() };
+}
+/* One-off: a fresh SLA for #13661 and #20500, from the moment this runs.
+   Found by their board number, in the state and in the database. Once per
+   database, recorded as a SyncLog row, like the baseline restart above. */
+const SLA_MANUAL_RESET_SYNC_TYPE = 'sla_manual_reset_13661_20500_v1';
+const SLA_MANUAL_RESET_NUMBERS = [13661, 20500];
+async function resetSlaOfNamedTicketsOnce() {
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_MANUAL_RESET_SYNC_TYPE, status: 'success' } });
+  if (done) return;
+  const now = Date.now();
+  const state = safeReadState();
+  const numbers = (state.ticketNumbers && typeof state.ticketNumbers === 'object') ? state.ticketNumbers : {};
+  const rows = await prisma.ticket.findMany({ where: { displayNumber: { in: SLA_MANUAL_RESET_NUMBERS } }, select: { externalId: true } });
+  const ids = [...new Set([
+    ...Object.keys(numbers).filter(id => SLA_MANUAL_RESET_NUMBERS.includes(Number(numbers[id]))),
+    ...rows.map(row => row.externalId).filter(Boolean)
+  ])];
+  if (ids.length) writeServerFieldsIntoState(ids.map(id => ({ field: 'ticketSlaResetAt', id, value: now })));
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_MANUAL_RESET_SYNC_TYPE,
+      status: 'success',
+      message: `SLA reset for ${ids.length} ticket(s) (#${SLA_MANUAL_RESET_NUMBERS.join(', #')}).`,
+      metadata: { at: new Date(now).toISOString(), tickets: ids }
+    }
+  }).catch((error) => console.error('SLA manual reset marker write failed:', error?.message || error));
+  if (ids.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: ids } }, data: { slaResetAt: new Date(now) } })
+      .catch((error) => console.error('SLA manual reset database update failed:', error?.message || error));
+  }
+  console.log(`SLA reset for ${ids.length} ticket(s) of #${SLA_MANUAL_RESET_NUMBERS.join(', #')}.`);
+}
+/* One-off: a fresh SLA for every ticket an admin has frozen. Until the fix in
+   slaResumePointAfterHold a released freeze counted the agent's shifts during
+   it, so tickets came back overdue. Still frozen: the clock is restarted and
+   stays frozen from now, so release gives the full SLA. Released and still
+   open: the clock restarts now. Once per database, like the resets above. */
+const SLA_FROZEN_RESET_SYNC_TYPE = 'sla_frozen_tickets_reset_v1';
+async function resetFrozenSlaClocksOnce() {
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_FROZEN_RESET_SYNC_TYPE, status: 'success' } });
+  if (done) return;
+  const now = Date.now();
+  const state = safeReadState();
+  const holds = (state.ticketSlaHold && typeof state.ticketSlaHold === 'object') ? state.ticketSlaHold : {};
+  const isOpen = id => String(state.ticketState?.[id] || 'new') !== 'res';
+  const frozen = Object.keys(holds).filter(id => holds[id]?.at && isOpen(id));
+  const releasedRows = await prisma.ticket.findMany({
+    where: { NOT: [{ status: 'Resolved' }], slaHoldAt: null, events: { some: { eventType: 'ticket_sla_released' } } },
+    select: { externalId: true }
+  });
+  const released = releasedRows.map(row => row.externalId).filter(id => id && !holds[id] && isOpen(id));
+  const entries = [
+    ...frozen.map(id => ({ field: 'ticketSlaHold', id, value: { ...holds[id], at: now } })),
+    ...[...frozen, ...released].map(id => ({ field: 'ticketSlaResetAt', id, value: now }))
+  ];
+  if (entries.length) writeServerFieldsIntoState(entries);
+  if (frozen.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: frozen } }, data: { slaResetAt: new Date(now), slaHoldAt: new Date(now) } })
+      .catch((error) => console.error('Frozen SLA reset database update failed:', error?.message || error));
+  }
+  if (released.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: released } }, data: { slaResetAt: new Date(now) } })
+      .catch((error) => console.error('Released SLA reset database update failed:', error?.message || error));
+  }
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_FROZEN_RESET_SYNC_TYPE,
+      status: 'success',
+      message: `SLA reset for ${frozen.length} frozen and ${released.length} released ticket(s).`,
+      metadata: { at: new Date(now).toISOString(), frozen, released }
+    }
+  }).catch((error) => console.error('Frozen SLA reset marker write failed:', error?.message || error));
+  console.log(`SLA reset for ${frozen.length} frozen and ${released.length} released ticket(s).`);
+}
+/* One-off: a fresh SLA, from the moment this runs, for every ticket archived
+   without being resolved. They are already left out of the KPIs; this means
+   one brought back from the archive does not return overdue. Overdue tickets
+   still on the board keep their clock. Resolved tickets are never touched -
+   their SLA is a finished measurement. Once per database, like the resets
+   above. */
+const SLA_ARCHIVED_OPEN_RESET_SYNC_TYPE = 'sla_archived_open_reset_v1';
+async function resetArchivedOpenSlaClocksOnce() {
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_ARCHIVED_OPEN_RESET_SYNC_TYPE, status: 'success' } });
+  if (done) return;
+  const now = Date.now();
+  const state = safeReadState();
+  const archives = state.ticketArchived || {};
+  const isOpen = id => String(state.ticketState?.[id] || 'new') !== 'res';
+  const rows = await prisma.ticket.findMany({ where: { externalId: { in: Object.keys(archives) } }, select: { externalId: true, status: true } });
+  const ids = rows
+    .filter(t => archives[t.externalId] && normalizeDbStatusForBoard(t.status) !== 'res' && isOpen(t.externalId))
+    .map(t => t.externalId);
+  if (ids.length) writeServerFieldsIntoState(ids.map(id => ({ field: 'ticketSlaResetAt', id, value: now })));
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_ARCHIVED_OPEN_RESET_SYNC_TYPE,
+      status: 'success',
+      message: `SLA reset for ${ids.length} archived unresolved ticket(s).`,
+      metadata: { at: new Date(now).toISOString(), tickets: ids }
+    }
+  }).catch((error) => console.error('Archived SLA reset marker write failed:', error?.message || error));
+  if (ids.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: ids } }, data: { slaResetAt: new Date(now) } })
+      .catch((error) => console.error('Archived SLA reset database update failed:', error?.message || error));
+  }
+  console.log(`SLA reset for ${ids.length} archived unresolved ticket(s).`);
+}
+/* One-off: tickets with no category - most of them manual - were left out of
+   the KPIs until KPI_NOT_SPAM_WHERE. Now counted, none of them should arrive
+   overdue or late. Still open: a fresh SLA from the moment this runs.
+   Resolved: the clock restarts at the moment it was resolved, so it counts as
+   met. Written into the board state as well as the row, or the next board save
+   would put the old clock back. Once per database, like the resets above. */
+const SLA_UNCATEGORISED_RESET_SYNC_TYPE = 'sla_uncategorised_reset_v1';
+async function resetUncategorisedSlaClocksOnce() {
+  const done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SLA_UNCATEGORISED_RESET_SYNC_TYPE, status: 'success' } });
+  if (done) return;
+  const now = Date.now();
+  const rows = await prisma.ticket.findMany({
+    where: { category: null, externalId: { not: null } },
+    select: { externalId: true, status: true, createdAt: true, updatedAt: true, resolvedAt: true, slaResetAt: true }
+  });
+  const open = [];
+  const resolved = [];
+  for (const t of rows) {
+    if (normalizeDbStatusForBoard(t.status) === 'res') {
+      const at = kpiResolvedDate(t)?.getTime();
+      // A clock already at or past the resolve is met as it stands.
+      const resetMs = t.slaResetAt ? new Date(t.slaResetAt).getTime() : 0;
+      if (Number.isFinite(at) && resetMs < at) resolved.push({ id: t.externalId, at });
+    } else {
+      open.push(t.externalId);
+    }
+  }
+  const entries = [
+    ...open.map(id => ({ field: 'ticketSlaResetAt', id, value: now })),
+    ...resolved.map(r => ({ field: 'ticketSlaResetAt', id: r.id, value: r.at }))
+  ];
+  if (entries.length) writeServerFieldsIntoState(entries);
+  if (open.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: open } }, data: { slaResetAt: new Date(now) } })
+      .catch((error) => console.error('Uncategorised SLA reset database update failed:', error?.message || error));
+  }
+  for (const r of resolved) {
+    await prisma.ticket.updateMany({ where: { externalId: r.id }, data: { slaResetAt: new Date(r.at) } })
+      .catch((error) => console.error('Uncategorised SLA reset database update failed:', error?.message || error));
+  }
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SLA_UNCATEGORISED_RESET_SYNC_TYPE,
+      status: 'success',
+      message: `SLA reset for ${open.length} open and ${resolved.length} resolved uncategorised ticket(s).`,
+      metadata: { at: new Date(now).toISOString(), open, resolved: resolved.map(r => r.id) }
+    }
+  }).catch((error) => console.error('Uncategorised SLA reset marker write failed:', error?.message || error));
+  console.log(`SLA reset for ${open.length} open and ${resolved.length} resolved uncategorised ticket(s).`);
+}
+app.post('/api/admin/sla/restart-at-baseline', requireAdmin, async (req, res) => {
+  try {
+    const out = await restartOpenSlaClocksAtBaselineOnce();
+    // The restarted clocks are the starting point, so the dashboard shows them
+    // now rather than at the next checkpoint.
+    if (out.ok && !out.alreadyDone) await takeKpiSnapshot(kpiCheckpointAtOrBefore());
+    return res.json(out);
+  } catch (error) {
+    console.error('SLA baseline restart failed:', error);
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+/* Keeping linked bugs in step with the sheet.
+
+   Every few minutes the sheet is read once and each linked ticket's row is
+   refreshed: its fields, and above all its status. A bug turning DONE ends
+   that ticket's hold and resumes its SLA; one turning back from DONE starts a
+   new hold. Nobody has to open the ticket for either to happen - the agent
+   finds the clock running again on their board.
+
+   Skipped quietly when there is no Google credential or nothing is linked. A
+   failed read is logged once per distinct error rather than every cycle. */
+const VELMA_SYNC_MS = Math.max(60 * 1000, Number(process.env.VELMA_SYNC_MS || 3 * 60 * 1000));
+let velmaSyncRunning = false;
+let velmaSyncLastError = '';
+let velmaSyncLastRunAt = 0;
+async function syncVelmaBugStatuses() {
+  if (velmaSyncRunning) return { skipped: 'running' };
+  velmaSyncRunning = true;
+  try {
+    const links = safeReadState().ticketVelmaBug || {};
+    const ids = Object.keys(links).filter(id => links[id]?.id);
+    if (!ids.length) return { checked: 0 };
+    const sheet = await readVelmaBugSheet({ fresh: true });
+    velmaSyncLastError = '';
+    velmaSyncLastRunAt = Date.now();
+    const now = Date.now();
+    const entries = [];
+    const released = [];
+    const reheld = [];
+    // Read again right before the write: the sheet call above takes a second,
+    // and a link made or removed meanwhile must not be overwritten.
+    const state = safeReadState();
+    const currentLinks = state.ticketVelmaBug || {};
+    for (const id of ids) {
+      const previous = currentLinks[id];
+      if (!previous?.id) continue;
+      const found = findVelmaBugInSheets(sheet, previous.id, previous);
+      // A row deleted from the sheet keeps the last copy; the agent still
+      // sees what it was and can remove the link.
+      if (!found) continue;
+      const next = velmaLinkWithStatus(previous, found, now);
+      const compare = ({ statusCheckedAt, ...rest }) => JSON.stringify(rest);
+      if (compare(next) === compare(previous)) continue;
+      entries.push({ field: 'ticketVelmaBug', id, value: next });
+      if (velmaHoldEnded(previous, next)) {
+        const resumeAt = slaResumePointAfterHold(state, id, previous.holdStartedAt || previous.linkedAt, now);
+        if (resumeAt) entries.push({ field: 'ticketSlaResetAt', id, value: resumeAt });
+        released.push({ id, bugId: next.id, status: next.status, resumeAt });
+      } else if (previous.done && !next.done) {
+        reheld.push({ id, bugId: next.id, status: next.status });
+      }
+    }
+    if (!entries.length) return { checked: ids.length, changed: 0 };
+    writeServerFieldsIntoState(entries);
+    // The database copy - what the KPI dashboard and ticketSlaSnapshot read.
+    for (const entry of entries) {
+      const ticket = await findTicketRecordByKanbanId(entry.id).catch(() => null);
+      if (!ticket) continue;
+      if (entry.field === 'ticketVelmaBug') {
+        const { id: _id, ...rowSnapshot } = entry.value;
+        await prisma.ticket.update({ where: { id: ticket.id }, data: { velmaBugRow: rowSnapshot } }).catch(() => null);
+      } else if (entry.field === 'ticketSlaResetAt') {
+        await prisma.ticket.update({ where: { id: ticket.id }, data: { slaResetAt: new Date(entry.value) } }).catch(() => null);
+      }
+    }
+    for (const change of [...released.map(c => ({ ...c, kind: 'done' })), ...reheld.map(c => ({ ...c, kind: 'reopened' }))]) {
+      const ticket = await findTicketRecordByKanbanId(change.id).catch(() => null);
+      if (!ticket) continue;
+      await createTicketAuditEvent({
+        ticketId: ticket.id,
+        userId: null,
+        eventType: change.kind === 'done' ? 'ticket_velma_bug_done' : 'ticket_velma_bug_reopened',
+        oldValue: change.bugId,
+        newValue: change.status || null,
+        metadata: change.resumeAt ? { slaResetAt: new Date(change.resumeAt).toISOString() } : undefined
+      }).catch(() => null);
+    }
+    if (released.length || reheld.length) {
+      console.log(`Velma sync: ${released.length} bug(s) done, ${reheld.length} re-opened, ${entries.length} field(s) updated.`);
+    }
+    return { checked: ids.length, changed: entries.length, released: released.length, reheld: reheld.length };
+  } catch (error) {
+    const message = String(error?.message || error);
+    if (message !== velmaSyncLastError) console.warn('Velma bug sync failed:', message);
+    velmaSyncLastError = message;
+    return { error: message };
+  } finally {
+    velmaSyncRunning = false;
+  }
+}
+setInterval(() => { void syncVelmaBugStatuses(); }, VELMA_SYNC_MS).unref?.();
+
+// The same check on demand, for the board's "Check now" and for tests.
+app.post('/api/velma-bug/sync', requireAuth, async (req, res) => {
+  const out = await syncVelmaBugStatuses();
+  res.status(out?.error ? 502 : 200).json({ ok: !out?.error, ...out });
+});
+
+/* ---- Google sign-in, for reading the sheet ---------------------------------
+
+   An ordinary OAuth web flow. The state value is kept in the session and the
+   redirect URI with it, so the callback sends Google exactly the URI the start
+   used even behind a proxy that rewrites the host. Only the Sheets read-only
+   scope and the email are asked for: the board reads one sheet, and the email
+   is what the Account menu shows so people know whose access is being used. */
+function googleRedirectUri(req) {
+  return GOOGLE_OAUTH_REDIRECT_URI || `${publicBaseUrlForRequest(req)}/auth/google/callback`;
+}
+
+/* The end of a sign-in started in a new tab (the board opens
+   /auth/google/start?tab=1). It cannot hand the result back through
+   window.opener: helmet's Cross-Origin-Opener-Policy cuts that link the moment
+   the tab visits accounts.google.com. A BroadcastChannel (and a localStorage
+   write, for browsers without one) reaches the board tab instead, since both
+   are on this origin; the tab then closes itself, or says it can be closed. */
+const GOOGLE_RESULT_TEXT = {
+  connected: 'Google account connected - the board can read the Velma bug sheet.',
+  connected_unverified: 'Google account connected. The sheet could not be checked yet.',
+  no_sheet_access: 'Connected, but this Google account cannot open the Velma bug sheet. Ask for it to be shared with you.',
+  sheets_scope_missing: 'Google sign-in needs the "See your Google Sheets" permission. Tick it on the consent screen and try again.',
+  no_refresh_token: 'Google did not grant offline access. Remove the board under myaccount.google.com > Security > Third-party access, then sign in again.',
+  access_denied: 'Google sign-in was cancelled.',
+  not_configured: 'Google sign-in is not set up on this board yet. An admin can set it up under Account > Google account.',
+  invalid_state: 'This sign-in expired. Start it again from the board.'
+};
+function finishGoogleSignIn(req, res, pending, outcome, detail = '') {
+  if (!pending?.tab) return res.redirect(`/?google=${encodeURIComponent(outcome)}`);
+  const ok = outcome === 'connected';
+  const text = GOOGLE_RESULT_TEXT[outcome] || `Google sign-in failed: ${detail || outcome}`;
+  const payload = JSON.stringify({ type: 'google-signin', outcome, detail: String(detail || '').slice(0, 300), at: Date.now() }).replace(/</g, '\\u003c');
+  res.set('Cache-Control', 'no-store');
+  return res.send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Google sign-in</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Inter,'Segoe UI',Arial,sans-serif;background:linear-gradient(180deg,#1a1d38,#0d0f20);color:#fff}
+.box{max-width:420px;margin:24px;padding:26px 26px 22px;border-radius:18px;background:#fff;color:#13152c;box-shadow:0 30px 80px rgba(0,0,0,.45);text-align:center}
+.mark{width:44px;height:44px;margin:0 auto 12px;border-radius:50%;display:grid;place-items:center;font-size:22px;color:#fff;background:${ok ? '#10b981' : '#f59e0b'}}
+h1{font-size:18px;margin:0 0 8px}p{margin:0;color:#565c80;font-size:14px;line-height:1.55}</style></head>
+<body><div class="box"><div class="mark">${ok ? '&#10003;' : '!'}</div><h1>${ok ? 'You are connected' : 'Not connected'}</h1><p>${escapeHtml(text)}</p><p style="margin-top:12px;font-size:12.5px;" id="closing">This tab will close by itself - you can also close it and go back to the board.</p></div>
+<script>(function(){var m=${payload};try{var c=new BroadcastChannel('kanban-google-signin');c.postMessage(m);c.close();}catch(e){}try{localStorage.setItem('kanban-google-signin',JSON.stringify(m));}catch(e){}setTimeout(function(){window.close();},${ok ? 1200 : 4000});})();</script>
+</body></html>`);
+}
+
+app.get('/auth/google/start', requireAuth, async (req, res) => {
+  const tab = String(req.query.tab || '') === '1';
+  const client = await googleOAuthClient();
+  if (!client) return finishGoogleSignIn(req, res, { tab }, 'not_configured');
+  const state = crypto.randomBytes(16).toString('hex');
+  const redirectUri = googleRedirectUri(req);
+  req.session.googleOAuth = { state, redirectUri, tab };
+  const params = new URLSearchParams({
+    client_id: client.clientId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: `openid email ${GOOGLE_SHEETS_SCOPE}`,
+    // offline + consent: the refresh token is what lets the board keep
+    // reading the sheet after this browser tab is gone, and Google only
+    // returns one on a consent screen.
+    access_type: 'offline',
+    prompt: 'consent',
+    include_granted_scopes: 'true',
+    state
+  });
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+});
+
+app.get('/auth/google/callback', requireAuth, async (req, res) => {
+  const pending = req.session.googleOAuth || null;
+  delete req.session.googleOAuth;
+  try {
+    if (req.query.error) return finishGoogleSignIn(req, res, pending, String(req.query.error));
+    const { code, state } = req.query;
+    if (!code || !state || !pending || state !== pending.state) return finishGoogleSignIn(req, res, pending, 'invalid_state');
+    const client = await googleOAuthClient();
+    if (!client) return finishGoogleSignIn(req, res, pending, 'not_configured');
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: String(code),
+        client_id: client.clientId,
+        client_secret: client.clientSecret,
+        redirect_uri: pending.redirectUri
+      })
+    });
+    const tokenJson = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !tokenJson.access_token) {
+      return finishGoogleSignIn(req, res, pending, 'token_exchange_failed', tokenJson.error_description || tokenJson.error || String(tokenRes.status));
+    }
+    const granted = String(tokenJson.scope || '').split(/\s+/);
+    if (!granted.includes(GOOGLE_SHEETS_SCOPE)) return finishGoogleSignIn(req, res, pending, 'sheets_scope_missing');
+    // The id_token came straight from Google's token endpoint over TLS, so its
+    // payload can be read without verifying the signature.
+    let email = '';
+    try {
+      const payload = JSON.parse(Buffer.from(String(tokenJson.id_token || '').split('.')[1] || '', 'base64url').toString('utf8'));
+      email = String(payload.email || '').toLowerCase();
+    } catch (_) {}
+    const existing = await getStoredOAuthTokens(googleProviderKey(req.session.userId));
+    // Google omits the refresh token when this account already granted one to
+    // this client; keep the stored one rather than losing offline access.
+    const refreshToken = tokenJson.refresh_token || decryptClaudeCredential(existing?.refreshToken || '');
+    if (!refreshToken) return finishGoogleSignIn(req, res, pending, 'no_refresh_token');
+    await saveGoogleConnection(req.session.userId, {
+      accessToken: tokenJson.access_token,
+      refreshToken,
+      expiresAt: Date.now() + Number(tokenJson.expires_in || 3600) * 1000,
+      metadata: { email, username: String(req.session.username || ''), connectedAt: new Date().toISOString() }
+    });
+    velmaSheetCache = { at: 0, sheets: null };
+    // Read the sheet straight away, so the person who just connected learns
+    // now - not at their next link - whether this account can actually open it.
+    let result = 'connected';
+    try {
+      await readVelmaBugSheet({ preferUserId: Number(req.session.userId) || null, fresh: true });
+    } catch (error) {
+      result = /not_shared/.test(String(error.message)) ? 'no_sheet_access' : 'connected_unverified';
+    }
+    void syncVelmaBugStatuses();
+    return finishGoogleSignIn(req, res, pending, result);
+  } catch (error) {
+    return finishGoogleSignIn(req, res, pending, 'failed', String(error.message || error));
+  }
+});
+
+app.get('/auth/google/status', requireAuth, async (req, res) => {
+  const mine = await getStoredOAuthTokens(googleProviderKey(req.session.userId));
+  const connections = await listGoogleConnections();
+  const account = await googleServiceAccount();
+  const meta = (mine?.metadata && typeof mine.metadata === 'object') ? mine.metadata : {};
+  res.json({
+    configured: !!(await googleOAuthClient()),
+    // Admins get the setup form when it is not configured, and need the exact
+    // redirect URI to paste into Google Cloud.
+    canConfigure: isAdminRole(req.session.role),
+    clientSource: (await googleOAuthClient())?.source || null,
+    redirectUri: googleRedirectUri(req),
+    serviceAccount: account ? account.email : null,
+    serviceAccountSource: account ? account.source : null,
+    connected: !!mine?.refreshToken,
+    email: meta.email || null,
+    connectedAt: meta.connectedAt || null,
+    // Who else has connected, so a person can tell the board can already read
+    // the sheet without connecting themselves.
+    others: connections.filter(c => c.userId !== Number(req.session.userId)).map(c => c.metadata.email || null).filter(Boolean),
+    lastSyncAt: velmaSyncLastRunAt || null,
+    lastSyncError: velmaSyncLastError || null
+  });
+});
+
+app.post('/auth/google/disconnect', requireAuth, async (req, res) => {
+  const key = googleProviderKey(req.session.userId);
+  const stored = await getStoredOAuthTokens(key);
+  const refreshToken = decryptClaudeCredential(stored?.refreshToken || '');
+  await prisma.oAuthToken.delete({ where: { provider: key } }).catch(() => null);
+  // Revoke at Google as well, so the grant does not linger on their account
+  // page. Best effort: the local copy is already gone either way.
+  if (refreshToken) {
+    fetch('https://oauth2.googleapis.com/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token: refreshToken })
+    }).catch(() => null);
+  }
+  velmaSheetCache = { at: 0, sheets: null };
+  res.json({ ok: true });
+});
+
+// The no-sign-in way: an admin uploads the service account's JSON key once.
+// The key is checked against the sheet straight away, so the admin learns
+// there and then whether the sheet still has to be shared with its email.
+app.put('/api/google/service-account', requireAdmin, async (req, res) => {
+  try {
+    if (parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)) return res.status(409).json({ error: 'set_in_environment' });
+    const raw = String(req.body?.key || '').trim();
+    let parsedJson = null;
+    try { parsedJson = JSON.parse(raw); } catch (_) {}
+    if (!parsedJson || parsedJson.type !== 'service_account') return res.status(400).json({ error: 'not_a_service_account_key' });
+    const parsed = parseGoogleServiceAccountKey(raw);
+    if (!parsed) return res.status(400).json({ error: 'not_a_service_account_key' });
+    // Prove the key works before keeping it.
+    try { await googleServiceAccountToken(parsed); } catch (error) { return res.status(400).json({ error: String(error.message || error) }); }
+    await setStoredOAuthTokens(GOOGLE_SERVICE_ACCOUNT_PROVIDER, {
+      accessToken: encryptClaudeCredential(raw),
+      metadata: { email: parsed.email, savedBy: String(req.session.username || '').toUpperCase() || null, savedAt: new Date().toISOString() }
+    });
+    googleServiceAccountCache = { at: 0, value: null };
+    velmaSheetCache = { at: 0, sheets: null };
+    let sheetAccess = 'ok';
+    let sheetError = null;
+    try {
+      await readVelmaBugSheet({ fresh: true });
+    } catch (error) {
+      sheetError = String(error.message || error);
+      sheetAccess = /not_shared|403|404|permission/i.test(sheetError) ? 'not_shared' : 'unverified';
+    }
+    return res.json({ ok: true, email: parsed.email, sheetAccess, sheetError });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+app.delete('/api/google/service-account', requireAdmin, async (req, res) => {
+  if (parseGoogleServiceAccountKey(process.env.GOOGLE_SERVICE_ACCOUNT_JSON)) return res.status(409).json({ error: 'set_in_environment' });
+  await prisma.oAuthToken.delete({ where: { provider: GOOGLE_SERVICE_ACCOUNT_PROVIDER } }).catch(() => null);
+  googleServiceAccountCache = { at: 0, value: null };
+  googleTokenCache = { token: '', expiresAt: 0 };
+  velmaSheetCache = { at: 0, sheets: null };
+  res.json({ ok: true });
+});
+
+// Turning Google sign-in on from the board: an admin pastes the OAuth client
+// they created in Google Cloud. The secret is never sent back - only whether
+// one is stored. An environment-configured client cannot be changed here.
+app.get('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  const client = await googleOAuthClient();
+  res.json({
+    source: client?.source || null,
+    clientId: client?.clientId || null,
+    hasSecret: !!client?.clientSecret,
+    redirectUri: googleRedirectUri(req),
+    javascriptOrigin: publicBaseUrlForRequest(req)
+  });
+});
+app.put('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  try {
+    if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) return res.status(409).json({ error: 'set_in_environment' });
+    const clientId = String(req.body?.clientId || '').trim();
+    let clientSecret = String(req.body?.clientSecret || '').trim();
+    if (!/^[\w.-]+\.apps\.googleusercontent\.com$/.test(clientId)) return res.status(400).json({ error: 'client_id_should_end_with_apps.googleusercontent.com' });
+    // A blank secret on an update keeps the one already stored, so changing
+    // only the ID does not mean finding the secret again.
+    if (!clientSecret) clientSecret = (await googleOAuthClient())?.clientSecret || '';
+    if (!clientSecret) return res.status(400).json({ error: 'client_secret_required' });
+    await setStoredOAuthTokens(GOOGLE_OAUTH_CLIENT_PROVIDER, {
+      accessToken: encryptClaudeCredential(clientSecret),
+      metadata: { clientId, savedBy: String(req.session.username || '').toUpperCase() || null, savedAt: new Date().toISOString() }
+    });
+    googleOAuthClientCache = { at: 0, value: null };
+    return res.json({ ok: true, clientId, hasSecret: true, source: 'board' });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+app.delete('/api/google/oauth-client', requireAdmin, async (req, res) => {
+  if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) return res.status(409).json({ error: 'set_in_environment' });
+  await prisma.oAuthToken.delete({ where: { provider: GOOGLE_OAUTH_CLIENT_PROVIDER } }).catch(() => null);
+  googleOAuthClientCache = { at: 0, value: null };
+  res.json({ ok: true });
 });
 app.get('/api/jira/issues', requireAuth, async (req, res) => {
   try {
@@ -3572,15 +6451,20 @@ app.get('/api/jira/issues', requireAuth, async (req, res) => {
       .map(normalizeJiraKey)
       .filter(Boolean)
       .slice(0, 50);
-    const issues = [];
-    for (const key of keys) {
-      try {
-        const issue = await jiraFetchIssue(jira, key);
-        issues.push(issue);
-      } catch (error) {
-        issues.push({ key, error: String(error.message || error) });
+    // A few at a time rather than one after another: each issue is several
+    // round trips, and the board waits for the whole list.
+    const issues = new Array(keys.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(5, keys.length) }, async () => {
+      while (next < keys.length) {
+        const i = next++;
+        try {
+          issues[i] = await jiraFetchIssue(jira, keys[i]);
+        } catch (error) {
+          issues[i] = { key: keys[i], error: String(error.message || error) };
+        }
       }
-    }
+    }));
     return res.json({
       connected: true,
       browseBaseUrl: jira.browseBaseUrl,
@@ -3607,9 +6491,15 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
     const role = normalizeRole(req.body?.role || 'support');
     const displayName = String(req.body?.displayName || '').trim() || null;
     const email = normalizeEmailForDb(req.body?.email || '') || null;
+    // No team given: a CS or Support account goes on the matching roster, an
+    // admin on neither.
+    const team = req.body?.team !== undefined
+      ? normalizeTeam(req.body.team)
+      : (role === 'cs' || role === 'support' ? role : '');
 
     if (!username || !password) return res.status(400).json({ error: 'username_and_password_required' });
     if (!role) return res.status(400).json({ error: 'invalid_role' });
+    if (team === undefined) return res.status(400).json({ error: 'invalid_team' });
     if (role === 'owner' && !isOwnerRole(req.session.role)) return res.status(403).json({ error: 'owner_required' });
     if (password.length < 8) return res.status(400).json({ error: 'password_too_short' });
 
@@ -3618,8 +6508,9 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
-      data: { username, passwordHash, role, displayName, email, isActive: true }
+      data: { username, passwordHash, role, displayName, email, team: team || null, isActive: true }
     });
+    await refreshAgentRoster();
     if (req.body?.avatarBase64) {
       try { saveUserAvatarFile(user.id, req.body.avatarBase64); } catch (avatarError) { console.warn('Avatar upload skipped:', avatarError.message || avatarError); }
     }
@@ -3654,6 +6545,11 @@ app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
       if ((role === 'owner' || existing.role === 'owner') && !requesterIsOwner) return res.status(403).json({ error: 'owner_required' });
       data.role = role;
     }
+    if (req.body?.team !== undefined) {
+      const team = normalizeTeam(req.body.team);
+      if (team === undefined) return res.status(400).json({ error: 'invalid_team' });
+      data.team = team || null;
+    }
     if (req.body?.displayName !== undefined) data.displayName = String(req.body.displayName || '').trim() || null;
     if (req.body?.email !== undefined) data.email = normalizeEmailForDb(req.body.email || '') || null;
     if (req.body?.isActive !== undefined) data.isActive = Boolean(req.body.isActive);
@@ -3672,6 +6568,16 @@ app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
     if (!Object.keys(data).length) return res.status(400).json({ error: 'no_changes' });
 
     const user = await prisma.user.update({ where: { id }, data });
+    invalidateAuthCache(user.id);
+    if (['team', 'isActive', 'username', 'email'].some(key => key in data)) await refreshAgentRoster();
+    // The three changes that are meant to take something away. Without this the
+    // person keeps whatever their live session already had until it expires.
+    const revoked = data.isActive === false || data.passwordHash || (data.role && data.role !== existing.role);
+    if (revoked) {
+      const killed = await revokeAllSessionsForUser(user.id, { keepSid: isSelf ? req.sessionID : null });
+      if (killed) console.log(`[auth] ${user.username}: ${killed} session(s) ended by an admin change`);
+      if (data.passwordHash) await revokeApiTokensForUser(user.id);
+    }
     res.json({ user: sanitizeUser(user) });
   } catch (error) {
     console.error('Update user failed:', error);
@@ -3688,6 +6594,7 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
     if (isOwnerRole(existing.role) && id !== req.session.userId && !isOwnerRole(req.session.role)) return res.status(403).json({ error: 'owner_required' });
     removeUserAvatarFiles(id);
     await prisma.user.delete({ where: { id } });
+    await refreshAgentRoster();
     if (id === req.session.userId) {
       req.session.destroy(() => {});
     }
@@ -3701,6 +6608,122 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
 
 app.get('/admin/users', requireAdmin, (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin-users.html'));
+});
+
+/* The board's once-a-minute check against the database (the KPIs' source):
+   just each ticket's status, owners and the clock of its last real status
+   change, so the board can take a newer database status and push a newer
+   board one, without pulling every comment and event of every ticket. */
+app.get('/api/tickets/status-summary', requireAuth, async (req, res) => {
+  try {
+    const [tickets, clocks] = await Promise.all([
+      prisma.ticket.findMany({ select: { id: true, externalId: true, status: true, assignedAgent: true, csAgent: true, resolvedAt: true, createdAt: true } }),
+      loadTicketFieldClocks()
+    ]);
+    res.json({
+      at: Date.now(),
+      tickets: tickets.filter(t => t.externalId).map(t => {
+        const created = new Date(t.createdAt || 0).getTime() || 0;
+        return {
+          externalId: t.externalId,
+          status: t.status,
+          assignedAgent: t.assignedAgent,
+          csAgent: t.csAgent,
+          resolvedAt: t.resolvedAt,
+          statusAt: clocks.lastStatusChangeAt.get(t.id) || created,
+          assignAt: clocks.lastAssignChangeAt.get(t.id) || created
+        };
+      })
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+/* Put back resolved tickets that were wrongly moved out of Resolved.
+
+   On 2026-10-15 a stale database status (New) overwrote the board's Resolved
+   for a batch of old tickets (see loadTicketFieldClocks and
+   mergeDatabaseTickets in index.html). This finds them by their audit trail:
+   a status change away from Resolved inside the window, that is still the
+   ticket's latest status change, on a ticket with no client email after it
+   was resolved and no client-reply re-open. A ticket the client really wrote
+   back on is left alone.
+
+   Dry run unless { apply: true }. Restoring does not send the "Resolved"
+   Teams message again - those were sent the first time. */
+app.post('/api/admin/repair/resolved-flips', requireAdmin, async (req, res) => {
+  try {
+    const since = new Date(req.body?.since || Date.now() - 24 * 60 * 60 * 1000);
+    const until = new Date(req.body?.until || Date.now());
+    if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime()) || since >= until) return res.status(400).json({ error: 'invalid_window' });
+    const apply = req.body?.apply === true;
+
+    const flips = await prisma.ticketEvent.findMany({
+      where: { eventType: 'ticket_status_changed', oldValue: 'Resolved', createdAt: { gte: since, lte: until } },
+      orderBy: { createdAt: 'asc' },
+      include: { user: { select: { username: true } } }
+    });
+    const state = safeReadState();
+    const reopenedAt = (state.ticketReopenedAt && typeof state.ticketReopenedAt === 'object') ? state.ticketReopenedAt : {};
+    const candidates = [];
+    const skipped = [];
+    const seenTickets = new Set();
+    for (const flip of flips) {
+      if (seenTickets.has(flip.ticketId)) continue;
+      seenTickets.add(flip.ticketId);
+      const ticket = await prisma.ticket.findUnique({ where: { id: flip.ticketId } });
+      if (!ticket) continue;
+      const label = { ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null, subject: ticket.subject, externalId: ticket.externalId };
+      if (ticket.status === 'Resolved') continue;
+      const later = await prisma.ticketEvent.findFirst({ where: { ticketId: ticket.id, eventType: 'ticket_status_changed', createdAt: { gt: flip.createdAt } }, select: { id: true } });
+      if (later) { skipped.push({ ...label, reason: 'status_changed_again_since' }); continue; }
+      const resolvedEvent = await prisma.ticketEvent.findFirst({
+        where: { ticketId: ticket.id, eventType: 'ticket_status_changed', newValue: 'Resolved', createdAt: { lt: flip.createdAt } },
+        orderBy: { createdAt: 'desc' }, select: { createdAt: true }
+      });
+      const resolvedAt = resolvedEvent?.createdAt || null;
+      const lastEmailAt = new Date(ticket.emailRaw?.receivedDateTime || 0).getTime() || 0;
+      if (resolvedAt && lastEmailAt > resolvedAt.getTime()) { skipped.push({ ...label, reason: 'client_wrote_after_resolution' }); continue; }
+      const reopen = Number(reopenedAt[ticket.externalId] || 0);
+      if (resolvedAt && reopen > resolvedAt.getTime()) { skipped.push({ ...label, reason: 'reopened_by_client_reply' }); continue; }
+      candidates.push({ ...label, id: ticket.id, status: ticket.status, flippedAt: flip.createdAt, flippedBy: flip.user?.username || null, resolvedAt });
+    }
+
+    if (!apply) return res.json({ dryRun: true, window: { since, until }, count: candidates.length, candidates, skipped });
+
+    const now = Date.now();
+    const nextState = safeReadState();
+    nextState.ticketState = (nextState.ticketState && typeof nextState.ticketState === 'object') ? nextState.ticketState : {};
+    nextState.ticketStageTouchedAt = (nextState.ticketStageTouchedAt && typeof nextState.ticketStageTouchedAt === 'object') ? nextState.ticketStageTouchedAt : {};
+    for (const c of candidates) {
+      const before = await prisma.ticket.findUnique({ where: { id: c.id } });
+      const after = await prisma.ticket.update({
+        where: { id: c.id },
+        data: { status: 'Resolved', resolvedAt: c.resolvedAt || c.flippedAt, resolvedTeamsNotifiedAt: before?.resolvedTeamsNotifiedAt || new Date() }
+      });
+      await auditTicketChanges({
+        ticketId: c.id,
+        userId: req.session.userId || null,
+        before, after,
+        fields: ['status'],
+        fieldMetadata: { status: { source: 'repair/resolved-flips', flippedAt: c.flippedAt } }
+      });
+      if (c.externalId) {
+        nextState.ticketState[c.externalId] = 'res';
+        nextState.ticketStageTouchedAt[c.externalId] = now;
+      }
+    }
+    if (candidates.length) {
+      await safeWriteState(nextState, { role: req.session.role, username: req.session.username });
+      sseBroadcast('board_reload', { reason: 'resolved_repair', actor: String(req.session.username || '').toUpperCase() || null });
+    }
+    console.log(`[repair] ${candidates.length} wrongly re-opened ticket(s) put back to Resolved by ${req.session.username}`);
+    return res.json({ dryRun: false, restored: candidates.length, candidates, skipped });
+  } catch (error) {
+    console.error('Resolved repair failed:', error);
+    return res.status(500).json({ error: String(error.message || error) });
+  }
 });
 
 app.get('/api/tickets', requireAuth, async (req, res) => {
@@ -3850,57 +6873,203 @@ const KPI_TICKET_SELECT = {
   companyName: true,
   senderEmail: true,
   jiraTicketKey: true,
+  velmaBugId: true,
+  // The bug's copied row, for its status: a DONE bug no longer holds the SLA.
+  velmaBugRow: true,
+  // Frozen by an admin: the clock stopped at slaHoldAt.
+  slaHoldAt: true,
+  slaHoldBy: true,
   duplicateOfExternalId: true,
   createdAt: true,
   updatedAt: true,
-  resolvedAt: true
+  resolvedAt: true,
+  slaResetAt: true
 };
-async function loadKpiWorkingSet(req) {
-  const bounds = kpiDateBounds(req.query.range);
-  const role = normalizeRole(req.session.role) || 'support';
-  const username = String(req.session.username || '').trim().toUpperCase();
+// Every ticket the KPIs count: anything not marked Spam. The empty category
+// has to be named: a NOT filter on its own also drops rows whose category is
+// NULL, which left every uncategorised ticket - most manual ones - out of
+// every figure, and out of the spam count too.
+const KPI_NOT_SPAM_WHERE = {
+  OR: [{ category: null }, { NOT: { category: { equals: 'Spam', mode: 'insensitive' } } }]
+};
+/* KPI checkpoints. The dashboard is not live: it is read from a snapshot of
+   the tickets taken at 00:00, 09:00, 12:00 and 16:00 in the server's zone (the
+   SLA's zone), and SLA positions are judged as of that snapshot. A change made
+   between two checkpoints reaches the dashboard at the next one, and everyone
+   looking at it sees the same figures. The snapshot lives in memory; a server
+   that starts between checkpoints takes one at start-up and says so (asOf). */
+const KPI_CHECKPOINT_HOURS = [0, 9, 12, 16];
+// The most recent checkpoint at or before `ms`.
+function kpiCheckpointAtOrBefore(ms = Date.now()) {
+  const d = new Date(ms);
+  const hour = [...KPI_CHECKPOINT_HOURS].reverse().find(h => h <= d.getHours()) ?? 0;
+  d.setHours(hour, 0, 0, 0);
+  return d.getTime();
+}
+function kpiNextCheckpointAfter(ms = Date.now()) {
+  const d = new Date(ms);
+  const hour = KPI_CHECKPOINT_HOURS.find(h => h > d.getHours());
+  if (hour === undefined) { d.setDate(d.getDate() + 1); d.setHours(KPI_CHECKPOINT_HOURS[0], 0, 0, 0); }
+  else d.setHours(hour, 0, 0, 0);
+  return d.getTime();
+}
+// { checkpoint, takenAt, tickets, spam } read once per checkpoint: the
+// tickets the dashboard counts, and the spam the admin banner counts. A ticket
+// with no category is counted (see KPI_NOT_SPAM_WHERE).
+let kpiSnapshot = null;
+let kpiSnapshotLoading = null;
+async function takeKpiSnapshot(checkpoint) {
+  const [allTickets, spam] = await Promise.all([
+    prisma.ticket.findMany({ where: KPI_NOT_SPAM_WHERE, select: KPI_TICKET_SELECT, orderBy: [{ createdAt: 'desc' }] }),
+    prisma.ticket.findMany({ where: { category: { equals: 'Spam', mode: 'insensitive' } }, select: KPI_TICKET_SELECT })
+  ]);
+  // Snoozes and archives live in the board state, not on the row.
+  const state = safeReadState();
+  const snoozes = state.ticketSnooze || {};
+  const archives = state.ticketArchived || {};
+  // A ticket archived without being resolved was put away, not worked: it is
+  // left out of every figure, like spam. Archived after resolving still counts.
+  const archivedOpen = allTickets.filter(t => archives[t.externalId] && normalizeDbStatusForBoard(t.status) !== 'res');
+  const archivedOpenIds = new Set(archivedOpen.map(t => t.externalId));
+  const tickets = allTickets.filter(t => !archivedOpenIds.has(t.externalId));
+  for (const t of tickets) {
+    const entry = snoozes[t.externalId];
+    if (entry && Number(entry.at) > 0) t.snooze = { at: Number(entry.at), until: Number(entry.until) || 0 };
+  }
+  const taken = { checkpoint, takenAt: Date.now(), tickets, spam, archivedOpen };
+  // A slow read for an earlier checkpoint must not replace a later one.
+  if (!kpiSnapshot || checkpoint >= kpiSnapshot.checkpoint) kpiSnapshot = taken;
+  console.log(`KPI snapshot for ${new Date(checkpoint).toISOString()}: ${tickets.length} ticket(s), ${spam.length} spam, ${archivedOpen.length} archived unresolved.`);
+  return taken;
+}
+// The checkpoint the read in flight is for. A read started just before a
+// checkpoint used to be handed to the callers after it, so the checkpoint
+// itself was skipped until someone opened the dashboard.
+let kpiSnapshotLoadingFor = 0;
+async function currentKpiSnapshot() {
+  const checkpoint = kpiCheckpointAtOrBefore();
+  if (kpiSnapshot && kpiSnapshot.checkpoint >= checkpoint) return kpiSnapshot;
+  if (!kpiSnapshotLoading || kpiSnapshotLoadingFor < checkpoint) {
+    const loading = takeKpiSnapshot(checkpoint).finally(() => { if (kpiSnapshotLoading === loading) kpiSnapshotLoading = null; });
+    kpiSnapshotLoading = loading;
+    kpiSnapshotLoadingFor = checkpoint;
+  }
+  return kpiSnapshotLoading;
+}
+// Taken on the hour whether anyone is looking or not, so the figures are the
+// tickets as they stood at the checkpoint rather than at the first view after it.
+// Checked every few seconds rather than by one timer set hours ahead: that
+// timer ran on the process's clock, not the wall clock, so a paused VM or a
+// clock correction could fire it late, and a failed read waited for the next
+// checkpoint. This also retries a failed read straight away.
+const KPI_SNAPSHOT_CHECK_MS = 15 * 1000;
+function scheduleKpiSnapshots() {
+  setInterval(() => {
+    if (kpiSnapshot && kpiSnapshot.checkpoint >= kpiCheckpointAtOrBefore()) return;
+    currentKpiSnapshot().catch(error => console.error('KPI snapshot failed:', error?.message || error));
+  }, KPI_SNAPSHOT_CHECK_MS).unref?.();
+}
+function kpiSnapshotInfo(snapshot) {
+  return {
+    checkpointAt: new Date(snapshot.checkpoint).toISOString(),
+    asOf: new Date(snapshot.takenAt).toISOString(),
+    nextUpdateAt: new Date(kpiNextCheckpointAfter(snapshot.takenAt)).toISOString(),
+    checkpointHours: KPI_CHECKPOINT_HOURS
+  };
+}
+// The rest of the tests the KPI queries used to put to the database, run
+// against the snapshot.
+function kpiTicketMatchesBase(t, { launchStart, company, jiraOnly }) {
+  if (launchStart && !(t.createdAt && new Date(t.createdAt) >= launchStart)) return false;
+  if (company && company !== 'all' && t.companyName !== company) return false;
+  if (jiraOnly && !t.jiraTicketKey) return false;
+  return true;
+}
+function kpiTicketMatchesAccess(t, access) {
+  if (!access) return true;
+  if (access.csAgent) return t.csAgent === access.csAgent;
+  if (access.assignedAgent) return t.assignedAgent === access.assignedAgent;
+  if (access.csAgentIn) return access.csAgentIn.has(t.csAgent);
+  if (access.assignedAgentIn) return access.assignedAgentIn.has(t.assignedAgent);
+  if (access.either) return t.csAgent === access.either || t.assignedAgent === access.either;
+  return true;
+}
+/* Resolved work credited to an agent by hand, for tickets closed outside the
+   board. Each credit is counted as that many resolved tickets assigned to the
+   agent on its date, so the team, agent and range filters treat it like a
+   ticket; it has no company or Jira link, so those filters leave it out. It
+   adds to Resolved only - never to the SLA figures or the drilldowns, which
+   are about real tickets. */
+// board: the one deployment (BOARD_LABEL) a credit belongs to.
+const KPI_RESOLVED_CREDITS = [
+  { agent: 'MEZ', count: 6, at: '2026-10-16T10:00:00Z', board: 'prod' }
+];
+function kpiResolvedCreditTickets() {
+  return KPI_RESOLVED_CREDITS.filter(c => c.board === BOARD_LABEL).map(c => ({
+    assignedAgent: c.agent, csAgent: null, count: c.count,
+    createdAt: new Date(c.at), resolvedAt: new Date(c.at)
+  }));
+}
+async function loadKpiWorkingSet(req) {  const bounds = kpiDateBounds(req.query.range, req.query.tzOffset);
+  const username = actorAgentCode(req);
+  /* The KPI dashboard is the one view where "see all tickets" does not carry
+     over. A support agent may read the whole board - that is what the Only
+     mine toggle is for - but the dashboard is a measure of a person's work,
+     and nobody outside admin gets to see how a colleague is performing. So
+     the figures are pinned to whoever is asking, whatever team/agent the
+     query string names.
+
+     effectiveTeam rather than the role column: seven CS agents' accounts still
+     carry the legacy `agent` role, and scoping those by assignedAgent - which
+     a CS agent is never in - showed them an empty dashboard. */
+  const myTeam = actorTeam(req);
   const team = String(req.query.team || 'all').trim().toLowerCase();
   const agent = String(req.query.agent || 'all').trim().toUpperCase();
   const company = String(req.query.company || 'all').trim();
   const jiraOnly = String(req.query.jiraOnly || '').toLowerCase() === 'true';
 
-  const baseWhere = {
-    NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }]
-  };
+  const baseWhere = { ...KPI_NOT_SPAM_WHERE };
+  // One set of tickets for the whole dashboard: everything since the board
+  // went live. The launch banner counted from launch while the cards counted
+  // every row, so the two could never agree.
+  const launchStart = kpiLaunchAt ? kpiDateBounds('since_launch', req.query.tzOffset).start : null;
+  if (launchStart) baseWhere.createdAt = { gte: launchStart };
   if (company && company !== 'all') baseWhere.companyName = company;
   if (jiraOnly) baseWhere.jiraTicketKey = { not: null };
 
+  // accessWhere is still put to the database, by the queries over ticket
+  // events; access is the same rule for the snapshot.
   const accessWhere = {};
-  if (role === 'cs') accessWhere.csAgent = username;
-  else if (role === 'support') accessWhere.assignedAgent = username;
+  let access = null;
+  if (myTeam === 'cs') { accessWhere.csAgent = username; access = { csAgent: username }; }
+  else if (myTeam === 'support') { accessWhere.assignedAgent = username; access = { assignedAgent: username }; }
   else if (agent && agent !== 'ALL') {
-    if (CS_AGENT_CODES.has(agent)) accessWhere.csAgent = agent;
-    else if (SUPPORT_AGENT_CODES.has(agent)) accessWhere.assignedAgent = agent;
-    else accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }];
+    if (CS_AGENT_CODES.has(agent)) { accessWhere.csAgent = agent; access = { csAgent: agent }; }
+    else if (SUPPORT_AGENT_CODES.has(agent)) { accessWhere.assignedAgent = agent; access = { assignedAgent: agent }; }
+    else { accessWhere.OR = [{ csAgent: agent }, { assignedAgent: agent }]; access = { either: agent }; }
   } else if (team === 'cs') {
     accessWhere.csAgent = { in: Array.from(CS_AGENT_CODES) };
+    access = { csAgentIn: new Set(CS_AGENT_CODES) };
   } else if (team === 'support') {
     accessWhere.assignedAgent = { in: Array.from(SUPPORT_AGENT_CODES) };
+    access = { assignedAgentIn: new Set(SUPPORT_AGENT_CODES) };
   }
-  const rangeWhere = {
-    OR: [
-      { createdAt: { gte: bounds.start, lte: bounds.end } },
-      { updatedAt: { gte: bounds.start, lte: bounds.end } },
-      { resolvedAt: { gte: bounds.start, lte: bounds.end } }
-    ]
+  const inBounds = value => {
+    if (!value) return false;
+    const d = new Date(value);
+    return d >= bounds.start && d <= bounds.end;
   };
-  const statusWhere = { AND: [baseWhere, accessWhere] };
-  const where = { AND: [baseWhere, accessWhere, rangeWhere] };
 
-  const tickets = await prisma.ticket.findMany({
-    where,
-    select: KPI_TICKET_SELECT,
-    orderBy: [{ createdAt: 'desc' }]
-  });
-  const statusTickets = await prisma.ticket.findMany({
-    where: statusWhere,
-    select: KPI_TICKET_SELECT
-  });
+  const snapshot = await currentKpiSnapshot();
+  // The queries over ticket events leave out the same archived tickets the
+  // snapshot does.
+  if (snapshot.archivedOpen.length) baseWhere.externalId = { notIn: snapshot.archivedOpen.map(t => t.externalId) };
+  const baseFilter = { launchStart, company, jiraOnly };
+  const statusTickets = snapshot.tickets.filter(t => kpiTicketMatchesBase(t, baseFilter) && kpiTicketMatchesAccess(t, access));
+  const tickets = statusTickets.filter(t => inBounds(t.createdAt) || inBounds(t.updatedAt) || inBounds(t.resolvedAt));
+  // The admin banner's spam figure, from the same snapshot.
+  const spamCount = snapshot.spam.filter(t => kpiTicketMatchesBase(t, baseFilter) && kpiTicketMatchesAccess(t, access)).length;
+  const archivedOpenCount = snapshot.archivedOpen.filter(t => kpiTicketMatchesBase(t, baseFilter) && kpiTicketMatchesAccess(t, access)).length;
   const scopedTicketsAll = tickets.filter(ticket => kpiTicketInRange(ticket, bounds));
 
   // Duplicates are held back from every figure that counts work. They are
@@ -3913,7 +7082,17 @@ async function loadKpiWorkingSet(req) {
   const scopedTickets = scopedTicketsAll.filter(t => !isDuplicate(t));
   const workTickets = statusTickets.filter(t => !isDuplicate(t));
 
-  return { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange };
+  // tickets (the range query before duplicates and the in-range filter are
+  // applied) is still read by the caller, to enumerate every agent that appears
+  // anywhere in the data for the filter dropdown. Extracting this function left
+  // it behind, so /api/tickets/kpis threw ReferenceError: tickets is not defined
+  // on every request and the whole dashboard 500d.
+  // The one agent the figures are pinned to, if any - whose SLA reset applies
+  // to the headline SLA met.
+  const slaAgent = (myTeam === 'cs' || myTeam === 'support') ? username : (agent && agent !== 'ALL' ? agent : null);
+  const creditsAll = kpiResolvedCreditTickets().filter(c => kpiTicketMatchesBase(c, baseFilter) && kpiTicketMatchesAccess(c, access));
+  const creditsInRange = creditsAll.filter(c => inBounds(c.resolvedAt));
+  return { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount, archivedOpenCount, creditsAll, creditsInRange };
 }
 function kpiDrilldownRow(t, detail) {
   return {
@@ -3930,7 +7109,9 @@ function kpiDrilldownRow(t, detail) {
 }
 app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
   try {
-    const { bounds, team, agent, company, jiraOnly, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange } = await loadKpiWorkingSet(req);
+    const { bounds, myTeam, team, agent, slaAgent, company, jiraOnly, baseWhere, accessWhere, tickets, scopedTickets, workTickets, duplicatesOpen, duplicatesInRange, snapshot, spamCount, archivedOpenCount, creditsAll, creditsInRange } = await loadKpiWorkingSet(req);
+    const sumCredits = list => list.reduce((sum, c) => sum + c.count, 0);
+    const resolvedCredit = sumCredits(creditsInRange);
 
     const statusKeys = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
     const statusCounts = Object.fromEntries(statusKeys.map(k => [k, 0]));
@@ -3945,17 +7126,51 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       agent: code, total: 0, new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0,
       duplicates: 0, overdue: 0, atRisk: 0, slaMet: 0, slaBreached: 0, resolveHours: []
     });
-    const addAgentRow = (agentCode, statusKey) => {
+    const ensureAgentRow = agentCode => {
       const rowAgent = String(agentCode || 'Unassigned').trim().toUpperCase() || 'Unassigned';
       if (!agentRows[rowAgent]) agentRows[rowAgent] = emptyAgentRow(rowAgent);
-      agentRows[rowAgent].total++;
-      if (statusKey in agentRows[rowAgent]) agentRows[rowAgent][statusKey]++;
       return agentRows[rowAgent];
     };
+    // Which rows of the breakdown table a ticket belongs to. Every figure in
+    // that table has to fan out the same way, or the row disagrees with
+    // itself: the status columns were keyed on this rule while the SLA
+    // columns were keyed on the assignee alone, so a CS owner's row showed
+    // 43 tickets and 32 resolved next to 0 overdue and no SLA at all - the
+    // SLA of those same tickets had been added to the support assignee's row.
+    const rowKeysForTicket = ticket => {
+      const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
+      const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
+      if (team === 'cs') return [csOwner || 'Unassigned'];
+      if (team === 'support') return [assignee || 'Unassigned'];
+      const keys = [assignee || 'Unassigned'];
+      if (csOwner && csOwner !== assignee) keys.push(csOwner);
+      return keys;
+    };
+    const addAgentRow = (ticket, statusKey) => {
+      for (const key of rowKeysForTicket(ticket)) {
+        const row = ensureAgentRow(key);
+        row.total++;
+        if (statusKey in row) row[statusKey]++;
+      }
+    };
 
+    // The open columns are a snapshot of the board right now - a ticket that
+    // has sat in Waiting on Us for a month is still there today, whatever the
+    // range. Resolved is the exception: counted from every ticket ever, it was
+    // the all-time total (441 on any range, Today included), which is not a
+    // figure anybody can use. It is the work resolved inside the selected
+    // range, the same set as the throughput card and the drilldown below.
     for (const ticket of workTickets) {
       const statusKey = normalizeDbStatusForBoard(ticket.status);
-      if (statusKey in statusCounts) statusCounts[statusKey]++;
+      if (statusKey !== 'res' && statusKey in statusCounts) statusCounts[statusKey]++;
+    }
+    statusCounts.res = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length + resolvedCredit;
+    for (const credit of creditsInRange) {
+      for (const key of rowKeysForTicket(credit)) {
+        const row = ensureAgentRow(key);
+        row.total += credit.count;
+        row.res += credit.count;
+      }
     }
 
     for (const ticket of scopedTickets) {
@@ -3967,14 +7182,8 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       const companyName = String(ticket.companyName || 'Unknown').trim() || 'Unknown';
       companyCounts[companyName] = (companyCounts[companyName] || 0) + 1;
 
-      const assignee = String(ticket.assignedAgent || '').trim().toUpperCase();
       const csOwner = String(ticket.csAgent || '').trim().toUpperCase();
-      if (team === 'cs') addAgentRow(csOwner || 'Unassigned', statusKey);
-      else if (team === 'support') addAgentRow(assignee || 'Unassigned', statusKey);
-      else {
-        addAgentRow(assignee || 'Unassigned', statusKey);
-        if (csOwner && csOwner !== assignee) addAgentRow(csOwner, statusKey);
-      }
+      addAgentRow(ticket, statusKey);
       const csLabel = csOwner || 'Unassigned';
       csCounts[csLabel] = (csCounts[csLabel] || 0) + 1;
       if (csOwner) ticketsWithCs++;
@@ -3992,21 +7201,36 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     //   resolved - of the work finished inside the selected range, how much
     //              landed inside its target. This is the compliance figure.
     // ---------------------------------------------------------------------
-    const now = Date.now();
+    // As of the checkpoint snapshot, not this request - see KPI checkpoints.
+    const now = snapshot.takenAt;
     const openWorkTickets = workTickets.filter(t => normalizeDbStatusForBoard(t.status) !== 'res');
-    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0 };
+    /* snake_case state -> camelCase tally, spelled out because they are not
+       the same word. This used to be `if (snapshot.state in backlog)`, and
+       'at_risk' is not a key of { atRisk }: only `overdue` ever matched, so
+       the At risk, On track and No clock figures reported a flat zero however
+       many tickets were in them. The per-agent columns were counted by
+       separate code just below and were right all along, which is what made
+       the headline card disagree with the table under it. */
+    const BACKLOG_KEY_BY_STATE = {
+      overdue: 'overdue', at_risk: 'atRisk', on_track: 'onTrack',
+      no_clock: 'noClock', jira_hold: 'jiraHold', velma_hold: 'velmaHold', contact_hold: 'contactHold',
+      leave_hold: 'leaveHold', admin_hold: 'adminHold', snooze_hold: 'snoozeHold'
+    };
+    const backlog = { overdue: 0, atRisk: 0, onTrack: 0, noClock: 0, jiraHold: 0, velmaHold: 0, contactHold: 0, leaveHold: 0, adminHold: 0, snoozeHold: 0 };
     const overdueRows = [];
     let oldestOpenMs = 0;
 
     for (const ticket of openWorkTickets) {
       const snapshot = ticketSlaSnapshot(ticket, now);
-      if (snapshot.state in backlog) backlog[snapshot.state]++;
-      oldestOpenMs = Math.max(oldestOpenMs, snapshot.wallMs);
-      const owner = String(ticket.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
+      const backlogKey = BACKLOG_KEY_BY_STATE[snapshot.state];
+      if (backlogKey) backlog[backlogKey]++;
+      oldestOpenMs = Math.max(oldestOpenMs, snapshot.ageMs);
       if (snapshot.state === 'overdue' || snapshot.state === 'at_risk') {
-        if (!agentRows[owner]) agentRows[owner] = emptyAgentRow(owner);
-        if (snapshot.state === 'overdue') agentRows[owner].overdue++;
-        else agentRows[owner].atRisk++;
+        for (const key of rowKeysForTicket(ticket)) {
+          const row = ensureAgentRow(key);
+          if (snapshot.state === 'overdue') row.overdue++;
+          else row.atRisk++;
+        }
       }
       if (snapshot.state === 'overdue') {
         overdueRows.push({
@@ -4019,7 +7243,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
           status: normalizeDbStatusForBoard(ticket.status),
           targetHours: snapshot.targetHours,
           overdueHours: hoursFromMs(snapshot.overdueMs),
-          ageHours: hoursFromMs(snapshot.wallMs),
+          ageHours: hoursFromMs(snapshot.ageMs),
           jira: ticket.jiraTicketKey || null
         });
       }
@@ -4033,13 +7257,24 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
     let slaMet = 0;
     let slaBreached = 0;
     let slaUnmeasured = 0;
+    let slaEstimated = 0;
+    let slaReset = 0;
     for (const ticket of resolvedInRange) {
       const snapshot = ticketSlaSnapshot(ticket, now);
-      const owner = String(ticket.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
-      if (!agentRows[owner]) agentRows[owner] = emptyAgentRow(owner);
-      if (snapshot.state === 'met') { slaMet++; agentRows[owner].slaMet++; }
+      if (snapshot.estimated) slaEstimated++;
+      const rowKeys = rowKeysForTicket(ticket);
+      const rows = rowKeys.map(ensureAgentRow);
+      // Rows whose agent has not had their SLA reset since this was resolved.
+      const slaRows = rowKeys.filter(key => !kpiSlaResetFor(ticket, [key])).map(ensureAgentRow);
+      const measured = snapshot.state === 'met' || snapshot.state === 'breached';
+      if (measured && kpiSlaResetFor(ticket, kpiSlaAgentKeys(ticket, team, slaAgent))) {
+        slaReset++;
+        if (snapshot.state === 'met') slaRows.forEach(row => row.slaMet++);
+        else slaRows.forEach(row => row.slaBreached++);
+      }
+      else if (snapshot.state === 'met') { slaMet++; slaRows.forEach(row => row.slaMet++); }
       else if (snapshot.state === 'breached') {
-        slaBreached++; agentRows[owner].slaBreached++;
+        slaBreached++; slaRows.forEach(row => row.slaBreached++);
         breachedRows.push({
           ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
           externalId: ticket.externalId,
@@ -4054,9 +7289,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         });
       }
       else slaUnmeasured++;
-      if (snapshot.state === 'met' || snapshot.state === 'breached') {
+      if (measured) {
         resolveShiftHours.push(hoursFromMs(snapshot.shiftMs));
-        agentRows[owner].resolveHours.push(hoursFromMs(snapshot.shiftMs));
+        rows.forEach(row => row.resolveHours.push(hoursFromMs(snapshot.shiftMs)));
       }
       resolveWallHours.push(hoursFromMs(snapshot.wallMs));
     }
@@ -4071,7 +7306,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         eventType: 'ticket_status_changed',
         oldValue: 'Resolved',
         NOT: [{ newValue: 'Resolved' }],
-        createdAt: { gte: bounds.start, lte: bounds.end },
+        createdAt: { gte: bounds.start, lte: new Date(Math.min(bounds.end.getTime(), snapshot.takenAt)) },
         // Scoped through the ticket so this obeys the same team/agent/company
         // filter as every other figure on the dashboard rather than quietly
         // reporting a board-wide total next to filtered ones.
@@ -4079,7 +7314,14 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       }
     }).catch(() => 0);
 
-    const createdInRange = scopedTickets.filter(t => isDateInBounds(t.createdAt, bounds)).length;
+    /* Counted off `tickets` - the raw range query - and not off scopedTickets.
+       scopedTickets places a resolved ticket by its resolution date, so a
+       ticket created inside the range but resolved after it is not in there:
+       reading Created off that set undercounted every range that had work
+       still open at its end. "How many arrived" and "how many were closed"
+       are two independent questions about the same window, so each is asked
+       of its own date. */
+    const createdInRange = tickets.filter(t => !t.duplicateOfExternalId && isDateInBounds(t.createdAt, bounds)).length;
     const avgOf = values => (values.length ? Math.round((values.reduce((a, b) => a + b, 0) / values.length) * 10) / 10 : 0);
 
     const sortRows = obj => Object.entries(obj).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
@@ -4089,10 +7331,40 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       ...tickets.flatMap(t => [t.assignedAgent, t.csAgent]).filter(Boolean).map(v => String(v).trim().toUpperCase())
     ])).sort((a, b) => a.localeCompare(b));
 
+    // The whole life of the board, for admins, under the same filters as the
+    // cards. Counted off the very tickets the cards are counted off
+    // (workTickets: since launch, no spam, no duplicates), so with "Since
+    // launch" picked the banner and the cards are the same numbers:
+    //   created = Created card, resolved = Resolved card,
+    //   open = New + In Progress + Waiting On Us + Due for test + Waiting On Contact.
+    let allTime = null;
+    if (myTeam === 'admin') {
+      const since = kpiLaunchAt || await refreshKpiLaunchAt();
+      const created = workTickets.length;
+      const resolvedTickets = workTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length;
+      const resolved = resolvedTickets + sumCredits(creditsAll);
+      const spam = spamCount;
+      const scope = [
+        agent && agent !== 'ALL' ? agent : team === 'cs' ? 'CS only' : team === 'support' ? 'Support only' : '',
+        company && company !== 'all' ? company : '',
+        jiraOnly ? 'Jira-linked' : ''
+      ].filter(Boolean).join(' · ');
+      allTime = { since: since ? since.toISOString() : null, scope: scope || 'whole board', created, resolved, open: created - resolvedTickets, duplicates: duplicatesOpen.length, spam, archived: archivedOpenCount };
+    }
+
     return res.json({
       ok: true,
-      generatedAt: new Date().toISOString(),
-      range: { key: String(req.query.range || 'today'), label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() },
+      generatedAt: new Date(snapshot.takenAt).toISOString(),
+      // When these figures were read and when they next change.
+      snapshot: kpiSnapshotInfo(snapshot),
+      allTime,
+      // bounds.key, not the raw query value: if the client sent a range this
+      // build no longer offers, the heading has to name the period the figures
+      // were actually computed over.
+      range: { key: bounds.key, label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() },
+      // 'own' when the figures are pinned to the caller, so the dashboard can
+      // say so rather than looking like a board-wide total that reads low.
+      scope: myTeam === 'admin' ? 'all' : 'own',
       filters: { team, agent, company, jiraOnly },
       totals: {
         tickets: workTickets.length,
@@ -4104,20 +7376,47 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
         // other number on this dashboard.
         duplicates: duplicatesOpen.length,
         duplicatesInRange: duplicatesInRange.length,
-        duplicatesResolvedInRange: duplicatesInRange.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length
+        duplicatesResolvedInRange: duplicatesInRange.filter(t => normalizeDbStatusForBoard(t.status) === 'res').length,
+        // Of Resolved, the part credited by hand (KPI_RESOLVED_CREDITS).
+        resolvedCredit
       },
       sla: {
         targetsByPriority: SLA_HOURS_BY_PRIORITY,
         backlog,
         overdue: backlog.overdue,
         atRisk: backlog.atRisk,
+        // Open tickets whose clock is off because they are waiting on Jira.
+        // Reported so they are visibly parked rather than just missing from
+        // the other three figures.
+        jiraHold: backlog.jiraHold,
+        // Open tickets an admin has frozen.
+        adminHold: backlog.adminHold,
+        // Open tickets that are snoozed, so held.
+        snoozeHold: backlog.snoozeHold,
+        // Resolved before this moment counts as met; measured live after it.
+        baselineAt: SLA_BASELINE_AT ? new Date(SLA_BASELINE_AT).toISOString() : null,
+        // Same, for tickets waiting on a Velma bug.
+        velmaHold: backlog.velmaHold,
+        // Open tickets whose clock is frozen while they wait on the client.
+        contactHold: backlog.contactHold,
+        // Open tickets whose assigned agent is off.
+        leaveHold: backlog.leaveHold,
         oldestOpenHours: hoursFromMs(oldestOpenMs),
         resolvedInRange: resolvedInRange.length,
         met: slaMet,
         breached: slaBreached,
-        // Resolved with no assignee, so no shift clock ever ran for them.
-        // Excluded from the percentage rather than silently counted as met.
+        // Resolved but with no SLA position to report: no assignee, so no shift
+        // clock ever ran, or linked to Jira, so the clock was off. Excluded
+        // from the percentage rather than silently counted as met.
         unmeasured: slaUnmeasured,
+        // Resolved before the SLA of the agent(s) this figure is about was
+        // reset (SLA_COUNTED_FROM_BY_AGENT): out of the percentage, still in
+        // Resolved and the resolve times. on time + late + no SLA + reset = Resolved.
+        reset: slaReset,
+        // The part of met + breached resolved from before the shift history
+        // was complete, measured on office hours rather than logged-in time.
+        estimated: slaEstimated,
+        historySince: shiftStore.since ? new Date(Number(shiftStore.since)).toISOString() : null,
         compliancePct: slaMeasured ? Math.round((slaMet / slaMeasured) * 1000) / 10 : null,
         avgResolveShiftHours: avgOf(resolveShiftHours),
         medianResolveShiftHours: Math.round(medianOf(resolveShiftHours) * 10) / 10,
@@ -4125,9 +7424,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       },
       throughput: {
         created: createdInRange,
-        resolved: resolvedInRange.length,
+        resolved: resolvedInRange.length + resolvedCredit,
         reopened,
-        net: createdInRange - resolvedInRange.length,
+        net: createdInRange - resolvedInRange.length - resolvedCredit,
         backlogOpen: openWorkTickets.length
       },
       overdueRows: overdueRows.slice(0, 25),
@@ -4174,15 +7473,21 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
 // polled every 60s - a card nobody clicks (most of them, most of the time)
 // should not cost a full ticket list on every poll.
 const KPI_STATUS_CATEGORIES = new Set(['new', 'inp', 'wus', 'dft', 'wct', 'res']);
+// Open tickets with no SLA clock running, by why: the Off the clock card.
+const KPI_OFF_CLOCK_LABELS = {
+  no_clock: 'No assignee', jira_hold: 'Waiting on Jira', velma_hold: 'Waiting on a Velma bug',
+  contact_hold: 'Waiting on contact', leave_hold: 'Agent off', admin_hold: 'Frozen by an admin', snooze_hold: 'Snoozed'
+};
 app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
   try {
     const category = String(req.query.category || '').trim();
-    const { bounds, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen } = await loadKpiWorkingSet(req);
-    const now = Date.now();
+    const { bounds, team, slaAgent, baseWhere, accessWhere, scopedTickets, workTickets, duplicatesOpen, snapshot } = await loadKpiWorkingSet(req);
+    const now = snapshot.takenAt;
     let rows;
 
     if (KPI_STATUS_CATEGORIES.has(category)) {
-      rows = workTickets
+      // Resolved is range-bound, like its card; the open columns are now.
+      rows = (category === 'res' ? scopedTickets : workTickets)
         .filter(t => normalizeDbStatusForBoard(t.status) === category)
         .map(t => kpiDrilldownRow(t));
     } else if (category === 'ticketsWithCs') {
@@ -4197,7 +7502,7 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
       rows = scopedTickets.filter(t => isDateInBounds(t.createdAt, bounds)).map(t => kpiDrilldownRow(t));
     } else if (category === 'resolved') {
       rows = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res').map(t => kpiDrilldownRow(t));
-    } else if (category === 'overdue' || category === 'atRisk' || category === 'oldestOpen') {
+    } else if (category === 'overdue' || category === 'atRisk' || category === 'oldestOpen' || category === 'onTrack' || category === 'offClock') {
       const openSnapshots = workTickets
         .filter(t => normalizeDbStatusForBoard(t.status) !== 'res')
         .map(t => ({ t, snapshot: ticketSlaSnapshot(t, now) }));
@@ -4208,10 +7513,18 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
       } else if (category === 'atRisk') {
         rows = openSnapshots.filter(x => x.snapshot.state === 'at_risk')
           .sort((a, b) => b.snapshot.shiftMs - a.snapshot.shiftMs)
-          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.ageMs) + 'h open'));
+      } else if (category === 'onTrack') {
+        rows = openSnapshots.filter(x => x.snapshot.state === 'on_track')
+          .sort((a, b) => b.snapshot.shiftMs - a.snapshot.shiftMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.shiftMs) + 'h of ' + snapshot.targetHours + 'h used'));
+      } else if (category === 'offClock') {
+        rows = openSnapshots.filter(x => KPI_OFF_CLOCK_LABELS[x.snapshot.state])
+          .sort((a, b) => b.snapshot.ageMs - a.snapshot.ageMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, KPI_OFF_CLOCK_LABELS[snapshot.state]));
       } else {
-        rows = openSnapshots.sort((a, b) => b.snapshot.wallMs - a.snapshot.wallMs)
-          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.wallMs) + 'h open'));
+        rows = openSnapshots.sort((a, b) => b.snapshot.ageMs - a.snapshot.ageMs)
+          .map(({ t, snapshot }) => kpiDrilldownRow(t, hoursFromMs(snapshot.ageMs) + 'h open'));
       }
     } else if (category === 'slaMet' || category === 'slaBreached' || category === 'slaMeasured') {
       // 'slaMeasured' is both cards that describe the met+breached set from a
@@ -4222,16 +7535,20 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
         .filter(t => normalizeDbStatusForBoard(t.status) === 'res')
         .map(t => ({ t, snapshot: ticketSlaSnapshot(t, now) }));
       const wantStates = category === 'slaMet' ? ['met'] : category === 'slaBreached' ? ['breached'] : ['met', 'breached'];
+      // A ticket from before an agent's SLA reset is in the resolve times
+      // (slaMeasured) but not in met or late, the same as the cards.
       rows = resolvedSnapshots.filter(x => wantStates.includes(x.snapshot.state))
+        .map(x => ({ ...x, reset: kpiSlaResetFor(x.t, kpiSlaAgentKeys(x.t, team, slaAgent)) }))
+        .filter(x => category === 'slaMeasured' || !x.reset)
         .sort((a, b) => b.snapshot.overdueMs - a.snapshot.overdueMs)
-        .map(({ t, snapshot }) => kpiDrilldownRow(t, snapshot.state === 'met' ? 'Met SLA' : `Missed by ${hoursFromMs(snapshot.overdueMs)}h`));
+        .map(({ t, snapshot, reset }) => kpiDrilldownRow(t, reset ? 'Before SLA reset' : (snapshot.state === 'met' ? 'Met SLA' : `Missed by ${hoursFromMs(snapshot.overdueMs)}h`)));
     } else if (category === 'reopened') {
       const events = await prisma.ticketEvent.findMany({
         where: {
           eventType: 'ticket_status_changed',
           oldValue: 'Resolved',
           NOT: [{ newValue: 'Resolved' }],
-          createdAt: { gte: bounds.start, lte: bounds.end },
+          createdAt: { gte: bounds.start, lte: new Date(Math.min(bounds.end.getTime(), snapshot.takenAt)) },
           ticket: { AND: [baseWhere, accessWhere, { duplicateOfExternalId: null }] }
         },
         select: { ticket: { select: KPI_TICKET_SELECT } },
@@ -4248,7 +7565,2004 @@ app.get('/api/tickets/kpis/drilldown', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'read_kpi_drilldown_failed' });
   }
 });
-app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
+/* The board's "My resolved" chip, read from the KPI's own working set rather
+   than counted again from the board state. Counted on the board it disagreed
+   with the dashboard by a few tickets: the board went by its own assignee and
+   stage, skipped the launch cut-off and the hand credits, and was live where
+   the dashboard is a checkpoint snapshot. This is the dashboard's Resolved
+   card on "Since launch", scoped the way the dashboard scopes the person
+   asking - CS by CS owner, support by assignee, admins the whole team. */
+app.get('/api/tickets/my-resolved', requireAuth, async (req, res) => {
+  try {
+    const { myTeam, scopedTickets, creditsInRange, snapshot } = await loadKpiWorkingSet({
+      session: req.session,
+      query: { range: 'since_launch', team: 'all', agent: 'all', company: 'all', tzOffset: req.query.tzOffset }
+    });
+    // Counted the same way as statusCounts.res, a row with no externalId
+    // included, so the badge is the dashboard's figure to the ticket.
+    const resolved = scopedTickets.filter(t => normalizeDbStatusForBoard(t.status) === 'res');
+    const externalIds = resolved.filter(t => t.externalId).map(t => String(t.externalId));
+    const credits = creditsInRange.reduce((sum, c) => sum + c.count, 0);
+    return res.json({ ok: true, scope: myTeam, total: resolved.length + credits, credits, externalIds, ...kpiSnapshotInfo(snapshot) });
+  } catch (error) {
+    console.error('Read my resolved failed:', error);
+    return res.status(500).json({ error: 'read_my_resolved_failed' });
+  }
+});
+/* Admins: retake the KPI snapshot now instead of waiting for the next
+   checkpoint. It replaces the current checkpoint's snapshot, so everyone reads
+   the new figures on their next pull, and the next checkpoint still runs. */
+app.post('/api/tickets/kpis/snapshot', requireAdmin, async (req, res) => {
+  try {
+    const snapshot = await takeKpiSnapshot(kpiCheckpointAtOrBefore());
+    return res.json({ ok: true, snapshot: kpiSnapshotInfo(snapshot) });
+  } catch (error) {
+    console.error('Forced KPI snapshot failed:', error);
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+/* Admins' day report: every ticket resolved on one calendar day (the SLA's
+   zone, Tunisia time), by agent. Read live from the database rather than the
+   KPI snapshot, so a day that has just ended reads complete without waiting
+   for the next checkpoint. Spam is left out; duplicates are listed but not
+   counted, as on the dashboard. Hand credits dated that day are added to the
+   agent's count. */
+app.get('/api/tickets/kpis/day-report', requireAdmin, async (req, res) => {
+  try {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(req.query.date || ''));
+    const now = new Date();
+    const start = match ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (Number.isNaN(start.getTime())) return res.status(400).json({ error: 'invalid_date' });
+    const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+    const pad = n => String(n).padStart(2, '0');
+    const date = `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`;
+    const rows = await prisma.ticket.findMany({
+      where: {
+        resolvedAt: { gte: start, lt: end },
+        ...KPI_NOT_SPAM_WHERE
+      },
+      select: KPI_TICKET_SELECT,
+      orderBy: [{ resolvedAt: 'asc' }]
+    });
+    const resolved = rows.filter(t => normalizeDbStatusForBoard(t.status) === 'res');
+    const byAgent = {};
+    const agentRow = code => (byAgent[code] ||= { agent: code, resolved: 0, credits: 0, slaMet: 0, slaBreached: 0, duplicates: 0 });
+    const tickets = resolved.map(t => {
+      const agent = String(t.assignedAgent || '').trim().toUpperCase() || 'Unassigned';
+      const row = agentRow(agent);
+      const duplicate = !!t.duplicateOfExternalId;
+      const sla = ticketSlaSnapshot(t);
+      if (duplicate) row.duplicates++;
+      else {
+        row.resolved++;
+        if (sla.state === 'met') row.slaMet++;
+        else if (sla.state === 'breached') row.slaBreached++;
+      }
+      return {
+        ...kpiDrilldownRow(t),
+        agent,
+        csAgent: t.csAgent || null,
+        resolvedAt: kpiResolvedDate(t)?.toISOString() || null,
+        sla: sla.state,
+        duplicate
+      };
+    });
+    for (const c of kpiResolvedCreditTickets()) {
+      if (c.resolvedAt >= start && c.resolvedAt < end) agentRow(c.assignedAgent).credits += c.count;
+    }
+    const agents = Object.values(byAgent).sort((a, b) => (b.resolved + b.credits) - (a.resolved + a.credits) || a.agent.localeCompare(b.agent));
+    const total = agents.reduce((sum, a) => sum + a.resolved + a.credits, 0);
+    return res.json({ ok: true, date, timeZone: process.env.TZ || null, total, agents, tickets, generatedAt: new Date().toISOString() });
+  } catch (error) {
+    console.error('Read day report failed:', error);
+    return res.status(500).json({ error: 'read_day_report_failed' });
+  }
+});
+// ---------------------------------------------------------------------------
+// Insights
+//
+// Everything below reads the TicketEvent log rather than the Ticket rows. The
+// rows say where a ticket is now; the log says how it got there, which is what
+// answers "who dropped this", "which column is the real queue", and "what did
+// the board look like on Tuesday".
+//
+// One property of the log has to be handled before any of it means anything:
+// a single change is written twice, ~70-100ms apart, with identical old/new
+// values (the same diff is audited on two paths). Left alone that doubles
+// every count here. dedupeTicketEvents collapses an identical
+// (type, old, new) pair seen inside AUDIT_DEDUPE_MS into one - a window far
+// too short for a person to have made the same change twice on purpose.
+// ---------------------------------------------------------------------------
+const AUDIT_DEDUPE_MS = 5000;
+
+// Beyond this many handoffs a ticket is not being passed between people, it is
+// being rewritten by something automated. Those are reported under their own
+// heading instead of at the top of the bounce list, where they would crowd out
+// every ticket a human actually dropped.
+const FLAPPING_HANDOFFS = 12;
+
+function dedupeTicketEvents(events) {
+  const out = [];
+  for (const ev of events) {
+    const prev = out[out.length - 1];
+    if (prev
+      && prev.ticketId === ev.ticketId
+      && prev.eventType === ev.eventType
+      && String(prev.oldValue ?? '') === String(ev.oldValue ?? '')
+      && String(prev.newValue ?? '') === String(ev.newValue ?? '')
+      && Math.abs(new Date(ev.createdAt).getTime() - new Date(prev.createdAt).getTime()) <= AUDIT_DEDUPE_MS) continue;
+    out.push(ev);
+  }
+  return out;
+}
+
+// The same team/agent scoping every KPI figure obeys, so an insight never
+// quietly reports a board-wide total to someone who can only see their own
+// tickets.
+function insightsAccessWhere(req) {
+  const role = normalizeRole(req.session?.role) || 'support';
+  const username = String(req.session?.username || '').trim().toUpperCase();
+  if (role === 'cs') return { csAgent: username };
+  if (role === 'support') return { assignedAgent: username };
+  return {};
+}
+
+function insightsDays(value, fallback = 30) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(365, Math.max(1, Math.round(n)));
+}
+
+function ticketNumberOf(ticket) {
+  return ticket?.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null;
+}
+
+const INSIGHT_TICKET_SELECT = {
+  id: true, externalId: true, displayNumber: true, subject: true, status: true,
+  priority: true, companyName: true, senderEmail: true, assignedAgent: true,
+  csAgent: true, category: true, createdAt: true, updatedAt: true, resolvedAt: true,
+  duplicateOfExternalId: true
+};
+
+/* The four routes behind the Insights view - bounce, dwell, reopened and
+   board-at - are requireAdmin. Every one of them reads across the whole board
+   to say how the team is doing: which tickets get passed around, who sits on
+   them, whose resolutions come back. That is a management view, not something
+   an agent sees about their colleagues.
+
+   /api/insights/suggest-assignee and /api/insights/languages stay requireAuth
+   on purpose. They are named "insights" but they are not part of this view -
+   they answer a question about one ticket the agent already has open, and the
+   board itself calls them while rendering. */
+
+// --- Bounce detection ------------------------------------------------------
+//
+// A ticket that changed hands three times, or re-entered a column it had
+// already left, is the painful kind. No existing figure surfaces it: it can sit
+// inside SLA the whole time it is being passed around.
+app.get('/api/insights/bounce', requireAdmin, async (req, res) => {
+  try {
+    const days = insightsDays(req.query.days, 30);
+    const since = new Date(Date.now() - days * 86400000);
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const access = insightsAccessWhere(req);
+
+    const events = await prisma.ticketEvent.findMany({
+      where: {
+        eventType: { in: ['ticket_assignedAgent_changed', 'ticket_status_changed'] },
+        createdAt: { gte: since },
+        ticket: { AND: [{ duplicateOfExternalId: null }, access] }
+      },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+    });
+
+    const byTicket = new Map();
+    for (const ev of dedupeTicketEvents(events)) {
+      if (!byTicket.has(ev.ticketId)) byTicket.set(ev.ticketId, []);
+      byTicket.get(ev.ticketId).push(ev);
+    }
+
+    const rows = [];
+    const flapping = [];
+    for (const [ticketId, list] of byTicket) {
+      let handoffs = 0;
+      let statusChanges = 0;
+      let revisits = 0;
+      const agents = new Set();
+      const seenStatuses = new Set();
+      let lastAgent = null;
+      let firstAt = null;
+      let lastAt = null;
+
+      for (const ev of list) {
+        const oldValue = String(ev.oldValue || '').trim();
+        const newValue = String(ev.newValue || '').trim();
+        if (!firstAt) firstAt = ev.createdAt;
+        lastAt = ev.createdAt;
+
+        if (ev.eventType === 'ticket_assignedAgent_changed') {
+          // An unassigned -> someone transition is the ticket being picked up,
+          // not being handed off. Only a person-to-person move counts.
+          if (oldValue && newValue && oldValue !== newValue) {
+            handoffs++;
+            agents.add(oldValue);
+            agents.add(newValue);
+            lastAgent = newValue;
+          } else if (newValue) {
+            agents.add(newValue);
+            lastAgent = newValue;
+          }
+        } else {
+          if (oldValue) seenStatuses.add(oldValue);
+          if (newValue && oldValue && newValue !== oldValue) {
+            statusChanges++;
+            // Re-entering a column the ticket has already been in - the
+            // ping-pong half of the signal.
+            if (seenStatuses.has(newValue)) revisits++;
+            seenStatuses.add(newValue);
+          }
+        }
+      }
+
+      if (handoffs >= FLAPPING_HANDOFFS) {
+        flapping.push({ ticketId, handoffs, distinctAgents: agents.size });
+        continue;
+      }
+      if (handoffs < 3 && revisits < 2) continue;
+      rows.push({
+        ticketId,
+        handoffs,
+        distinctAgents: agents.size,
+        statusChanges,
+        revisits,
+        lastAgent,
+        firstChangeAt: firstAt,
+        lastChangeAt: lastAt,
+        score: handoffs + revisits * 2
+      });
+    }
+
+    rows.sort((a, b) => b.score - a.score || b.handoffs - a.handoffs);
+    const top = rows.slice(0, limit);
+    const tickets = top.length
+      ? await prisma.ticket.findMany({ where: { id: { in: top.map(r => r.ticketId) } }, select: INSIGHT_TICKET_SELECT })
+      : [];
+    const ticketById = new Map(tickets.map(t => [t.id, t]));
+
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      range: { days, since: since.toISOString() },
+      total: rows.length,
+      flappingCount: flapping.length,
+      // Not a bounce - a ticket being rewritten faster than a person could.
+      // Surfaced so the churn is visible without it drowning the real list.
+      flapping: flapping.sort((a, b) => b.handoffs - a.handoffs).slice(0, 10),
+      rows: top.map(row => {
+        const ticket = ticketById.get(row.ticketId);
+        return {
+          ...row,
+          ticketNumber: ticketNumberOf(ticket),
+          externalId: ticket?.externalId || null,
+          subject: ticket?.subject || '(no subject)',
+          company: ticket?.companyName || 'Unknown',
+          status: normalizeDbStatusForBoard(ticket?.status),
+          priority: ticket?.priority || 'Normal',
+          agent: ticket?.assignedAgent || 'Unassigned'
+        };
+      }).filter(row => row.externalId)
+    });
+  } catch (error) {
+    console.error('Bounce insight failed:', error);
+    return res.status(500).json({ error: 'bounce_insight_failed' });
+  }
+});
+
+// --- Dwell heatmap ---------------------------------------------------------
+//
+// How long tickets actually sit in each column, per week. A column with a high
+// average dwell is the bottleneck, and it is usually not the column anyone
+// would have named.
+function isoWeekKey(date) {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const week = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+// Midnight UTC on the Monday after the one containing `ms` - the boundary an
+// interval is split at when it runs across weeks.
+function nextIsoWeekStart(ms) {
+  const d = new Date(ms);
+  const monday = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - ((d.getUTCDay() || 7) - 1) * 86400000;
+  return monday + 7 * 86400000;
+}
+
+app.get('/api/insights/dwell', requireAdmin, async (req, res) => {
+  try {
+    const weeks = Math.min(26, Math.max(1, Number(req.query.weeks) || 8));
+    const since = new Date(Date.now() - weeks * 7 * 86400000);
+    const now = Date.now();
+    const access = insightsAccessWhere(req);
+
+    const tickets = await prisma.ticket.findMany({
+      where: { AND: [{ duplicateOfExternalId: null }, access, { OR: [{ updatedAt: { gte: since } }, { createdAt: { gte: since } }] }] },
+      select: { id: true, status: true, createdAt: true }
+    });
+    if (!tickets.length) return res.json({ ok: true, weeks: [], stages: [], cells: {}, totals: {}, sampleSize: 0 });
+
+    const ticketIds = tickets.map(t => t.id);
+    const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+      where: { ticketId: { in: ticketIds }, eventType: 'ticket_status_changed' },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+    }));
+
+    const eventsByTicket = new Map();
+    for (const ev of events) {
+      if (!eventsByTicket.has(ev.ticketId)) eventsByTicket.set(ev.ticketId, []);
+      eventsByTicket.get(ev.ticketId).push(ev);
+    }
+
+    // Two different questions, two different numbers.
+    //
+    // cells[stage][week] = { ms, tickets } is LOAD: the ticket-hours that
+    // column carried that week, and how many distinct tickets were sitting in
+    // it. An average per cell would be worthless here - almost every ticket
+    // spans the whole week, so it would read 168h in every cell of every
+    // column and say nothing.
+    //
+    // totals[stage] is DWELL: how long a ticket takes to get through the
+    // column, averaged over the intervals that actually ended. Intervals still
+    // running are counted separately as `open` rather than folded in, because
+    // a ticket that has been in New for a month is not evidence that New takes
+    // a month - it is evidence that one ticket is stuck.
+    const cells = {};
+    const totals = {};
+    const weekKeys = new Set();
+    const cellTickets = {};
+    let sampleSize = 0;
+
+    const ensureTotal = stage => (totals[stage] = totals[stage] || { completedMs: 0, completedN: 0, openMs: 0, openN: 0 });
+
+    const addInterval = (stage, ticketId, startMs, endMs, closed) => {
+      if (!stage) return;
+      // Only the slice of the interval that falls inside the window counts. A
+      // ticket that has been sitting in New since March would otherwise
+      // contribute all five of those months to this window.
+      const from = Math.max(startMs, since.getTime());
+      const to = Math.min(endMs, now);
+      if (!(to > from)) return;
+
+      const total = ensureTotal(stage);
+      if (closed) { total.completedMs += endMs - startMs; total.completedN += 1; }
+      else { total.openMs += now - startMs; total.openN += 1; }
+      sampleSize++;
+
+      // An interval that spans three weeks belongs to all three, not to the
+      // one it happened to start in - otherwise a long stall shows up as a
+      // single hot cell followed by two empty ones.
+      let cursor = from;
+      while (cursor < to) {
+        const boundary = Math.min(to, nextIsoWeekStart(cursor));
+        const key = isoWeekKey(new Date(cursor));
+        weekKeys.add(key);
+        cells[stage] = cells[stage] || {};
+        cells[stage][key] = cells[stage][key] || { ms: 0, tickets: 0 };
+        cells[stage][key].ms += boundary - cursor;
+        cellTickets[stage] = cellTickets[stage] || {};
+        cellTickets[stage][key] = cellTickets[stage][key] || new Set();
+        cellTickets[stage][key].add(ticketId);
+        cursor = boundary;
+      }
+    };
+
+    for (const ticket of tickets) {
+      const list = eventsByTicket.get(ticket.id) || [];
+      let stage = normalizeDbStatusForBoard(list.length ? list[0].oldValue : ticket.status);
+      let startMs = new Date(ticket.createdAt).getTime();
+      for (const ev of list) {
+        const at = new Date(ev.createdAt).getTime();
+        addInterval(stage, ticket.id, startMs, at, true);
+        stage = normalizeDbStatusForBoard(ev.newValue);
+        startMs = at;
+      }
+      // The column it is sitting in right now, still accumulating. Resolved is
+      // an end state, not a queue - counting the time since it was resolved
+      // would make Resolved the biggest number on the chart forever.
+      if (stage !== 'res') addInterval(stage, ticket.id, startMs, now, false);
+    }
+
+    for (const stage of Object.keys(cells)) {
+      for (const week of Object.keys(cells[stage])) {
+        cells[stage][week].tickets = cellTickets[stage][week].size;
+      }
+    }
+
+    const stages = ['new', 'inp', 'wus', 'dft', 'wct', 'res'].filter(s => cells[s]);
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      weeks: [...weekKeys].sort(),
+      stages,
+      cells,
+      totals: Object.fromEntries(Object.entries(totals).map(([stage, t]) => [stage, {
+        avgHours: t.completedN ? Math.round((t.completedMs / t.completedN / 3600000) * 10) / 10 : null,
+        completed: t.completedN,
+        open: t.openN,
+        openAvgHours: t.openN ? Math.round((t.openMs / t.openN / 3600000) * 10) / 10 : null
+      }])),
+      sampleSize
+    });
+  } catch (error) {
+    console.error('Dwell insight failed:', error);
+    return res.status(500).json({ error: 'dwell_insight_failed' });
+  }
+});
+
+// --- Reply-outcome loop ----------------------------------------------------
+//
+// A resolve that comes straight back is not a resolve. Throughput counts it the
+// same as one that stuck, so this is what tells the two apart.
+app.get('/api/insights/reopened', requireAdmin, async (req, res) => {
+  try {
+    const days = insightsDays(req.query.days, 30);
+    const windowHours = Math.min(720, Math.max(1, Number(req.query.windowHours) || 72));
+    const since = new Date(Date.now() - days * 86400000);
+    const access = insightsAccessWhere(req);
+
+    const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+      where: {
+        eventType: 'ticket_status_changed',
+        createdAt: { gte: since },
+        ticket: { AND: [{ duplicateOfExternalId: null }, access] }
+      },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+      orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+    }));
+
+    const byTicket = new Map();
+    for (const ev of events) {
+      if (!byTicket.has(ev.ticketId)) byTicket.set(ev.ticketId, []);
+      byTicket.get(ev.ticketId).push(ev);
+    }
+
+    const rows = [];
+    let resolvedCount = 0;
+    for (const [ticketId, list] of byTicket) {
+      let resolvedAt = null;
+      let bounces = 0;
+      let fastest = null;
+      for (const ev of list) {
+        if (ev.newValue === 'Resolved') { resolvedAt = new Date(ev.createdAt).getTime(); resolvedCount++; continue; }
+        if (ev.oldValue === 'Resolved' && ev.newValue !== 'Resolved') {
+          bounces++;
+          if (resolvedAt) {
+            const gapHours = (new Date(ev.createdAt).getTime() - resolvedAt) / 3600000;
+            if (fastest === null || gapHours < fastest) fastest = gapHours;
+          }
+          resolvedAt = null;
+        }
+      }
+      if (!bounces) continue;
+      rows.push({ ticketId, bounces, hoursToReopen: fastest === null ? null : Math.round(fastest * 10) / 10 });
+    }
+
+    const within = rows.filter(r => r.hoursToReopen !== null && r.hoursToReopen <= windowHours);
+    rows.sort((a, b) => b.bounces - a.bounces || (a.hoursToReopen ?? 1e9) - (b.hoursToReopen ?? 1e9));
+
+    const tickets = rows.length
+      ? await prisma.ticket.findMany({ where: { id: { in: rows.slice(0, 100).map(r => r.ticketId) } }, select: INSIGHT_TICKET_SELECT })
+      : [];
+    const ticketById = new Map(tickets.map(t => [t.id, t]));
+
+    return res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      range: { days, since: since.toISOString(), windowHours },
+      totals: {
+        resolves: resolvedCount,
+        reopened: rows.length,
+        reopenedWithinWindow: within.length,
+        stickRate: resolvedCount ? Math.round(((resolvedCount - rows.length) / resolvedCount) * 1000) / 10 : null
+      },
+      rows: rows.slice(0, 100).map(row => {
+        const ticket = ticketById.get(row.ticketId);
+        return {
+          ...row,
+          ticketNumber: ticketNumberOf(ticket),
+          externalId: ticket?.externalId || null,
+          subject: ticket?.subject || '(no subject)',
+          company: ticket?.companyName || 'Unknown',
+          agent: ticket?.assignedAgent || 'Unassigned',
+          status: normalizeDbStatusForBoard(ticket?.status)
+        };
+      }).filter(row => row.externalId)
+    });
+  } catch (error) {
+    console.error('Reopened insight failed:', error);
+    return res.status(500).json({ error: 'reopened_insight_failed' });
+  }
+});
+
+// --- Board rewind ----------------------------------------------------------
+//
+// What the board looked like at an arbitrary past moment. Reconstructed by
+// running the log backwards: for each ticket, the first status change recorded
+// AFTER the target time carries, in its oldValue, exactly the status the
+// ticket was sitting in at that time. No snapshot table needed.
+app.get('/api/insights/board-at', requireAdmin, async (req, res) => {
+  try {
+    const at = new Date(String(req.query.at || ''));
+    if (Number.isNaN(at.getTime())) return res.status(400).json({ error: 'invalid_at' });
+    if (at.getTime() > Date.now()) return res.status(400).json({ error: 'at_in_future' });
+    const access = insightsAccessWhere(req);
+
+    const tickets = await prisma.ticket.findMany({
+      where: { AND: [{ createdAt: { lte: at } }, access] },
+      select: INSIGHT_TICKET_SELECT
+    });
+    if (!tickets.length) return res.json({ ok: true, at: at.toISOString(), counts: {}, tickets: [] });
+
+    const ids = tickets.map(t => t.id);
+    // Only the earliest post-cutoff change per ticket matters, but Prisma has
+    // no per-group limit - fetch the changes after the cutoff ascending and
+    // keep the first one seen for each ticket.
+    const later = await prisma.ticketEvent.findMany({
+      where: { ticketId: { in: ids }, eventType: { in: ['ticket_status_changed', 'ticket_assignedAgent_changed'] }, createdAt: { gt: at } },
+      select: { ticketId: true, eventType: true, oldValue: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }]
+    });
+    const statusAt = new Map();
+    const agentAt = new Map();
+    for (const ev of later) {
+      const target = ev.eventType === 'ticket_status_changed' ? statusAt : agentAt;
+      if (!target.has(ev.ticketId)) target.set(ev.ticketId, ev.oldValue);
+    }
+
+    const counts = { new: 0, inp: 0, wus: 0, dft: 0, wct: 0, res: 0 };
+    const rows = tickets.map(ticket => {
+      const stage = normalizeDbStatusForBoard(statusAt.has(ticket.id) ? statusAt.get(ticket.id) : ticket.status);
+      const agent = agentAt.has(ticket.id) ? (agentAt.get(ticket.id) || null) : (ticket.assignedAgent || null);
+      if (stage in counts) counts[stage]++;
+      return {
+        ticketNumber: ticketNumberOf(ticket),
+        externalId: ticket.externalId,
+        subject: ticket.subject || '(no subject)',
+        company: ticket.companyName || 'Unknown',
+        priority: ticket.priority || 'Normal',
+        stage,
+        agent: agent || 'Unassigned',
+        stageNow: normalizeDbStatusForBoard(ticket.status),
+        agentNow: ticket.assignedAgent || 'Unassigned'
+      };
+    });
+
+    return res.json({
+      ok: true,
+      at: at.toISOString(),
+      generatedAt: new Date().toISOString(),
+      counts,
+      // What is different between then and now - the answer to "who dropped
+      // this" is usually in this subset, not in the full list.
+      changed: rows.filter(r => r.stage !== r.stageNow || r.agent !== r.agentNow).length,
+      tickets: rows
+    });
+  } catch (error) {
+    console.error('Board rewind failed:', error);
+    return res.status(500).json({ error: 'board_rewind_failed' });
+  }
+});
+
+// --- One ticket's timeline -------------------------------------------------
+/* Graph's message list, reduced to what the board renders. Separated from the
+   handler so the parts that can be got wrong - dropping drafts, ordering by
+   time, tolerating the fields Graph omits - are testable without a mailbox. */
+function shapeThreadMessages(value) {
+  return (value || [])
+    .filter(m => !m.isDraft)
+    .map(m => ({
+      id: m.id,
+      subject: m.subject || '',
+      from: m.from?.emailAddress?.address || '',
+      fromName: m.from?.emailAddress?.name || '',
+      to: (m.toRecipients || []).map(r => r.emailAddress?.address).filter(Boolean),
+      cc: (m.ccRecipients || []).map(r => r.emailAddress?.address).filter(Boolean),
+      receivedDateTime: m.receivedDateTime || m.sentDateTime || null,
+      bodyType: m.body?.contentType === 'text' ? 'text' : 'html',
+      body: m.body?.content || '',
+      preview: m.bodyPreview || '',
+      hasAttachments: !!m.hasAttachments,
+      webLink: m.webLink || ''
+    }))
+    .sort((a, b) => new Date(a.receivedDateTime || 0) - new Date(b.receivedDateTime || 0));
+}
+
+/* The whole conversation, not just the newest message.
+
+   A ticket is a thread, but the board only ever fetched one message from it -
+   whichever reply arrived last. Everything before that was only readable in the
+   quoted text the client's mail app happened to include, which is inconsistent,
+   often truncated, and gone entirely when someone replies without quoting. An
+   agent picking up a ticket mid-conversation could not see what had been said.
+
+   Graph groups a thread by conversationId, so this asks for every message
+   carrying the ticket's, oldest first. The bodies come back as the senders
+   wrote them and are sanitised on the client by the same allowlist the single
+   message goes through - see emSanitizeEmailHtml.
+
+   Only messages count: Graph returns drafts in a conversation too, and a
+   half-written reply sitting in someone's Drafts is not part of what was said. */
+app.get('/api/tickets/:externalId/thread', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+
+    // The conversation id is on the ticket's stored raw mail; the client can
+    // also pass it directly for a ticket the database has not caught up with.
+    let conversationId = String(req.query.conversationId || '').trim();
+    if (!conversationId) {
+      const row = await prisma.ticket.findUnique({ where: { externalId }, select: { emailRaw: true } }).catch(() => null);
+      const raw = (row?.emailRaw && typeof row.emailRaw === 'object') ? row.emailRaw : {};
+      conversationId = String(raw.conversationId || '').trim();
+    }
+    if (!conversationId) return res.json({ ok: true, externalId, messages: [], note: 'no_conversation_id' });
+
+    const select = '$select=id,subject,bodyPreview,body,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,webLink,isDraft,hasAttachments,conversationId';
+    // Escape the quote Graph delimits the filter with, or an id containing one
+    // would break the query rather than simply not matching.
+    const filter = `$filter=conversationId eq '${conversationId.replace(/'/g, "''")}'`;
+    const data = await graphGetResilient(
+      `/users/${encodeURIComponent(SUPPORT_MAILBOX)}/messages?${filter}&${select}&$orderby=receivedDateTime asc&$top=50`,
+      req
+    );
+
+    const messages = shapeThreadMessages(data?.value);
+
+    return res.json({ ok: true, externalId, conversationId, total: messages.length, messages });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Ticket thread failed:', detail);
+    return res.status(502).json({ error: 'thread_failed', message: detail.slice(0, 300) });
+  }
+});
+
+app.get('/api/tickets/:externalId/timeline', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const ticket = await prisma.ticket.findUnique({ where: { externalId }, select: { id: true, createdAt: true, status: true } });
+    if (!ticket) return res.json({ ok: true, externalId, events: [], note: 'not_in_database' });
+
+    const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+      where: { ticketId: ticket.id },
+      select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true, user: { select: { username: true } } },
+      orderBy: [{ createdAt: 'asc' }],
+      take: 500
+    }));
+
+    return res.json({
+      ok: true,
+      externalId,
+      createdAt: ticket.createdAt,
+      statusNow: normalizeDbStatusForBoard(ticket.status),
+      events: events.map(ev => ({
+        at: ev.createdAt,
+        type: ev.eventType,
+        from: ev.oldValue,
+        to: ev.newValue,
+        by: ev.user?.username ? String(ev.user.username).toUpperCase() : null
+      }))
+    });
+  } catch (error) {
+    console.error('Ticket timeline failed:', error);
+    return res.status(500).json({ error: 'ticket_timeline_failed' });
+  }
+});
+
+// --- Similar tickets -------------------------------------------------------
+//
+// "This company asked something like this before, and here is what we said."
+// Turns the ticket history into a lookup without building a knowledge base.
+const SIMILAR_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'from', 'this', 'that', 'you', 'your', 'our', 'not', 'are', 'has', 'have', 'was', 'were', 'can', 'will', 'about', 'please', 'hello', 'dear', 'thanks', 'thank', 'regards', 'support', 'issue', 'question', 'help']);
+function similarityTokens(text) {
+  return new Set(String(text || '')
+    .toLowerCase()
+    .replace(/^\s*((re|fw|fwd)\s*:\s*)+/gi, '')
+    .split(/[^a-z0-9]+/)
+    .filter(word => word.length >= 3 && !SIMILAR_STOPWORDS.has(word)));
+}
+function jaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let shared = 0;
+  for (const token of a) if (b.has(token)) shared++;
+  return shared / (a.size + b.size - shared);
+}
+
+app.get('/api/tickets/:externalId/similar', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.params.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+    const limit = Math.min(10, Math.max(1, Number(req.query.limit) || 5));
+
+    const source = await prisma.ticket.findUnique({ where: { externalId }, select: INSIGHT_TICKET_SELECT });
+    if (!source) return res.json({ ok: true, externalId, rows: [], note: 'not_in_database' });
+
+    const or = [];
+    if (source.senderEmail) or.push({ senderEmail: source.senderEmail });
+    if (source.companyName) or.push({ companyName: source.companyName });
+    if (source.category) or.push({ category: source.category });
+    if (!or.length) return res.json({ ok: true, externalId, rows: [] });
+
+    const candidates = await prisma.ticket.findMany({
+      where: { AND: [{ OR: or }, { NOT: { externalId } }, { duplicateOfExternalId: null }] },
+      select: INSIGHT_TICKET_SELECT,
+      orderBy: [{ updatedAt: 'desc' }],
+      take: 200
+    });
+
+    const sourceTokens = similarityTokens(source.subject);
+    const scored = candidates.map(candidate => {
+      const overlap = jaccard(sourceTokens, similarityTokens(candidate.subject));
+      const sameSender = !!(source.senderEmail && candidate.senderEmail === source.senderEmail);
+      const sameCompany = !!(source.companyName && candidate.companyName === source.companyName);
+      const resolved = normalizeDbStatusForBoard(candidate.status) === 'res';
+      // A resolved one is worth more than an open one: it carries an answer.
+      const score = overlap * 4 + (sameSender ? 1.5 : 0) + (sameCompany ? 1 : 0) + (resolved ? 0.75 : 0);
+      return { candidate, overlap, sameSender, sameCompany, resolved, score };
+    }).filter(row => row.score >= 1).sort((a, b) => b.score - a.score).slice(0, limit);
+
+    // The resolving note, where there is one - the actual reusable part.
+    const ids = scored.map(row => row.candidate.id);
+    const comments = ids.length
+      ? await prisma.ticketComment.findMany({ where: { ticketId: { in: ids } }, orderBy: { createdAt: 'desc' }, select: { ticketId: true, comment: true, createdAt: true, user: { select: { username: true } } } })
+      : [];
+    const lastComment = new Map();
+    for (const comment of comments) if (!lastComment.has(comment.ticketId)) lastComment.set(comment.ticketId, comment);
+
+    return res.json({
+      ok: true,
+      externalId,
+      rows: scored.map(({ candidate, overlap, sameSender, sameCompany, resolved, score }) => {
+        const comment = lastComment.get(candidate.id);
+        return {
+          ticketNumber: ticketNumberOf(candidate),
+          externalId: candidate.externalId,
+          subject: candidate.subject || '(no subject)',
+          company: candidate.companyName || 'Unknown',
+          sender: candidate.senderEmail || null,
+          status: normalizeDbStatusForBoard(candidate.status),
+          category: candidate.category || null,
+          agent: candidate.assignedAgent || 'Unassigned',
+          resolvedAt: candidate.resolvedAt,
+          createdAt: candidate.createdAt,
+          why: [sameSender ? 'same sender' : null, sameCompany ? 'same company' : null, overlap >= 0.2 ? 'similar subject' : null, resolved ? 'resolved' : null].filter(Boolean),
+          score: Math.round(score * 100) / 100,
+          lastNote: comment ? { text: String(comment.comment || '').slice(0, 600), by: comment.user?.username ? String(comment.user.username).toUpperCase() : 'SYSTEM', at: comment.createdAt } : null
+        };
+      })
+    });
+  } catch (error) {
+    console.error('Similar tickets failed:', error);
+    return res.status(500).json({ error: 'similar_tickets_failed' });
+  }
+});
+
+// --- Detected languages ----------------------------------------------------
+//
+// TicketTranslation already records what language each translated ticket was
+// written in. That is a signal the board pays for and then throws away - this
+// hands it back so a card can carry a language chip and the board can filter
+// on it.
+// --- Who should take this --------------------------------------------------
+//
+// Assignment on this board is a dropdown of seven trigrams with nothing behind
+// it, so it falls to whoever is nearest or whoever always gets picked. The
+// board already knows who has actually finished this kind of work: the resolved
+// tickets from the same company, the same category, and the same sender.
+//
+// This ranks people on that evidence and says why, so the suggestion can be
+// argued with rather than just obeyed. It suggests; it never assigns.
+app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
+  try {
+    const externalId = String(req.query.externalId || '').trim();
+    if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+
+    const ticket = await prisma.ticket.findUnique({ where: { externalId }, select: INSIGHT_TICKET_SELECT });
+    if (!ticket) return res.json({ ok: true, externalId, suggestions: [], note: 'not_in_database' });
+
+    const or = [];
+    if (ticket.companyName) or.push({ companyName: ticket.companyName });
+    if (ticket.senderEmail) or.push({ senderEmail: ticket.senderEmail });
+    if (ticket.category) or.push({ category: ticket.category });
+    if (!or.length) return res.json({ ok: true, externalId, suggestions: [], note: 'nothing_to_go_on' });
+
+    // Only finished work counts. An open ticket sitting with someone is not
+    // evidence that they are the right person for it - quite often it is the
+    // opposite.
+    const history = await prisma.ticket.findMany({
+      where: { AND: [{ OR: or }, { NOT: { externalId } }, { status: 'Resolved' }, { assignedAgent: { not: null } }, { duplicateOfExternalId: null }] },
+      select: { assignedAgent: true, companyName: true, category: true, senderEmail: true, subject: true, createdAt: true, resolvedAt: true, displayNumber: true },
+      orderBy: { resolvedAt: 'desc' },
+      take: 300
+    });
+    if (!history.length) return res.json({ ok: true, externalId, suggestions: [], note: 'no_resolved_history' });
+
+    // What everyone is already carrying, so a suggestion does not pile another
+    // ticket on the person who is furthest behind.
+    const openCounts = await prisma.ticket.groupBy({
+      by: ['assignedAgent'],
+      where: { AND: [{ NOT: { status: 'Resolved' } }, { assignedAgent: { not: null } }, { duplicateOfExternalId: null }] },
+      _count: { _all: true }
+    }).catch(() => []);
+    const load = Object.fromEntries(openCounts.map(row => [row.assignedAgent, row._count._all]));
+    const busiest = Math.max(1, ...Object.values(load));
+
+    const subjectTokens = similarityTokens(ticket.subject);
+    const now = Date.now();
+    const agents = new Map();
+
+    for (const past of history) {
+      const agent = String(past.assignedAgent || '').trim().toUpperCase();
+      if (!agent) continue;
+      if (!agents.has(agent)) agents.set(agent, { agent, sameCompany: 0, sameSender: 0, sameCategory: 0, similarSubject: 0, total: 0, lastAt: null, examples: [] });
+      const row = agents.get(agent);
+      row.total++;
+
+      const sameCompany = !!(ticket.companyName && past.companyName === ticket.companyName);
+      const sameSender = !!(ticket.senderEmail && past.senderEmail === ticket.senderEmail);
+      const sameCategory = !!(ticket.category && past.category === ticket.category);
+      const overlap = jaccard(subjectTokens, similarityTokens(past.subject));
+      if (sameCompany) row.sameCompany++;
+      if (sameSender) row.sameSender++;
+      if (sameCategory) row.sameCategory++;
+      if (overlap >= 0.25) row.similarSubject++;
+
+      const at = past.resolvedAt ? new Date(past.resolvedAt).getTime() : null;
+      if (at && (!row.lastAt || at > row.lastAt)) row.lastAt = at;
+      if (row.examples.length < 3 && (sameCompany || sameSender || overlap >= 0.25)) {
+        row.examples.push({
+          ticketNumber: past.displayNumber ? `#${String(past.displayNumber).padStart(4, '0')}` : null,
+          subject: past.subject || '(no subject)',
+          resolvedAt: past.resolvedAt
+        });
+      }
+    }
+
+    const suggestions = [...agents.values()].map(row => {
+      // Weighted by how specific the evidence is. Having answered this exact
+      // client before beats having answered the same category once.
+      const evidence = row.sameSender * 3 + row.sameCompany * 2 + row.similarSubject * 2 + row.sameCategory;
+      // Six months old is still evidence, just weaker.
+      const ageMonths = row.lastAt ? (now - row.lastAt) / (30 * 86400000) : 24;
+      const recency = 1 / (1 + Math.max(0, ageMonths) / 6);
+      // A soft penalty, not a veto: the person who knows the client is often
+      // still the right answer even when they are busy.
+      const loadPenalty = 1 - 0.35 * ((load[row.agent] || 0) / busiest);
+      const score = evidence * recency * loadPenalty;
+      return {
+        agent: row.agent,
+        score: Math.round(score * 100) / 100,
+        resolvedForThisClient: row.sameSender,
+        resolvedForThisCompany: row.sameCompany,
+        resolvedInThisCategory: row.sameCategory,
+        resolvedSimilarSubjects: row.similarSubject,
+        totalResolved: row.total,
+        lastResolvedAt: row.lastAt ? new Date(row.lastAt).toISOString() : null,
+        openNow: load[row.agent] || 0,
+        // Said in words, because a number nobody can interrogate is not a
+        // reason to hand someone a ticket.
+        why: [
+          row.sameSender ? `resolved ${row.sameSender} ticket${row.sameSender === 1 ? '' : 's'} from this client` : null,
+          row.sameCompany ? `${row.sameCompany} for this company` : null,
+          row.similarSubject ? `${row.similarSubject} on a similar subject` : null,
+          row.sameCategory ? `${row.sameCategory} in this category` : null
+        ].filter(Boolean),
+        examples: row.examples
+      };
+    }).filter(row => row.score > 0).sort((a, b) => b.score - a.score).slice(0, 5);
+
+    return res.json({
+      ok: true,
+      externalId,
+      ticketNumber: ticketNumberOf(ticket),
+      basedOn: history.length,
+      suggestions
+    });
+  } catch (error) {
+    console.error('Assignee suggestion failed:', error);
+    return res.status(500).json({ error: 'suggest_assignee_failed' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Projects
+//
+// The team's Claude projects, runnable from the board - with no Anthropic API
+// key on this deployment. The board never calls a model. Run puts a job in a
+// queue; a Claude that has the support connector (claude.ai, or Claude Code on
+// a machine running scripts/project-runner.ps1) claims it with
+// claim_project_run, does the work with its own tools, and hands the answer
+// back with post_project_run. The panel watches the job until it lands.
+//
+// The board keeps a local registry because ordinary Claude API keys cannot list
+// claude.ai Projects. Enterprise/eligible orgs can sync them through the
+// Compliance Projects API when a user connects a Compliance Access Key with
+// read:compliance_user_data. That API returns metadata and instructions, so a
+// synced project can be made runnable without manually pasting the prompt.
+//
+// What that buys, and it is the point of the feature: each project declares its
+// own inputs, so the board can render a real form for it instead of a chat box,
+// and run it against the API without anyone leaving the board.
+// ---------------------------------------------------------------------------
+const PROJECT_SCOPES = new Set(['mine', 'org', 'shared']);
+const PROJECT_FIELD_TYPES = new Set(['text', 'textarea', 'number', 'select', 'url']);
+const PROJECT_MODEL = String(process.env.PROJECT_MODEL || 'claude-opus-5').trim();
+// A run Claude claimed but never posted back - the chat was closed, the runner
+// PC went to sleep - is reported as failed after this long, so the panel stops
+// waiting on it.
+const PROJECT_RUN_STALE_MS = Math.max(10, Number(process.env.PROJECT_RUN_STALE_MINUTES || 120)) * 60 * 1000;
+// A run nobody has picked up is dropped after this long. Days rather than
+// minutes: with no runner switched on, a queued run waits for a person.
+const PROJECT_QUEUE_EXPIRE_MS = Math.max(1, Number(process.env.PROJECT_QUEUE_EXPIRE_HOURS || 72)) * 60 * 60 * 1000;
+const CLAUDE_COMPLIANCE_API_BASE = String(process.env.CLAUDE_COMPLIANCE_API_BASE || 'https://api.anthropic.com').replace(/\/+$/, '');
+const CLAUDE_PROJECT_SYNC_LIMIT = Math.min(500, Math.max(1, Number(process.env.CLAUDE_PROJECT_SYNC_LIMIT || 100)));
+// Runs cost money and are started by a button, so they get their own ceiling
+// rather than sharing the general API limiter.
+const projectRunLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false });
+
+async function ensureProjectTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "ClaudeProject" (
+      "id" SERIAL PRIMARY KEY,
+      "slug" TEXT NOT NULL UNIQUE,
+      "name" TEXT NOT NULL,
+      "description" TEXT,
+      "scope" TEXT NOT NULL DEFAULT 'org',
+      "owner" TEXT,
+      "instructions" TEXT,
+      "inputs" JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "model" TEXT,
+      "accent" TEXT,
+      "pinned" BOOLEAN NOT NULL DEFAULT false,
+      "createdBy" TEXT,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "claudeProjectId" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "source" TEXT NOT NULL DEFAULT 'manual'`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceUserId" INTEGER`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceUserEmail" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "sourceDeletedAt" TIMESTAMP(3)`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProject" ADD COLUMN IF NOT EXISTS "syncedAt" TIMESTAMP(3)`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProject_scope_idx" ON "ClaudeProject"("scope")`;
+  await prisma.$executeRaw`CREATE UNIQUE INDEX IF NOT EXISTS "ClaudeProject_claudeProjectId_key" ON "ClaudeProject"("claudeProjectId") WHERE "claudeProjectId" IS NOT NULL`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProject_sourceUserId_idx" ON "ClaudeProject"("sourceUserId")`;
+}
+
+/* The catalogue starts empty on purpose.
+   It used to be seeded with the seven projects the team was already running,
+   so the panel opened with something in it. Those rows carried no instructions
+   - nobody but the project's author can supply those - so they could never be
+   run, and an empty table refilled itself the moment it was cleared.
+   Claude fills the catalogue instead, from its own end: register_project over
+   the MCP connector, which reads a project's real instructions out of the
+   conversation running inside it, or a Compliance API sync where the org has a
+   key for it. Either route arrives runnable; a placeholder never did. */
+
+/* Results, kept.
+   A project thread in the panel lives in the browser and dies with the tab,
+   which is right for a working session and wrong for the thing the team
+   actually wants to keep: the answer. So a finished run is written here.
+   Two things write to it. The board writes what it ran itself, when a key is
+   set. Claude writes what IT ran, over post_project_run on the connector -
+   which is the only route that works on a deployment with no
+   ANTHROPIC_API_KEY, because the model call happens on Claude's side and only
+   the text comes back. Same table, same panel, a badge saying which. */
+const PROJECT_RUN_KEEP = Math.min(100, Math.max(5, Number(process.env.PROJECT_RUN_KEEP || 20)));
+const PROJECT_RUN_MAX_CHARS = 200_000;
+
+async function ensureProjectRunTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "ClaudeProjectRun" (
+      "id" SERIAL PRIMARY KEY,
+      "projectId" INTEGER NOT NULL,
+      "source" TEXT NOT NULL DEFAULT 'board',
+      "title" TEXT NOT NULL DEFAULT '',
+      "inputs" JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "output" TEXT NOT NULL DEFAULT '',
+      "model" TEXT NOT NULL DEFAULT '',
+      "ms" INTEGER,
+      "inputTokens" INTEGER,
+      "outputTokens" INTEGER,
+      "createdBy" TEXT NOT NULL DEFAULT '',
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProjectRun_projectId_idx" ON "ClaudeProjectRun"("projectId","createdAt" DESC)`;
+  // A run from the board is a queue entry first: 'queued' until a Claude claims
+  // it, 'running' while that Claude works, then 'done' or 'error'. 'done' is the
+  // default because every row written before the queue existed was finished.
+  // "request" is what the claiming Claude is handed - the brief built from the
+  // form, and any follow-up turns - so the job carries everything it needs.
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'done'`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "error" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "request" JSONB`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "claimedBy" TEXT`;
+  await prisma.$executeRaw`ALTER TABLE "ClaudeProjectRun" ADD COLUMN IF NOT EXISTS "claimedAt" TIMESTAMP(3)`;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "ClaudeProjectRun_status_idx" ON "ClaudeProjectRun"("status","createdAt")`;
+}
+
+// The inputs a run was given, flattened to label/value pairs so the panel can
+// show what was asked without needing the project's field list beside it.
+function projectRunInputPairs(project, values) {
+  const fields = Array.isArray(project?.inputs) ? project.inputs : [];
+  const supplied = (values && typeof values === 'object' && !Array.isArray(values)) ? values : {};
+  if (fields.length) {
+    return fields
+      .map(f => ({ label: String(f.label || f.key), value: String(supplied[f.key] ?? '').trim() }))
+      .filter(pair => pair.value)
+      .map(pair => ({ label: pair.label.slice(0, 120), value: pair.value.slice(0, 400) }));
+  }
+  return Object.entries(supplied)
+    .filter(([, v]) => String(v ?? '').trim())
+    .slice(0, 20)
+    .map(([k, v]) => ({ label: String(k).slice(0, 120), value: String(v).trim().slice(0, 400) }));
+}
+
+async function saveProjectRun(entry) {
+  const output = String(entry?.output || '').slice(0, PROJECT_RUN_MAX_CHARS);
+  if (!output.trim()) return null;
+  await ensureProjectRunTable();
+  const rows = await prisma.$queryRaw`
+    INSERT INTO "ClaudeProjectRun" ("projectId","source","title","inputs","output","model","ms","inputTokens","outputTokens","createdBy")
+    VALUES (${Number(entry.projectId)}, ${entry.source === 'claude' ? 'claude' : 'board'}, ${String(entry.title || '').slice(0, 200)},
+            ${JSON.stringify(entry.inputs || [])}::jsonb, ${output}, ${String(entry.model || '').slice(0, 80)},
+            ${entry.ms == null ? null : Number(entry.ms)}, ${entry.inputTokens == null ? null : Number(entry.inputTokens)},
+            ${entry.outputTokens == null ? null : Number(entry.outputTokens)}, ${String(entry.createdBy || '').slice(0, 120)})
+    RETURNING "id"
+  `;
+  await pruneProjectRuns(entry.projectId);
+  return Array.isArray(rows) ? rows[0]?.id ?? null : null;
+}
+
+// Only the last few runs of a project are worth keeping; the panel shows a
+// history, not an archive, and the output column is large. A run still waiting
+// or in progress is never pruned out from under the Claude working on it.
+async function pruneProjectRuns(projectId) {
+  await prisma.$executeRaw`
+    DELETE FROM "ClaudeProjectRun"
+    WHERE "projectId" = ${Number(projectId)}
+      AND "status" NOT IN ('collecting', 'queued', 'running')
+      AND "id" NOT IN (
+        SELECT "id" FROM "ClaudeProjectRun"
+        WHERE "projectId" = ${Number(projectId)}
+        ORDER BY "createdAt" DESC, "id" DESC
+        LIMIT ${PROJECT_RUN_KEEP}
+      )
+  `;
+  // Collected data is only needed while a Claude works the run. A follow-up
+  // queues a new run, which collects afresh.
+  await ensureProjectRunDataTable();
+  await prisma.$executeRaw`
+    DELETE FROM "ClaudeProjectRunData" d
+    WHERE NOT EXISTS (SELECT 1 FROM "ClaudeProjectRun" r WHERE r."id" = d."runId" AND r."status" IN ('collecting', 'queued', 'running'))
+  `;
+}
+
+async function queueProjectRunRow(entry) {
+  await ensureProjectRunTable();
+  const rows = await prisma.$queryRaw`
+    INSERT INTO "ClaudeProjectRun" ("projectId","source","title","inputs","output","model","status","request","createdBy")
+    VALUES (${Number(entry.projectId)}, 'board', ${String(entry.title || '').slice(0, 200)},
+            ${JSON.stringify(entry.inputs || [])}::jsonb, '', '', ${entry.status === 'collecting' ? 'collecting' : 'queued'},
+            ${JSON.stringify(entry.request || {})}::jsonb, ${String(entry.createdBy || '').slice(0, 120)})
+    RETURNING "id"
+  `;
+  await pruneProjectRuns(entry.projectId);
+  return Array.isArray(rows) ? rows[0]?.id ?? null : null;
+}
+
+async function expireStaleProjectRuns() {
+  const claimCutoff = new Date(Date.now() - PROJECT_RUN_STALE_MS);
+  const queueCutoff = new Date(Date.now() - PROJECT_QUEUE_EXPIRE_MS);
+  await prisma.$executeRaw`
+    UPDATE "ClaudeProjectRun" SET "status" = 'error',
+      "error" = 'Claude picked this run up but never posted an answer back. Run it again.'
+    WHERE "status" = 'running' AND COALESCE("claimedAt", "createdAt") < ${claimCutoff}
+  `;
+  await prisma.$executeRaw`
+    UPDATE "ClaudeProjectRun" SET "status" = 'error',
+      "error" = 'Nobody picked this run up, so it was dropped. Run it again, then hand it to Claude.'
+    WHERE "status" = 'queued' AND "createdAt" < ${queueCutoff}
+  `;
+  const collectCutoff = new Date(Date.now() - PROJECT_COLLECT_STALE_MS);
+  await prisma.$executeRaw`
+    UPDATE "ClaudeProjectRun" SET "status" = 'error',
+      "error" = 'The board started collecting data for this run but never finished (the server may have restarted). Run it again.'
+    WHERE "status" = 'collecting' AND "createdAt" < ${collectCutoff}
+  `;
+}
+
+/* Runners, and whose runs they take.
+   scripts/project-runner.ps1 runs either on a shared always-on PC or, with
+   -Mine, on a person's own PC, where it takes only the runs that person queued
+   and does them on their own Claude account. Each queue check is a check-in, so
+   the board knows whose PC is listening. The shared runner leaves a run alone
+   while its owner's PC is listening, and takes it anyway once it has waited
+   past the grace period - the PC is busy with another run, or went to sleep. */
+const PROJECT_RUNNER_FRESH_MS = 90 * 1000;
+const PROJECT_LOCAL_GRACE_MS = Math.max(30, Number(process.env.PROJECT_LOCAL_RUNNER_GRACE_SECONDS || 180)) * 1000;
+
+async function ensureProjectRunnerTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "ClaudeProjectRunner" (
+      "username" TEXT NOT NULL,
+      "mode" TEXT NOT NULL,
+      "lastSeen" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY ("username", "mode")
+    )
+  `;
+}
+
+async function noteProjectRunnerCheckIn(username, mode) {
+  await ensureProjectRunnerTable();
+  await prisma.$executeRaw`
+    INSERT INTO "ClaudeProjectRunner" ("username","mode","lastSeen")
+    VALUES (${String(username || '').toLowerCase()}, ${mode}, CURRENT_TIMESTAMP)
+    ON CONFLICT ("username","mode") DO UPDATE SET "lastSeen" = CURRENT_TIMESTAMP
+  `;
+}
+
+// Who will pick up a queued run for this person: 'yours' when their own PC is
+// listening, 'shared' when only the shared runner is, 'none' when nobody is and
+// the run waits for someone to paste the hand-off line.
+async function projectRunnerFor(username) {
+  await ensureProjectRunnerTable();
+  const fresh = new Date(Date.now() - PROJECT_RUNNER_FRESH_MS);
+  const rows = await prisma.$queryRaw`
+    SELECT "mode" FROM "ClaudeProjectRunner"
+    WHERE "lastSeen" > ${fresh}
+      AND (("mode" = 'mine' AND "username" = ${String(username || '').toLowerCase()}) OR "mode" = 'shared')`;
+  const modes = new Set((Array.isArray(rows) ? rows : []).map(r => r.mode));
+  return modes.has('mine') ? 'yours' : modes.has('shared') ? 'shared' : 'none';
+}
+
+// Which board this deployment is. Prod and preprod are separate databases with
+// their own run ids, and a Claude often has both connectors switched on - run 12
+// on one is not run 12 on the other - so every hand-off names its board.
+const BOARD_LABEL = String(process.env.BOARD_LABEL || '').trim()
+  || (/preprod/i.test(APP_BASE_URL) ? 'preprod' : IS_PRODUCTION ? 'prod' : 'local');
+
+// The words that hand a queued run to Claude. Shown on the board for someone to
+// paste into claude.ai, and used verbatim by the runner script.
+function projectRunHandoffPrompt(runId) {
+  return `Use the support board connector for the ${BOARD_LABEL} board (${APP_BASE_URL}): call claim_project_run with runId ${runId}, do the work it describes with the tools you have, then call post_project_run with runId ${runId} and the finished answer.`;
+}
+
+/* Collection, done by the board.
+   The Q-data audit starts by pulling the hotel's corpus from the n8n audit
+   gateway with AUDIT_API_KEY. Asking the Claude that claims the run to make
+   that call means handing a secret to an unattended session and having it
+   post the secret to an outside URL - which Claude's safety check rightly
+   refuses, so every audit run from the board failed at step one.
+   The board is the right place for it: the key stays in this server's env,
+   the board calls the gateway itself between Run and the queue, and Claude is
+   handed the corpus (claim_project_run / get_project_run_data) with nothing
+   to collect and no key to see. A run sits in 'collecting' until that lands,
+   so no Claude can take it half-ready. */
+const AUDIT_API_KEY = String(process.env.AUDIT_API_KEY || '').trim();
+const AUDIT_GATEWAY_URL = String(process.env.AUDIT_GATEWAY_URL || 'https://n8n-staging.quicktext.im/webhook/qdata-audit-api').trim();
+const AUDIT_PROJECT_PATTERN = (() => {
+  try { return new RegExp(process.env.AUDIT_PROJECT_PATTERN || 'audit', 'i'); } catch (_) { return /audit/i; }
+})();
+const AUDIT_COLLECT_TIMEOUT_MS = Math.max(10, Number(process.env.AUDIT_COLLECT_TIMEOUT_SECONDS || 300)) * 1000;
+// A collection the server never finished - it restarted mid-call - is failed
+// after this long rather than left 'collecting' for days.
+const PROJECT_COLLECT_STALE_MS = AUDIT_COLLECT_TIMEOUT_MS + 5 * 60 * 1000;
+const PROJECT_DATA_MAX_CHARS = 8_000_000;
+// One get_project_run_data page. Small enough to sit inside an MCP tool result
+// without being cut, big enough that a normal corpus is a handful of calls.
+const PROJECT_DATA_PART_CHARS = 60_000;
+
+async function ensureProjectRunDataTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "ClaudeProjectRunData" (
+      "runId" INTEGER PRIMARY KEY,
+      "source" TEXT NOT NULL DEFAULT '',
+      "label" TEXT NOT NULL DEFAULT '',
+      "content" TEXT NOT NULL DEFAULT '',
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+}
+
+/* Which collection, if any, a run of this project needs. Today that is the
+   audit: a project whose slug or name matches AUDIT_PROJECT_PATTERN and that
+   asks for a Team ID. Returns null when nothing is collected (no key set, or
+   not an audit project), or { teamId } - teamId '' when the field holds no
+   number, which the caller turns into a form error. */
+function projectCollectionFor(project, values) {
+  if (!AUDIT_API_KEY || !AUDIT_GATEWAY_URL) return null;
+  if (!AUDIT_PROJECT_PATTERN.test(`${project?.slug || ''} ${project?.name || ''}`)) return null;
+  const fields = Array.isArray(project?.inputs) ? project.inputs : [];
+  const field = fields.find(f => /team/i.test(`${f.key} ${f.label}`));
+  if (!field) return null;
+  const supplied = (values && typeof values === 'object') ? values : {};
+  // People type "2876", "Audit 2876" or "team 2876"; the gateway wants the number.
+  const match = String(supplied[field.key] ?? '').match(/\d+/);
+  return { teamId: match ? match[0] : '' };
+}
+
+async function collectAuditCorpus(runId, teamId) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUDIT_COLLECT_TIMEOUT_MS);
+  try {
+    const res = await fetch(AUDIT_GATEWAY_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${AUDIT_API_KEY}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ team_id: Number(teamId) }),
+      signal: controller.signal
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`the audit gateway answered HTTP ${res.status}${text ? `: ${text.replace(/\s+/g, ' ').slice(0, 300)}` : ''}`);
+    if (!text.trim()) throw new Error('the audit gateway answered with an empty corpus');
+    if (text.length > PROJECT_DATA_MAX_CHARS) throw new Error(`the corpus is ${text.length} characters, over the board's ${PROJECT_DATA_MAX_CHARS} limit`);
+    await ensureProjectRunDataTable();
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProjectRunData" ("runId","source","label","content")
+      VALUES (${runId}, ${AUDIT_GATEWAY_URL}, ${`Q-data corpus for team ${teamId}`}, ${text})
+      ON CONFLICT ("runId") DO UPDATE SET "source" = EXCLUDED."source", "label" = EXCLUDED."label",
+        "content" = EXCLUDED."content", "createdAt" = CURRENT_TIMESTAMP`;
+    await prisma.$executeRaw`UPDATE "ClaudeProjectRun" SET "status" = 'queued' WHERE "id" = ${runId} AND "status" = 'collecting'`;
+  } catch (error) {
+    const reason = error?.name === 'AbortError'
+      ? `the audit gateway did not answer within ${Math.round(AUDIT_COLLECT_TIMEOUT_MS / 1000)}s`
+      : String(error?.message || error);
+    console.error(`Run ${runId}: collection for team ${teamId} failed:`, reason);
+    await prisma.$executeRaw`
+      UPDATE "ClaudeProjectRun" SET "status" = 'error',
+        "error" = ${`The board could not collect the Q-data corpus for team ${teamId}: ${reason}. Nothing was sent to Claude. Run it again, or check the gateway.`.slice(0, 1000)}
+      WHERE "id" = ${runId} AND "status" = 'collecting'`.catch(() => {});
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// What claim_project_run says about collected data: the whole thing when it is
+// small, otherwise its size and how to page through it.
+async function projectRunDataSummary(runId) {
+  await ensureProjectRunDataTable();
+  const rows = await prisma.$queryRaw`
+    SELECT "label", LENGTH("content") AS "chars",
+           CASE WHEN LENGTH("content") <= ${PROJECT_DATA_PART_CHARS} THEN "content" ELSE NULL END AS "content"
+    FROM "ClaudeProjectRunData" WHERE "runId" = ${runId} LIMIT 1`;
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row) return null;
+  const chars = Number(row.chars) || 0;
+  const parts = Math.max(1, Math.ceil(chars / PROJECT_DATA_PART_CHARS));
+  return {
+    label: row.label || 'Collected data',
+    chars,
+    parts,
+    ...(row.content != null ? { content: row.content } : {}),
+    note: 'The board already ran the collection step server-side and this is its result. Do not call the n8n audit gateway, do not look for AUDIT_API_KEY, and do not ask for a corpus: use this data as the corpus.'
+      + (row.content != null ? '' : ` It is too large to inline: read it with get_project_run_data (runId ${runId}, part 1 to ${parts}) and join the parts in order before you start.`)
+  };
+}
+
+async function readProjectRunData(runId, part) {
+  await ensureProjectRunDataTable();
+  const from = (part - 1) * PROJECT_DATA_PART_CHARS + 1;
+  const rows = await prisma.$queryRaw`
+    SELECT d."label", LENGTH(d."content") AS "chars", SUBSTRING(d."content" FROM ${from} FOR ${PROJECT_DATA_PART_CHARS}) AS "content", r."status"
+    FROM "ClaudeProjectRunData" d JOIN "ClaudeProjectRun" r ON r."id" = d."runId"
+    WHERE d."runId" = ${runId} LIMIT 1`;
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row) throw Object.assign(new Error(`no_data: run ${runId} has no collected data on the board.`), { status: 404 });
+  const chars = Number(row.chars) || 0;
+  const parts = Math.max(1, Math.ceil(chars / PROJECT_DATA_PART_CHARS));
+  if (part > parts) throw Object.assign(new Error(`part_out_of_range: run ${runId} has ${parts} part(s).`), { status: 400 });
+  return { runId, label: row.label, part, parts, chars, content: row.content || '' };
+}
+
+function projectRunRow(row) {
+  return {
+    id: row.id,
+    source: row.source === 'claude' ? 'claude' : 'board',
+    title: row.title || '',
+    inputs: Array.isArray(row.inputs) ? row.inputs : [],
+    output: row.output || '',
+    status: ['collecting', 'queued', 'running', 'error'].includes(row.status) ? row.status : 'done',
+    error: row.error || '',
+    claimedBy: row.claimedBy || '',
+    handoff: row.status === 'queued' ? projectRunHandoffPrompt(row.id) : '',
+    model: row.model || '',
+    ms: row.ms == null ? null : Number(row.ms),
+    usage: { inputTokens: row.inputTokens ?? null, outputTokens: row.outputTokens ?? null },
+    createdBy: row.createdBy || '',
+    createdAt: row.createdAt
+  };
+}
+
+function normalizeProjectInputs(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  return list.slice(0, 20).map((field, index) => {
+    const key = String(field?.key || `field${index + 1}`).trim().replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) || `field${index + 1}`;
+    const type = PROJECT_FIELD_TYPES.has(String(field?.type)) ? String(field.type) : 'text';
+    return {
+      key,
+      label: String(field?.label || key).slice(0, 120),
+      type,
+      required: !!field?.required,
+      placeholder: String(field?.placeholder || '').slice(0, 200),
+      help: String(field?.help || '').slice(0, 300),
+      options: type === 'select' ? (Array.isArray(field?.options) ? field.options.map(o => String(o).slice(0, 80)).slice(0, 30) : []) : []
+    };
+  });
+}
+
+function projectSlugFromName(name) {
+  return (String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+}
+
+async function uniqueProjectSlug(baseSlug, claudeProjectId = '') {
+  const base = projectSlugFromName(baseSlug) || 'project';
+  let slug = base;
+  for (let i = 2; i <= 50; i += 1) {
+    const rows = await prisma.$queryRaw`SELECT "id","claudeProjectId" FROM "ClaudeProject" WHERE "slug" = ${slug} LIMIT 1`;
+    const hit = Array.isArray(rows) ? rows[0] : null;
+    if (!hit || (claudeProjectId && hit.claudeProjectId === claudeProjectId)) return slug;
+    const suffix = `-${i}`;
+    slug = `${base.slice(0, Math.max(1, 60 - suffix.length))}${suffix}`;
+  }
+  return `${base.slice(0, 46)}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function claudeConnectionProvider(userId) {
+  return `claude-compliance:${Number(userId)}`;
+}
+
+// The Compliance Access Key is the one Anthropic credential that cannot live in
+// the environment: every agent pastes their own, so it has to be persisted. It
+// is encrypted at rest rather than written into OAuthToken.accessToken in the
+// clear, so a database dump - a backup, a restored snapshot, a support export -
+// does not hand over a key that can read the organisation's Claude projects.
+//
+// The wrapping key is derived from CLAUDE_CREDENTIAL_SECRET, falling back to
+// SESSION_SECRET so an existing deployment needs no new configuration. Rotating
+// either one makes stored keys unreadable, and the connection reports itself as
+// disconnected until the agent pastes theirs again - which is the correct
+// outcome for a rotated secret, not a failure.
+const CLAUDE_CREDENTIAL_PREFIX = 'encv1:';
+function claudeCredentialKey() {
+  const secret = String(process.env.CLAUDE_CREDENTIAL_SECRET || process.env.SESSION_SECRET || '').trim();
+  if (!secret) return null;
+  return crypto.createHash('sha256').update(`claude-credential:${secret}`).digest();
+}
+function encryptClaudeCredential(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const key = claudeCredentialKey();
+  // No secret configured: storing it unwrapped is what this deployment already
+  // did, and refusing to connect would be a worse trade than a logged warning.
+  if (!key) {
+    console.warn('Claude credential stored unencrypted: set CLAUDE_CREDENTIAL_SECRET or SESSION_SECRET.');
+    return raw;
+  }
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const body = Buffer.concat([cipher.update(raw, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${CLAUDE_CREDENTIAL_PREFIX}${iv.toString('base64url')}.${tag.toString('base64url')}.${body.toString('base64url')}`;
+}
+function decryptClaudeCredential(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  // A key stored before this shipped is still plaintext. Read it, so upgrading
+  // does not silently disconnect everyone; the next write wraps it.
+  if (!raw.startsWith(CLAUDE_CREDENTIAL_PREFIX)) return raw;
+  const key = claudeCredentialKey();
+  if (!key) return '';
+  try {
+    const [ivPart, tagPart, bodyPart] = raw.slice(CLAUDE_CREDENTIAL_PREFIX.length).split('.');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivPart, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
+    return Buffer.concat([decipher.update(Buffer.from(bodyPart, 'base64url')), decipher.final()]).toString('utf8');
+  } catch (_) {
+    // Wrong key, or a tampered row. Either way there is no credential to use.
+    return '';
+  }
+}
+
+function maskSecret(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.length <= 12) return `${raw.slice(0, 2)}...${raw.slice(-2)}`;
+  return `${raw.slice(0, 10)}...${raw.slice(-4)}`;
+}
+
+function normalizeClaudeAuthMode(value, credential) {
+  const mode = String(value || 'auto').trim().toLowerCase();
+  if (['auto', 'api_key', 'bearer'].includes(mode)) return mode;
+  return String(credential || '').trim().startsWith('sk-') ? 'api_key' : 'bearer';
+}
+
+function claudeConnectionStatusFromTokens(tokens) {
+  const meta = (tokens?.metadata && typeof tokens.metadata === 'object' && !Array.isArray(tokens.metadata)) ? tokens.metadata : {};
+  const credential = String(tokens?.accessToken || '').trim();
+  return {
+    connected: !!credential,
+    credentialMasked: maskSecret(credential),
+    authMode: normalizeClaudeAuthMode(meta.authMode, credential),
+    userEmail: meta.userEmail || '',
+    lastSyncAt: meta.lastSyncAt || null,
+    lastProjectCount: Number(meta.lastProjectCount || 0),
+    lastError: meta.lastError || ''
+  };
+}
+
+async function getClaudeConnectionForRequest(req) {
+  if (!req.session?.userId) return null;
+  const tokens = await getStoredOAuthTokens(claudeConnectionProvider(req.session.userId));
+  if (!tokens) return null;
+  return { ...tokens, accessToken: decryptClaudeCredential(tokens.accessToken) };
+}
+
+// Every write of the Claude credential goes through here, so nothing can put a
+// plaintext key back into the table by taking the shorter path.
+async function setClaudeConnection(userId, { credential, metadata }) {
+  await setStoredOAuthTokens(claudeConnectionProvider(userId), {
+    accessToken: encryptClaudeCredential(credential),
+    expiresAt: null,
+    metadata: metadata || undefined
+  });
+}
+
+function claudeComplianceHeaders(credential, mode) {
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    'anthropic-version': '2023-06-01'
+  };
+  if (mode === 'bearer') headers.Authorization = `Bearer ${credential}`;
+  else headers['x-api-key'] = credential;
+  return headers;
+}
+
+async function claudeComplianceRequest(credential, pathname, { searchParams } = {}) {
+  const raw = String(credential || '').trim();
+  if (!raw) throw new Error('claude_not_connected');
+  const url = new URL(pathname, `${CLAUDE_COMPLIANCE_API_BASE}/`);
+  Object.entries(searchParams || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    if (Array.isArray(value)) value.forEach(v => url.searchParams.append(key, String(v)));
+    else url.searchParams.set(key, String(value));
+  });
+
+  const preferred = raw.startsWith('sk-') ? 'api_key' : 'bearer';
+  const modes = preferred === 'api_key' ? ['api_key', 'bearer'] : ['bearer', 'api_key'];
+  let lastStatus = 0;
+  let lastText = '';
+  for (const mode of modes) {
+    const response = await fetch(url, { headers: claudeComplianceHeaders(raw, mode) });
+    const text = await response.text();
+    if (response.ok) return text ? JSON.parse(text) : {};
+    lastStatus = response.status;
+    lastText = text;
+    if (![401, 403].includes(response.status)) break;
+  }
+  const message = (() => {
+    try { return JSON.parse(lastText)?.error?.message || JSON.parse(lastText)?.message; }
+    catch (_) { return ''; }
+  })();
+  const error = new Error(message || `claude_compliance_${lastStatus || 'failed'}`);
+  error.status = lastStatus;
+  error.body = lastText;
+  throw error;
+}
+
+async function fetchClaudeProjects(credential, { userEmail = '' } = {}) {
+  const email = normalizeEmailForDb(userEmail || '');
+  const projects = [];
+  let page = '';
+  while (projects.length < CLAUDE_PROJECT_SYNC_LIMIT) {
+    const list = await claudeComplianceRequest(credential, '/v1/compliance/apps/projects', {
+      searchParams: { limit: Math.min(100, CLAUDE_PROJECT_SYNC_LIMIT - projects.length), page }
+    });
+    const rows = Array.isArray(list?.data) ? list.data : [];
+    for (const row of rows) {
+      if (projects.length >= CLAUDE_PROJECT_SYNC_LIMIT) break;
+      if (row?.deleted_at) continue;
+      const id = String(row?.id || '').trim();
+      if (!id) continue;
+      const detail = await claudeComplianceRequest(credential, `/v1/compliance/apps/projects/${encodeURIComponent(id)}`);
+      if (detail?.deleted_at) continue;
+      const ownerEmail = normalizeEmailForDb(detail?.user?.email_address || row?.user?.email_address || '');
+      if (email && ownerEmail !== email) continue;
+      projects.push({ ...row, ...detail, user: detail?.user || row?.user || null });
+    }
+    page = String(list?.next_page || '');
+    if (!list?.has_more || !page) break;
+  }
+  return projects;
+}
+
+function defaultInputsForSyncedClaudeProject(project) {
+  return [{
+    key: 'prompt',
+    label: 'Prompt',
+    type: 'textarea',
+    required: true,
+    placeholder: `Run ${String(project?.name || 'this project')} for...`
+  }];
+}
+
+async function upsertSyncedClaudeProject(project, req) {
+  await ensureProjectTable();
+  const claudeProjectId = String(project?.id || '').trim();
+  if (!claudeProjectId) return null;
+  const name = String(project?.name || 'Claude project').trim().slice(0, 200) || 'Claude project';
+  const description = String(project?.description || '').slice(0, 600);
+  const ownerEmail = normalizeEmailForDb(project?.user?.email_address || '');
+  const owner = ownerEmail || String(project?.user?.id || '').slice(0, 80);
+  const scope = project?.is_private ? 'mine' : 'org';
+  const instructions = String(project?.instructions || '');
+  const inputs = normalizeProjectInputs(defaultInputsForSyncedClaudeProject(project));
+  const model = String(project?.model || '').trim() || null;
+  const accent = project?.is_private ? 'rose' : 'indigo';
+  const sourceDeletedAt = project?.deleted_at ? new Date(project.deleted_at) : null;
+
+  const existingRows = await prisma.$queryRaw`SELECT "id","slug" FROM "ClaudeProject" WHERE "claudeProjectId" = ${claudeProjectId} LIMIT 1`;
+  const existing = Array.isArray(existingRows) ? existingRows[0] : null;
+  const slug = existing?.slug || await uniqueProjectSlug(name, claudeProjectId);
+  if (existing?.id) {
+    await prisma.$executeRaw`
+      UPDATE "ClaudeProject"
+      SET "name" = ${name}, "description" = ${description}, "scope" = ${scope}, "owner" = ${owner},
+          "instructions" = ${instructions}, "inputs" = ${JSON.stringify(inputs)}::jsonb, "model" = ${model},
+          "accent" = ${accent}, "source" = 'claude', "sourceUserId" = ${Number(req.session.userId)},
+          "sourceUserEmail" = ${ownerEmail || null}, "sourceDeletedAt" = ${sourceDeletedAt},
+          "syncedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
+      WHERE "id" = ${Number(existing.id)}
+    `;
+    return existing.id;
+  }
+
+  const inserted = await prisma.$queryRaw`
+    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","model","accent","pinned","createdBy","updatedAt","claudeProjectId","source","sourceUserId","sourceUserEmail","sourceDeletedAt","syncedAt")
+    VALUES (${slug}, ${name}, ${description}, ${scope}, ${owner}, ${instructions}, ${JSON.stringify(inputs)}::jsonb,
+            ${model}, ${accent}, ${false}, ${'claude:' + (req.session.username || '')}, CURRENT_TIMESTAMP,
+            ${claudeProjectId}, 'claude', ${Number(req.session.userId)}, ${ownerEmail || null}, ${sourceDeletedAt}, CURRENT_TIMESTAMP)
+    RETURNING "id"
+  `;
+  return Array.isArray(inserted) ? inserted[0]?.id : null;
+}
+
+async function syncClaudeProjectsForRequest(req) {
+  const tokens = await getClaudeConnectionForRequest(req);
+  const credential = String(tokens?.accessToken || '').trim();
+  if (!credential) throw Object.assign(new Error('claude_not_connected'), { status: 409 });
+  const meta = (tokens?.metadata && typeof tokens.metadata === 'object' && !Array.isArray(tokens.metadata)) ? tokens.metadata : {};
+  const projects = await fetchClaudeProjects(credential, { userEmail: meta.userEmail || '' });
+  for (const project of projects) await upsertSyncedClaudeProject(project, req);
+  const nextMeta = { ...meta, lastSyncAt: new Date().toISOString(), lastProjectCount: projects.length, lastError: '' };
+  await setClaudeConnection(req.session.userId, { credential, metadata: nextMeta });
+  return { count: projects.length, lastSyncAt: nextMeta.lastSyncAt };
+}
+
+function projectRow(row, { includeInstructions = false } = {}) {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    description: row.description || '',
+    scope: row.scope || 'org',
+    owner: row.owner || '',
+    inputs: Array.isArray(row.inputs) ? row.inputs : [],
+    model: row.model || PROJECT_MODEL,
+    accent: row.accent || 'slate',
+    pinned: !!row.pinned,
+    source: row.source || 'manual',
+    // Whether the project came from Claude at all - synced over the Compliance
+    // API, or pushed in by register_project, which writes createdBy 'mcp:'.
+    // The panel shows only these.
+    fromClaude: row.source === 'claude' || String(row.createdBy || '').startsWith('mcp:'),
+    // Added on the board by name and link, waiting for Claude to push the rest.
+    placeholder: row.source === 'placeholder',
+    sourceUserEmail: row.sourceUserEmail || '',
+    claudeProjectId: row.claudeProjectId || '',
+    syncedAt: row.syncedAt || null,
+    runCount: Number(row.runCount || 0),
+    lastRunAt: row.lastRunAt || null,
+    // Whether the project can actually be run yet. An empty instruction set is
+    // the normal state for a freshly seeded project, not an error.
+    ready: !!String(row.instructions || '').trim(),
+    updatedAt: row.updatedAt,
+    ...(includeInstructions ? { instructions: row.instructions || '' } : {})
+  };
+}
+
+app.get('/api/projects', requireAuth, async (req, res) => {
+  try {
+    await ensureProjectTable();
+    await ensureProjectRunTable();
+    // The card shows whether a project has ever produced anything, so the
+    // counts are joined here rather than fetched per card on open.
+    const rows = await prisma.$queryRaw`
+      SELECT p.*, COALESCE(r."n", 0)::int AS "runCount", r."last" AS "lastRunAt"
+      FROM "ClaudeProject" p
+      LEFT JOIN (
+        SELECT "projectId", count(*)::int AS "n", max("createdAt") AS "last"
+        FROM "ClaudeProjectRun" WHERE "status" = 'done' GROUP BY "projectId"
+      ) r ON r."projectId" = p."id"
+      ORDER BY p."pinned" DESC, p."updatedAt" DESC`;
+    const isAdmin = isAdminRole(req.session.role);
+    const list = (Array.isArray(rows) ? rows : []).map(r => projectRow(r, { includeInstructions: isAdmin }));
+    const claudeTokens = await getClaudeConnectionForRequest(req);
+    return res.json({
+      ok: true,
+      canEdit: isAdmin,
+      model: PROJECT_MODEL,
+      claude: claudeConnectionStatusFromTokens(claudeTokens),
+      rows: list
+    });
+  } catch (error) {
+    console.error('Project list failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_list_failed' });
+  }
+});
+
+app.get('/api/claude/connection', requireAuth, async (req, res) => {
+  try {
+    const tokens = await getClaudeConnectionForRequest(req);
+    const user = await prisma.user.findUnique({ where: { id: Number(req.session.userId) }, select: { email: true } }).catch(() => null);
+    return res.json({ ok: true, suggestedEmail: user?.email || '', claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    console.error('Claude connection status failed:', error?.message || error);
+    return res.status(500).json({ error: 'claude_connection_status_failed' });
+  }
+});
+
+app.post('/api/claude/connection', requireAuth, projectRunLimiter, async (req, res) => {
+  try {
+    const credential = String(req.body?.credential || '').trim();
+    if (!credential) return res.status(400).json({ error: 'credential_required', message: 'Paste a Claude Compliance Access Key first.' });
+    const userEmail = normalizeEmailForDb(req.body?.userEmail || '');
+    const authMode = normalizeClaudeAuthMode(req.body?.authMode, credential);
+
+    await setClaudeConnection(req.session.userId, {
+      credential,
+      metadata: { userEmail, authMode, connectedAt: new Date().toISOString(), lastSyncAt: null, lastProjectCount: 0, lastError: '' }
+    });
+
+    const sync = await syncClaudeProjectsForRequest(req);
+    const tokens = await getClaudeConnectionForRequest(req);
+    return res.json({ ok: true, sync, claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Claude connection failed:', detail);
+    const existing = await getClaudeConnectionForRequest(req).catch(() => null);
+    const meta = (existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)) ? existing.metadata : {};
+    if (existing?.accessToken) {
+      await setClaudeConnection(req.session.userId, {
+        credential: existing.accessToken,
+        metadata: { ...meta, lastError: detail.slice(0, 300) }
+      }).catch(() => null);
+    }
+    const status = Number(error?.status) || 502;
+    return res.status(status === 401 || status === 403 ? status : 502).json({
+      error: status === 403 ? 'claude_missing_scope' : (status === 401 ? 'claude_auth_failed' : 'claude_connection_failed'),
+      message: detail.slice(0, 300)
+    });
+  }
+});
+
+app.post('/api/claude/sync-projects', requireAuth, projectRunLimiter, async (req, res) => {
+  try {
+    const sync = await syncClaudeProjectsForRequest(req);
+    const tokens = await getClaudeConnectionForRequest(req);
+    return res.json({ ok: true, sync, claude: claudeConnectionStatusFromTokens(tokens) });
+  } catch (error) {
+    const detail = String(error?.message || error);
+    console.error('Claude project sync failed:', detail);
+    const existing = await getClaudeConnectionForRequest(req).catch(() => null);
+    const meta = (existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)) ? existing.metadata : {};
+    if (existing?.accessToken) {
+      await setClaudeConnection(req.session.userId, {
+        credential: existing.accessToken,
+        metadata: { ...meta, lastError: detail.slice(0, 300) }
+      }).catch(() => null);
+    }
+    const status = Number(error?.status) || 502;
+    return res.status(status === 409 ? 409 : (status === 401 || status === 403 ? status : 502)).json({
+      error: status === 409 ? 'claude_not_connected' : (status === 403 ? 'claude_missing_scope' : (status === 401 ? 'claude_auth_failed' : 'claude_sync_failed')),
+      message: detail.slice(0, 300)
+    });
+  }
+});
+
+app.delete('/api/claude/connection', requireAuth, async (req, res) => {
+  try {
+    await prisma.oAuthToken.delete({ where: { provider: claudeConnectionProvider(req.session.userId) } }).catch(() => null);
+    return res.json({ ok: true, claude: claudeConnectionStatusFromTokens(null) });
+  } catch (error) {
+    console.error('Claude disconnect failed:', error?.message || error);
+    return res.status(500).json({ error: 'claude_disconnect_failed' });
+  }
+});
+
+app.post('/api/projects', requireAdmin, async (req, res) => {
+  try {
+    await ensureProjectTable();
+    const name = String(req.body?.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name_required' });
+    const slug = (String(req.body?.slug || name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+    const scope = PROJECT_SCOPES.has(String(req.body?.scope)) ? String(req.body.scope) : 'org';
+    const inputs = normalizeProjectInputs(req.body?.inputs);
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","model","accent","pinned","createdBy","updatedAt")
+      VALUES (${slug}, ${name}, ${String(req.body?.description || '').slice(0, 600)}, ${scope}, ${String(req.body?.owner || '').slice(0, 80)},
+              ${String(req.body?.instructions || '')}, ${JSON.stringify(inputs)}::jsonb, ${String(req.body?.model || '').trim() || null},
+              ${String(req.body?.accent || 'slate')}, ${!!req.body?.pinned}, ${String(req.session.username || '')}, CURRENT_TIMESTAMP)
+      ON CONFLICT ("slug") DO UPDATE SET
+        "name" = EXCLUDED."name", "description" = EXCLUDED."description", "scope" = EXCLUDED."scope",
+        "owner" = EXCLUDED."owner", "instructions" = EXCLUDED."instructions", "inputs" = EXCLUDED."inputs",
+        "model" = EXCLUDED."model", "accent" = EXCLUDED."accent", "pinned" = EXCLUDED."pinned",
+        "updatedAt" = CURRENT_TIMESTAMP
+    `;
+    return res.json({ ok: true, slug });
+  } catch (error) {
+    console.error('Project save failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_save_failed' });
+  }
+});
+
+/* A project the board knows of but does not have yet.
+
+   Nothing free can list a person's claude.ai projects, so the board cannot
+   discover them by itself. An admin adds one by name and its claude.ai link;
+   the card shows grayed out with a Push from Claude button, which opens that
+   project and hands Claude the line that makes it register itself under this
+   exact slug. register_project then fills the same row in - instructions,
+   inputs, description - and the card comes alive. */
+const CLAUDE_PROJECT_URL_ID = /claude\.ai\/project\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+app.post('/api/projects/placeholder', requireAdmin, async (req, res) => {
+  try {
+    await ensureProjectTable();
+    const name = String(req.body?.name || '').trim().slice(0, 120);
+    if (!name) return res.status(400).json({ error: 'name_required', message: 'Give the project the name it has in Claude.' });
+    const link = String(req.body?.url || '').trim();
+    const match = link.match(CLAUDE_PROJECT_URL_ID);
+    if (link && !match) return res.status(400).json({ error: 'invalid_url', message: 'That is not a claude.ai project link - it should look like https://claude.ai/project/…' });
+    const claudeProjectId = match ? match[1].toLowerCase() : null;
+    if (claudeProjectId) {
+      const taken = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" WHERE "claudeProjectId" = ${claudeProjectId} LIMIT 1`;
+      if (Array.isArray(taken) && taken[0]) return res.status(409).json({ error: 'already_added', message: `That project is already on the board as "${taken[0].name}".` });
+    }
+    const existing = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" WHERE "slug" = ${projectSlugFromName(name)} OR lower("name") = ${name.toLowerCase()} LIMIT 1`;
+    if (Array.isArray(existing) && existing[0]) return res.status(409).json({ error: 'already_added', message: `"${existing[0].name}" is already on the board.` });
+    const slug = await uniqueProjectSlug(name);
+    await prisma.$executeRaw`
+      INSERT INTO "ClaudeProject" ("slug","name","scope","instructions","inputs","accent","createdBy","updatedAt","source","claudeProjectId")
+      VALUES (${slug}, ${name}, 'org', '', '[]'::jsonb, 'slate', ${String(req.session.username || '')}, CURRENT_TIMESTAMP, 'placeholder', ${claudeProjectId})
+    `;
+    return res.json({ ok: true, slug });
+  } catch (error) {
+    console.error('Project placeholder failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_save_failed' });
+  }
+});
+
+app.delete('/api/projects/:id', requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+    await prisma.$executeRaw`DELETE FROM "ClaudeProject" WHERE "id" = ${id}`;
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Project delete failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_delete_failed' });
+  }
+});
+
+/* Running one.
+
+   The project's instructions become the system prompt and the form values
+   become the message, so the model gets the same brief it would have been given
+   in Claude - just assembled by the board instead of typed into a chat.
+
+   Streamed server-side and awaited whole: these produce long answers, and a
+   non-streaming request of this size is what trips an HTTP timeout. The
+   response is returned complete rather than forwarded to the browser as it
+   arrives - a progress stream would be nicer and is a clean follow-up, but it
+   is not what makes the feature work. */
+// A run and a follow-up are the same request with a different message list, so
+// they share everything from the model down: the project's instructions as a
+// cached system prompt, adaptive thinking, and the refusal check that has to
+// happen before the content is read.
+const PROJECT_CHAT_MAX_TURNS = 40;
+const PROJECT_CHAT_MAX_CHARS = 20_000;
+
+function projectBriefFromValues(project, values) {
+  const fields = Array.isArray(project.inputs) ? project.inputs : [];
+  const supplied = (values && typeof values === 'object') ? values : {};
+  const missing = fields.filter(f => f.required && !String(supplied[f.key] ?? '').trim()).map(f => f.label);
+  const brief = fields
+    .map(f => ({ label: f.label, value: String(supplied[f.key] ?? '').trim() }))
+    .filter(entry => entry.value)
+    .map(entry => `${entry.label}: ${entry.value}`)
+    .join('\n');
+  return { brief, missing };
+}
+
+// The transcript arrives from the browser rather than a table: a project thread
+// is a working session, not a record the board owes anyone, and keeping it out
+// of Postgres means no new migration and nothing to prune. It is still checked
+// like any other untrusted input - roles, shape, length, and a ceiling on how
+// much history one request may replay.
+function normalizeProjectTurns(raw) {
+  if (raw === undefined || raw === null) return { turns: [] };
+  if (!Array.isArray(raw)) return { error: 'Conversation history must be a list of turns.' };
+  if (raw.length > PROJECT_CHAT_MAX_TURNS) {
+    return { error: `This thread is too long to continue (${raw.length} turns, limit ${PROJECT_CHAT_MAX_TURNS}). Run the project again to start a fresh one.` };
+  }
+  const turns = [];
+  for (const entry of raw) {
+    const role = String(entry?.role || '').trim();
+    const content = String(entry?.content || '').trim();
+    if (role !== 'user' && role !== 'assistant') return { error: 'Every turn must be from the user or the assistant.' };
+    if (!content) return { error: 'A turn cannot be empty.' };
+    if (content.length > PROJECT_CHAT_MAX_CHARS) return { error: 'One of the turns is too long to send.' };
+    if (turns.length && turns[turns.length - 1].role === role) return { error: 'Turns have to alternate between the user and the assistant.' };
+    turns.push({ role, content });
+  }
+  if (turns.length) {
+    if (turns[0].role !== 'assistant') return { error: "A follow-up has to start from the project's first answer." };
+    if (turns[turns.length - 1].role !== 'user') return { error: 'The last turn has to be the question being asked.' };
+  }
+  return { turns };
+}
+
+async function loadRunnableProject(id) {
+  const rows = await prisma.$queryRaw`SELECT * FROM "ClaudeProject" WHERE "id" = ${id} LIMIT 1`;
+  const project = Array.isArray(rows) ? rows[0] : null;
+  if (!project) return { status: 404, error: 'project_not_found' };
+  if (!String(project.instructions || '').trim()) {
+    return {
+      status: 409,
+      error: 'project_not_ready',
+      message: `"${project.name}" has no instructions yet. Claude does not expose a project's instructions through any API, so an admin has to paste them in once before it can run here.`
+    };
+  }
+  return { project };
+}
+
+// Shared by /run and /chat: the only difference between them is whether any
+// turns follow the form brief.
+//
+// Neither calls a model. They queue the job - brief, follow-up turns and all -
+// and return its id; a Claude with the connector claims and answers it, and
+// the panel polls the row until it lands. No API key is involved anywhere.
+async function handleProjectRun(req, res, { withHistory }) {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+
+    const loaded = await loadRunnableProject(id);
+    if (!loaded.project) return res.status(loaded.status).json({ error: loaded.error, ...(loaded.message ? { message: loaded.message } : {}) });
+    const project = loaded.project;
+
+    const { brief, missing } = projectBriefFromValues(project, req.body?.values);
+    if (missing.length) return res.status(400).json({ error: 'missing_inputs', message: `Fill in: ${missing.join(', ')}.` });
+
+    const history = withHistory ? normalizeProjectTurns(req.body?.turns) : { turns: [] };
+    if (history.error) return res.status(400).json({ error: 'invalid_history', message: history.error });
+    if (withHistory && !history.turns.length) return res.status(400).json({ error: 'invalid_history', message: 'There is no question to answer yet.' });
+
+    const collection = projectCollectionFor(project, req.body?.values);
+    if (collection && !collection.teamId) return res.status(400).json({ error: 'missing_inputs', message: 'Team ID needs the numeric team id, e.g. 2876.' });
+
+    const runId = await queueProjectRunRow({
+      status: collection ? 'collecting' : 'queued',
+      projectId: project.id,
+      title: withHistory ? 'Follow-up' : 'Run',
+      inputs: projectRunInputPairs(project, req.body?.values),
+      request: { brief: brief || '', turns: history.turns },
+      createdBy: req.session?.username || ''
+    });
+    if (!runId) return res.status(500).json({ error: 'project_run_failed', message: 'Could not queue the run.' });
+    if (collection) {
+      // Not awaited: the panel polls the run, which moves to 'queued' (or
+      // 'error') when the gateway answers.
+      collectAuditCorpus(runId, collection.teamId);
+      return res.status(202).json({ ok: true, runId, status: 'collecting', handoff: '' });
+    }
+    const runner = await projectRunnerFor(req.session?.username).catch(() => 'none');
+    return res.status(202).json({ ok: true, runId, status: 'queued', handoff: projectRunHandoffPrompt(runId), runner });
+  } catch (error) {
+    console.error('Project run could not be queued:', String(error?.message || error));
+    return res.status(500).json({ error: 'project_run_failed', message: 'Could not queue the run.' });
+  }
+}
+
+app.get('/api/projects/:id/runs', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    await ensureProjectRunTable();
+    await expireStaleProjectRuns();
+    const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), PROJECT_RUN_KEEP);
+    const rows = await prisma.$queryRaw`
+      SELECT * FROM "ClaudeProjectRun" WHERE "projectId" = ${id}
+      ORDER BY "createdAt" DESC, "id" DESC LIMIT ${limit}`;
+    return res.json({ ok: true, rows: (Array.isArray(rows) ? rows : []).map(projectRunRow) });
+  } catch (error) {
+    console.error('Project run history failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_runs_failed' });
+  }
+});
+
+// What the panel polls while a run is in progress.
+app.get('/api/projects/:id/runs/:runId', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  const runId = Number(req.params.runId);
+  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(runId) || runId <= 0) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    await ensureProjectRunTable();
+    await expireStaleProjectRuns();
+    const rows = await prisma.$queryRaw`
+      SELECT * FROM "ClaudeProjectRun" WHERE "id" = ${runId} AND "projectId" = ${id} LIMIT 1`;
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return res.status(404).json({ error: 'run_not_found' });
+    const run = projectRunRow(row);
+    if (run.status === 'queued') run.runner = await projectRunnerFor(row.createdBy).catch(() => 'none');
+    return res.json({ ok: true, run });
+  } catch (error) {
+    console.error('Project run lookup failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_run_lookup_failed' });
+  }
+});
+
+app.post('/api/projects/:id/run', requireAuth, projectRunLimiter, async (req, res) => {
+  return handleProjectRun(req, res, { withHistory: false });
+});
+
+// Follow-ups on a project that has already been run. The project's instructions
+// stay the system prompt for every turn, so the thread keeps behaving like that
+// project rather than drifting into a general chat.
+app.post('/api/projects/:id/chat', requireAuth, projectRunLimiter, async (req, res) => {
+  return handleProjectRun(req, res, { withHistory: true });
+});
+
+app.get('/api/insights/languages', requireAuth, async (req, res) => {
+  try {
+    const rows = await prisma.ticketTranslation.findMany({
+      where: { sourceLang: { not: null } },
+      select: { ticketExternalId: true, sourceLang: true, sourceLangName: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+      take: 5000
+    });
+    const byTicket = {};
+    const counts = {};
+    for (const row of rows) {
+      if (byTicket[row.ticketExternalId]) continue; // newest wins
+      const code = String(row.sourceLang || '').toLowerCase();
+      if (!code) continue;
+      byTicket[row.ticketExternalId] = { lang: code, name: row.sourceLangName || code.toUpperCase() };
+      counts[code] = (counts[code] || 0) + 1;
+    }
+    return res.json({ ok: true, generatedAt: new Date().toISOString(), languages: byTicket, counts });
+  } catch (error) {
+    console.error('Language insight failed:', error);
+    return res.status(500).json({ error: 'language_insight_failed' });
+  }
+});
+
+app.get('/api/tickets/:id/audit', requireSupportOrAdmin, async (req, res) => {
   const ticketId = Number(req.params.id);
 
   if (!Number.isInteger(ticketId) || ticketId <= 0) {
@@ -4261,6 +9575,14 @@ app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
     });
 
     if (!ticket) {
+      return res.status(404).json({ error: 'ticket_not_found' });
+    }
+
+    // A support agent reads the history of the tickets they hold. Answered as
+    // 404 rather than 403 so the response cannot be used to confirm that a
+    // ticket somebody else holds exists.
+    const ticketWhere = auditTicketWhereForActor(req);
+    if (ticketWhere && String(ticket.assignedAgent || '').toUpperCase() !== ticketWhere.assignedAgent) {
       return res.status(404).json({ error: 'ticket_not_found' });
     }
 
@@ -4292,15 +9614,40 @@ app.get('/api/tickets/:id/audit', requireAdmin, async (req, res) => {
   }
 });
 
-// Assignment history: who moved which ticket from whom to whom, and whether a
-// change undid the one before it. requireAuth rather than requireAdmin - the
-// board already shows every assignee to every agent, and the whole point is
-// that the team can see when a ticket bounces.
+/* Assignment history: who moved which ticket from whom to whom, and whether a
+   change undid the one before it.
+
+   requireAuth rather than requireAdmin, but each team sees a different slice:
+   admin reads the whole log, and everyone else reads only their own
+   assignments. "Their own" means a row that names them - a ticket handed to
+   them, taken off them, or moved by them - which is the same question from
+   either side of a handover, and is why the filter looks at three fields
+   rather than one.
+
+   Note this is applied in SQL, so the limit counts rows the caller may
+   actually see; filtering afterwards would have let one busy day of other
+   people's handovers push an agent's own history out of the window. */
 app.get('/api/audit/assignments', requireAuth, async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit || 300), 1), 1000);
+  const team = actorTeam(req);
+  const me = actorAgentCode(req);
+  /* Four clauses, on plain columns. `metadata.actor` - who the board says made
+     the change - is deliberately not among them: a JSON-path filter for one
+     more clause, when the four below already cover every way a row can be
+     someone's own. A support agent can now only assign to themselves, so they
+     are the newValue of anything they did; a CS agent only reassigns tickets
+     they own, so ticket.csAgent has it. */
+  const scopeWhere = team === 'admin' ? {} : {
+    OR: [
+      { oldValue: me },
+      { newValue: me },
+      { ticket: { assignedAgent: me } },
+      { ticket: { csAgent: me } }
+    ]
+  };
   try {
     const events = await prisma.ticketEvent.findMany({
-      where: { eventType: 'ticket_assignedAgent_changed' },
+      where: { AND: [{ eventType: 'ticket_assignedAgent_changed' }, scopeWhere] },
       take: limit,
       include: {
         ticket: { select: { id: true, externalId: true, subject: true, displayNumber: true } },
@@ -4355,11 +9702,15 @@ app.get('/api/audit/assignments', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/audit/tickets', requireAdmin, async (req, res) => {
+app.get('/api/audit/tickets', requireSupportOrAdmin, async (req, res) => {
   const limit = Math.min(Number(req.query.limit || 100), 500);
+  // Narrowed in SQL for a support agent, so the limit counts rows they may
+  // see rather than being spent on tickets that get filtered out.
+  const ticketWhere = auditTicketWhereForActor(req);
 
   try {
     const events = await prisma.ticketEvent.findMany({
+      where: ticketWhere ? { ticket: ticketWhere } : {},
       take: limit,
       include: {
         ticket: true,
@@ -4449,7 +9800,7 @@ function clipAuditValue(value) {
 
 // The grouping itself, kept out of the route handler so it can be exercised
 // without a database.
-function buildAgentActivity(events, { includeSync = false } = {}) {
+function buildAgentActivity(events, { includeSync = false, wholeBoard = true } = {}) {
   const kept = events.filter(e => includeSync
     ? (AGENT_DRIVEN_EVENTS.has(e.eventType) || SYNC_DRIVEN_EVENTS.has(e.eventType))
     : AGENT_DRIVEN_EVENTS.has(e.eventType));
@@ -4522,7 +9873,13 @@ function buildAgentActivity(events, { includeSync = false } = {}) {
   // Agents on the roster with nothing in the window are still listed, at zero.
   // "No updates from this agent in 30 days" is a finding; an absent row reads
   // as an oversight.
+  //
+  // Only on the whole-board read, though. A support agent's page is already
+  // narrowed to their own tickets, so padding it out with the rest of the
+  // roster at zero would not be a finding about those agents - it would just
+  // be a list of colleagues this view is not allowed to report on.
   const withRoster = (kind, rows) => {
+    if (!wholeBoard) return rows;
     const roster = kind === 'support' ? SUPPORT_AGENT_CODES : CS_AGENT_CODES;
     const present = new Set(rows.map(r => r.code));
     const missing = [...roster].filter(c => !present.has(c))
@@ -4544,14 +9901,18 @@ function buildAgentActivity(events, { includeSync = false } = {}) {
 
 const AGENT_ACTIVITY_EVENT_CAP = 5000;
 
-app.get('/api/audit/agent-activity', requireAdmin, async (req, res) => {
+app.get('/api/audit/agent-activity', requireSupportOrAdmin, async (req, res) => {
   const days = Math.min(Math.max(Number(req.query.days || 30), 1), 365);
   const includeSync = String(req.query.includeSync || '') === '1';
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  // Null for admin, who reads the whole board; a support agent is narrowed to
+  // the tickets they hold, in SQL, so the event cap is spent on rows they may
+  // actually see.
+  const ticketWhere = auditTicketWhereForActor(req);
 
   try {
     const events = await prisma.ticketEvent.findMany({
-      where: { createdAt: { gte: since } },
+      where: { createdAt: { gte: since }, ...(ticketWhere ? { ticket: ticketWhere } : {}) },
       take: AGENT_ACTIVITY_EVENT_CAP,
       include: {
         ticket: {
@@ -4568,7 +9929,8 @@ app.get('/api/audit/agent-activity', requireAdmin, async (req, res) => {
       // True when the cap bit, so the page can say the window is partial rather
       // than quietly under-reporting it.
       truncated: events.length >= AGENT_ACTIVITY_EVENT_CAP,
-      ...buildAgentActivity(events, { includeSync })
+      scope: ticketWhere ? 'own_tickets' : 'all',
+      ...buildAgentActivity(events, { includeSync, wholeBoard: !ticketWhere })
     });
   } catch (error) {
     console.error('Read agent activity audit failed:', error);
@@ -4576,7 +9938,7 @@ app.get('/api/audit/agent-activity', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/audit/tickets', requireAdmin, (req, res) => {
+app.get('/audit/tickets', requireSupportOrAdmin, (req, res) => {
   res.type('html').sendFile(path.join(VIEWS_DIR, 'audit-tickets.html'));
 });
 
@@ -4700,16 +10062,62 @@ async function mcpUpdateTicket(apiUser, id, fields) {
     const status = String(fields.status || '').trim();
     if (!MCP_WRITABLE_STATUSES.has(status)) throw Object.assign(new Error('invalid_status'), { status: 400 });
     data.status = status;
-    data.resolvedAt = status === 'Resolved' ? new Date() : null;
+    // Only the move INTO Resolved stamps the clock. Re-stamping it on every
+    // write that happens to say "Resolved" moved the resolution date forward,
+    // which pulled long-closed tickets back into the KPI range and reported
+    // their resolve time as minutes.
+    data.resolvedAt = status === 'Resolved'
+      ? (existingTicket.status === 'Resolved' ? (existingTicket.resolvedAt || new Date()) : new Date())
+      : null;
     if (status !== 'Resolved') data.resolvedTeamsNotifiedAt = null;
   }
   if (fields?.assignedAgent !== undefined) data.assignedAgent = fields.assignedAgent ? String(fields.assignedAgent).trim().toUpperCase() : null;
+  // Nobody is handed a ticket while they are off - the same rule the board's
+  // assign menu and distribution follow.
+  if (data.assignedAgent && data.assignedAgent !== existingTicket.assignedAgent && isAgentOnLeave(data.assignedAgent)) {
+    throw Object.assign(new Error(`agent_on_leave: ${data.assignedAgent} is off${agentLeave[data.assignedAgent]?.until ? ` until ${new Date(agentLeave[data.assignedAgent].until).toISOString().slice(0, 10)}` : ''}`), { status: 409 });
+  }
   if (fields?.csAgent !== undefined) data.csAgent = fields.csAgent ? String(fields.csAgent).trim().toUpperCase() : null;
   if (fields?.priority !== undefined) data.priority = String(fields.priority || 'Normal').trim();
   if (!Object.keys(data).length) throw Object.assign(new Error('no_fields'), { status: 400 });
 
   const updated = await prisma.ticket.update({ where: { id }, data });
   await auditTicketChanges({ ticketId: id, userId: apiUser.id, before: existingTicket, after: updated, fields: ['status', 'assignedAgent', 'csAgent', 'priority'] });
+
+  // Into the board state and out to every open board now, the way a board
+  // save is - otherwise an update made here sat in the database only, and the
+  // board (and its "My resolved") disagreed with the KPIs until someone
+  // reloaded. Stamped now, so the board's clock-based merges take it.
+  if (updated.externalId) {
+    const now = Date.now();
+    const key = String(updated.externalId);
+    const entries = [];
+    if (data.status !== undefined && updated.status !== existingTicket.status) {
+      entries.push({ field: 'ticketState', id: key, value: normalizeDbStatusForBoard(updated.status) });
+      entries.push({ field: 'ticketStageTouchedAt', id: key, value: now });
+    }
+    if (data.assignedAgent !== undefined && updated.assignedAgent !== existingTicket.assignedAgent) {
+      entries.push({ field: 'ticketAssignee', id: key, value: updated.assignedAgent || null });
+      entries.push({ field: 'ticketAssigneeTouchedAt', id: key, value: now });
+      // Handed from one agent to another: a full SLA for the new owner, the
+      // same rule as setTicketAssignee on the board.
+      if (existingTicket.assignedAgent && updated.assignedAgent && normalizeDbStatusForBoard(updated.status) !== 'res') {
+        entries.push({ field: 'ticketAssigneeBy', id: key, value: { by: null, source: 'api/update_ticket', at: now, from: existingTicket.assignedAgent } });
+        entries.push({ field: 'ticketSlaResetAt', id: key, value: now });
+        await prisma.ticket.update({ where: { id }, data: { slaResetAt: new Date(now) } })
+          .catch(error => console.error('Reassignment SLA reset write failed:', error?.message || error));
+      }
+    }
+    if (data.csAgent !== undefined && updated.csAgent !== existingTicket.csAgent) {
+      // A decision like any other: stamped on the CS clock and flagged, so
+      // open boards take it and a stale tab cannot put the old owner back.
+      entries.push({ field: 'ticketCSOwner', id: key, value: updated.csAgent || null });
+      entries.push({ field: 'manualCSOverride', id: key, value: true });
+      entries.push({ field: 'ticketCSTouchedAt', id: key, value: now });
+    }
+    if (data.priority !== undefined && updated.priority !== existingTicket.priority) entries.push({ field: 'ticketPriority', id: key, value: updated.priority });
+    if (entries.length) writeServerFieldsIntoState(entries);
+  }
 
   if (data.status === 'Resolved' && existingTicket.status !== 'Resolved') {
     const alert = await claimResolvedTeamsAlert({
@@ -4731,6 +10139,543 @@ async function mcpUpdateTicket(apiUser, id, fields) {
 function mcpHttpErrorStatus(error) {
   return Number.isInteger(error?.status) ? error.status : 500;
 }
+
+
+
+// --- Assistant-facing tools ------------------------------------------------
+//
+// The four below are what turn the connector from a reader into something that
+// does triage work. Every one of them stops short of the irreversible step: a
+// proposed reply is a comment until a person sends it, a duplicate is a
+// suggestion until a person marks it. Nothing here emails a client.
+
+// The board renders a comment carrying this tag as a proposed reply with an
+// "Use this" button, rather than as an ordinary internal note.
+const PROPOSED_REPLY_TAG = 'PROPOSED-REPLY';
+
+async function mcpProposeReply(apiUser, id, rawText) {
+  const text = String(rawText || '').trim();
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  if (!text) throw Object.assign(new Error('text_required'), { status: 400 });
+  if (text.length > 8000) throw Object.assign(new Error('text_too_long'), { status: 400 });
+  const ticket = await prisma.ticket.findUnique({ where: { id }, select: { id: true, displayNumber: true, subject: true, senderEmail: true } });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+
+  const comment = await prisma.ticketComment.create({
+    data: { ticketId: id, userId: apiUser.id, comment: text, isInternal: true, tags: [PROPOSED_REPLY_TAG] }
+  });
+  await createTicketAuditEvent({
+    ticketId: id, userId: apiUser.id, eventType: 'reply_proposed',
+    newValue: text.slice(0, 200), metadata: { via: 'mcp' }
+  });
+  return {
+    ok: true,
+    ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+    commentId: comment.id,
+    // Said plainly because it is the whole point of the tool: this did not
+    // reach the client and will not until an agent sends it.
+    status: 'The draft is on the ticket as a proposed reply. Nothing was sent to the client - an agent has to open the ticket and send it.'
+  };
+}
+
+const TEMPLATE_PLACEHOLDER_RE = /\[([^\][\n]{1,60})\]/g;
+function templatePlaceholders(body) {
+  const found = [];
+  const seen = new Set();
+  for (const match of String(body || '').matchAll(TEMPLATE_PLACEHOLDER_RE)) {
+    const label = match[1].trim();
+    const key = label.toLowerCase();
+    if (!label || seen.has(key)) continue;
+    seen.add(key);
+    found.push(label);
+  }
+  return found;
+}
+// What the ticket can answer on the agent's behalf. Only fields the ticket
+// actually holds - a guessed value in a client-facing template is worse than
+// a blank one an agent has to fill.
+function prefillFromTicket(label, ticket) {
+  const key = String(label || '').toLowerCase();
+  if (/(client|contact|customer|sender)?\s*name/.test(key) && !/company/.test(key)) return ticket.senderName || null;
+  if (/company|organisation|organization|account/.test(key)) return ticket.companyName || null;
+  if (/e-?mail|address/.test(key)) return ticket.senderEmail || null;
+  if (/ticket|reference|ref\b|number/.test(key)) return ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null;
+  if (/agent|owner|assignee/.test(key)) return ticket.assignedAgent || null;
+  if (/subject|title/.test(key)) return ticket.subject || null;
+  if (/categor/.test(key)) return ticket.category || null;
+  return null;
+}
+
+async function mcpSuggestTemplate(id, limit) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  const ticket = await prisma.ticket.findUnique({ where: { id }, select: INSIGHT_TICKET_SELECT });
+  if (!ticket) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+
+  const templates = await prisma.template.findMany({ select: { id: true, name: true, body: true } });
+  if (!templates.length) return { ok: true, matches: [], note: 'No templates exist on this board yet.' };
+
+  const ticketTokens = similarityTokens(`${ticket.subject || ''} ${ticket.category || ''}`);
+  const take = Math.min(5, Math.max(1, Number(limit) || 3));
+  const scored = templates
+    .map(template => ({
+      template,
+      score: jaccard(ticketTokens, similarityTokens(`${template.name} ${template.body}`))
+    }))
+    // A template sharing no words at all with the ticket is not a match, and
+    // returning it as the top one - which is what happens when it is the only
+    // template on the board - invites the assistant to send an answer to a
+    // different question.
+    .filter(row => row.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (!scored.length) {
+    return {
+      ok: true,
+      ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+      matches: [],
+      note: `None of the ${templates.length} template${templates.length === 1 ? '' : 's'} on this board share any wording with this ticket. Write the reply from scratch rather than bending one of them to fit.`
+    };
+  }
+
+  const matches = scored
+    .slice(0, take)
+    .map(({ template, score }) => {
+      const placeholders = templatePlaceholders(template.body).map(label => ({
+        label,
+        suggested: prefillFromTicket(label, ticket)
+      }));
+      return {
+        templateId: template.id,
+        name: template.name,
+        score: Math.round(score * 1000) / 1000,
+        body: template.body,
+        placeholders,
+        // The ones a person still has to answer. Reported separately so the
+        // assistant asks about exactly these rather than re-reading the body.
+        unfilled: placeholders.filter(p => !p.suggested).map(p => p.label)
+      };
+    });
+
+  return {
+    ok: true,
+    ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+    matches
+  };
+}
+
+async function mcpFindDuplicates(id, limit) {
+  if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error('invalid_ticket_id'), { status: 400 });
+  const source = await prisma.ticket.findUnique({ where: { id }, select: INSIGHT_TICKET_SELECT });
+  if (!source) throw Object.assign(new Error('ticket_not_found'), { status: 404 });
+  const take = Math.min(10, Math.max(1, Number(limit) || 5));
+
+  const or = [];
+  if (source.senderEmail) or.push({ senderEmail: source.senderEmail });
+  if (source.companyName) or.push({ companyName: source.companyName });
+  if (!or.length) return { ok: true, candidates: [] };
+
+  // A duplicate arrives near the original. Beyond a month apart the same
+  // client asking the same question again is a new ticket, not a duplicate.
+  const created = new Date(source.createdAt).getTime();
+  const candidates = await prisma.ticket.findMany({
+    where: {
+      AND: [
+        { OR: or },
+        { NOT: { id: source.id } },
+        { duplicateOfExternalId: null },
+        { createdAt: { gte: new Date(created - 30 * 86400000), lte: new Date(created + 30 * 86400000) } }
+      ]
+    },
+    select: INSIGHT_TICKET_SELECT,
+    take: 200
+  });
+
+  const sourceTokens = similarityTokens(source.subject);
+  const scored = candidates
+    .map(candidate => {
+      const overlap = jaccard(sourceTokens, similarityTokens(candidate.subject));
+      const sameSender = !!(source.senderEmail && candidate.senderEmail === source.senderEmail);
+      const hoursApart = Math.abs(new Date(candidate.createdAt).getTime() - created) / 3600000;
+      const confidence = overlap * 0.6 + (sameSender ? 0.3 : 0) + (hoursApart <= 48 ? 0.1 : 0);
+      return { candidate, overlap, sameSender, hoursApart, confidence };
+    })
+    .filter(row => row.overlap >= 0.35 && row.sameSender)
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, take);
+
+  return {
+    ok: true,
+    ticketNumber: source.displayNumber ? `#${String(source.displayNumber).padStart(4, '0')}` : null,
+    candidates: scored.map(({ candidate, overlap, sameSender, hoursApart, confidence }) => ({
+      ticketNumber: candidate.displayNumber ? `#${String(candidate.displayNumber).padStart(4, '0')}` : null,
+      internalId: candidate.id,
+      subject: candidate.subject || '(no subject)',
+      sender: candidate.senderEmail,
+      company: candidate.companyName,
+      createdAt: candidate.createdAt,
+      hoursApart: Math.round(hoursApart * 10) / 10,
+      subjectOverlap: Math.round(overlap * 100) / 100,
+      sameSender,
+      confidence: Math.round(confidence * 100) / 100
+    })),
+    note: 'These are suggestions only. Marking a ticket as a duplicate is done by an agent on the board - report the ticket numbers and let them confirm.'
+  };
+}
+
+/* Registering a project from inside Claude.
+
+   Compliance API sync can pull Enterprise/eligible-org projects when a user has
+   connected a key with the right scope. The connector still matters for
+   everyone else, and for quick updates from inside the project itself: Claude
+   calls into this board and pushes the instructions it already has in context.
+
+   The workflow that makes this useful: open a project in Claude and say
+   "register yourself with the support board". Claude reads its own instructions
+   and calls this, and the project appears in QT-Tools with a working form. It
+   is the one direction the connection actually supports, and it removes the
+   copy-and-paste that the registry would otherwise need. */
+async function mcpRegisterProject(apiUser, args) {
+  if (!isAdminRole(apiUser?.role)) {
+    throw Object.assign(new Error('admin_required: only an admin token may add or change a project on the board'), { status: 403 });
+  }
+  const name = String(args?.name || '').trim();
+  if (!name) throw Object.assign(new Error('name_required'), { status: 400 });
+
+  await ensureProjectTable();
+  const slug = (String(args?.slug || name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project').slice(0, 60);
+  const scope = PROJECT_SCOPES.has(String(args?.scope)) ? String(args.scope) : 'org';
+  const inputs = normalizeProjectInputs(args?.inputs);
+  const instructions = String(args?.instructions || '');
+
+  await prisma.$executeRaw`
+    INSERT INTO "ClaudeProject" ("slug","name","description","scope","owner","instructions","inputs","accent","createdBy","updatedAt","source","syncedAt")
+    VALUES (${slug}, ${name}, ${String(args?.description || '').slice(0, 600)}, ${scope}, ${String(args?.owner || '').slice(0, 80)},
+            ${instructions}, ${JSON.stringify(inputs)}::jsonb, ${String(args?.accent || 'slate')}, ${'mcp:' + (apiUser?.username || '')}, CURRENT_TIMESTAMP,
+            'claude', CURRENT_TIMESTAMP)
+    ON CONFLICT ("slug") DO UPDATE SET
+      "name" = EXCLUDED."name", "description" = EXCLUDED."description", "scope" = EXCLUDED."scope",
+      "owner" = EXCLUDED."owner", "inputs" = EXCLUDED."inputs", "accent" = EXCLUDED."accent",
+      -- Pushed over the connector IS from Claude. Without this the row landed
+      -- as 'manual', which is what the panel now filters out.
+      "source" = 'claude', "syncedAt" = CURRENT_TIMESTAMP,
+      -- An empty instructions field means "leave what is there", so a partial
+      -- re-register cannot wipe a project that was already set up properly.
+      "instructions" = CASE WHEN ${instructions} = '' THEN "ClaudeProject"."instructions" ELSE ${instructions} END,
+      "updatedAt" = CURRENT_TIMESTAMP
+  `;
+
+  const rows = await prisma.$queryRaw`SELECT "id","slug","name","instructions","inputs" FROM "ClaudeProject" WHERE "slug" = ${slug} LIMIT 1`;
+  const saved = Array.isArray(rows) ? rows[0] : null;
+  return {
+    ok: true,
+    slug,
+    name,
+    inputs: (saved?.inputs || []).map(f => f.key),
+    ready: !!String(saved?.instructions || '').trim(),
+    status: String(saved?.instructions || '').trim()
+      ? `"${name}" is on the board with ${(saved?.inputs || []).length} input field(s) and can be run from QT-Tools -> Projects.`
+      : `"${name}" is on the board but has no instructions, so it cannot be run yet. Call this again with the project's instructions to finish it.`
+  };
+}
+
+async function mcpListBoardProjects() {
+  await ensureProjectTable();
+  const rows = await prisma.$queryRaw`SELECT "slug","name","description","scope","owner","inputs","instructions" FROM "ClaudeProject" ORDER BY "name"`;
+  return (Array.isArray(rows) ? rows : []).map(r => ({
+    slug: r.slug,
+    name: r.name,
+    description: r.description || '',
+    scope: r.scope,
+    owner: r.owner || '',
+    inputs: (r.inputs || []).map(f => ({ key: f.key, label: f.label, type: f.type, required: !!f.required })),
+    ready: !!String(r.instructions || '').trim()
+  }));
+}
+
+/* Claude takes a queued run. Returns everything the job needs - the project's
+   instructions, the brief from the form, any follow-up turns - so it can be
+   done from any conversation, not only one opened inside that project.
+   The claim is a conditional update, so two runners polling the same queue
+   cannot both take one job. */
+async function mcpClaimProjectRun(apiUser, args) {
+  await ensureProjectTable();
+  await ensureProjectRunTable();
+  await expireStaleProjectRuns();
+  const wanted = Number(args?.runId) || 0;
+  const who = 'mcp:' + (apiUser?.username || '');
+  const rows = wanted
+    ? await prisma.$queryRaw`
+        UPDATE "ClaudeProjectRun" SET "status" = 'running', "claimedBy" = ${who}, "claimedAt" = CURRENT_TIMESTAMP
+        WHERE "id" = ${wanted} AND "status" = 'queued'
+        RETURNING *`
+    : await prisma.$queryRaw`
+        UPDATE "ClaudeProjectRun" SET "status" = 'running', "claimedBy" = ${who}, "claimedAt" = CURRENT_TIMESTAMP
+        WHERE "id" = (SELECT "id" FROM "ClaudeProjectRun" WHERE "status" = 'queued' ORDER BY "createdAt" ASC, "id" ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
+          AND "status" = 'queued'
+        RETURNING *`;
+  const run = Array.isArray(rows) ? rows[0] : null;
+  if (!run) {
+    if (!wanted) return { ok: true, claimed: false, status: 'Nothing is waiting in the board queue.' };
+    const existing = await prisma.$queryRaw`SELECT "status","claimedBy" FROM "ClaudeProjectRun" WHERE "id" = ${wanted} LIMIT 1`;
+    const row = Array.isArray(existing) ? existing[0] : null;
+    if (!row) throw Object.assign(new Error(`run_not_found: there is no run ${wanted} on the board.`), { status: 404 });
+    throw Object.assign(new Error(`run_not_available: run ${wanted} is ${row.status}${row.claimedBy ? ` (taken by ${row.claimedBy})` : ''}, so there is nothing to claim.`), { status: 409 });
+  }
+  const projects = await prisma.$queryRaw`SELECT "name","instructions" FROM "ClaudeProject" WHERE "id" = ${run.projectId} LIMIT 1`;
+  const project = Array.isArray(projects) ? projects[0] : null;
+  const request = run.request && typeof run.request === 'object' ? run.request : {};
+  const collected = await projectRunDataSummary(run.id);
+  return {
+    ok: true,
+    claimed: true,
+    runId: run.id,
+    project: project?.name || '',
+    requestedBy: run.createdBy || '',
+    instructions: String(project?.instructions || ''),
+    brief: String(request.brief || ''),
+    followUp: Array.isArray(request.turns) ? request.turns : [],
+    ...(collected ? { collected } : {}),
+    howToFinish: [
+      'Follow "instructions" as your project instructions, with "brief" as what the person asked for.',
+      collected ? `Any data-collection step in the instructions is already done: "collected" holds its result. ${collected.note}` : '',
+      Array.isArray(request.turns) && request.turns.length
+        ? '"followUp" is the conversation so far: your earlier answer, then the question to answer now. Answer the last question.'
+        : '',
+      'Nobody is watching the board while you work, so do not stop to ask questions: make reasonable assumptions and list them at the end.',
+      'Anything that would be a file, put in the answer as a fenced code block headed by its file name.',
+      `When finished, call post_project_run with runId ${run.id} and the full answer as output (Markdown). If you cannot do it, call post_project_run with runId ${run.id} and error set to the reason, so the board stops waiting.`
+    ].filter(Boolean).join('\n')
+  };
+}
+
+async function mcpListQueuedProjectRuns() {
+  await ensureProjectTable();
+  await ensureProjectRunTable();
+  await expireStaleProjectRuns();
+  const rows = await prisma.$queryRaw`
+    SELECT r."id", r."status", r."title", r."createdBy", r."createdAt", r."claimedBy", p."name" AS "project"
+    FROM "ClaudeProjectRun" r JOIN "ClaudeProject" p ON p."id" = r."projectId"
+    WHERE r."status" IN ('queued', 'running') ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 50`;
+  return (Array.isArray(rows) ? rows : []).map(r => ({
+    runId: r.id, project: r.project, status: r.status, title: r.title || '', requestedBy: r.createdBy || '',
+    queuedAt: r.createdAt, claimedBy: r.claimedBy || ''
+  }));
+}
+
+// Claude ran the project on its own side and hands the answer over. The board
+// never calls a model; it stores and renders what came back. With runId it
+// settles a run that was queued from the board - the one the panel is
+// watching. Without it, it adds a fresh result, for runs started in Claude.
+//
+// Not admin-gated, unlike register_project. Registering changes what the board
+// offers; posting a result adds one, and every token here belongs to a member
+// of the team. The row records which token wrote it either way.
+async function mcpPostProjectRun(apiUser, args) {
+  const output = String(args?.output || '').trim();
+  const failure = String(args?.error || '').trim();
+  const runId = Number(args?.runId) || 0;
+  if (runId) return mcpSettleQueuedRun(apiUser, runId, { output, failure, model: args?.model });
+  const wanted = String(args?.project || '').trim();
+  if (!wanted) throw Object.assign(new Error('project_required: pass runId for a run queued from the board, or the project name for a new result'), { status: 400 });
+  if (!output) throw Object.assign(new Error('output_required: pass the result text as output'), { status: 400 });
+
+  await ensureProjectTable();
+  const slug = projectSlugFromName(wanted);
+  const rows = await prisma.$queryRaw`
+    SELECT "id","name","slug","inputs" FROM "ClaudeProject"
+    WHERE "slug" = ${slug} OR lower("name") = ${wanted.toLowerCase()} OR "slug" = ${wanted}
+    LIMIT 1`;
+  const project = Array.isArray(rows) ? rows[0] : null;
+  if (!project) {
+    const known = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" ORDER BY "name" LIMIT 25`;
+    const names = (Array.isArray(known) ? known : []).map(r => r.name).join(', ');
+    throw Object.assign(new Error(
+      `project_not_found: nothing on the board matches "${wanted}". ${names ? `On the board: ${names}.` : 'The board has no projects yet.'} Call register_project first.`
+    ), { status: 404 });
+  }
+
+  // inputs arrive either as the label/value pairs the panel shows, or as a
+  // plain object of field values, which is what a project's own form produces.
+  const raw = args?.inputs;
+  const pairs = Array.isArray(raw)
+    ? raw.map(p => ({ label: String(p?.label || p?.key || '').slice(0, 120), value: String(p?.value ?? '').trim().slice(0, 400) }))
+        .filter(p => p.label && p.value).slice(0, 20)
+    : projectRunInputPairs(project, raw);
+
+  const id = await saveProjectRun({
+    projectId: project.id,
+    source: 'claude',
+    title: String(args?.title || '').trim() || 'Run from Claude',
+    inputs: pairs,
+    output,
+    model: String(args?.model || '').trim(),
+    createdBy: 'mcp:' + (apiUser?.username || ''),
+    ms: null,
+    inputTokens: null,
+    outputTokens: null
+  });
+
+  return {
+    ok: true,
+    runId: id,
+    project: project.name,
+    stored: output.length,
+    status: `Result stored against "${project.name}". The team can read it in QT-Tools -> Projects, on that project's card under Results.`
+  };
+}
+
+async function mcpSettleQueuedRun(apiUser, runId, { output, failure, model }) {
+  if (!output && !failure) throw Object.assign(new Error('output_required: pass the answer as output, or error with the reason it could not be done'), { status: 400 });
+  await ensureProjectRunTable();
+  const ok = !!output;
+  const rows = await prisma.$queryRaw`
+    UPDATE "ClaudeProjectRun" SET
+      "status" = ${ok ? 'done' : 'error'},
+      "output" = ${ok ? output.slice(0, PROJECT_RUN_MAX_CHARS) : ''},
+      "error" = ${ok ? null : failure.slice(0, 1000)},
+      "source" = 'claude',
+      "model" = ${String(model || '').trim().slice(0, 80)},
+      "claimedBy" = COALESCE("claimedBy", ${'mcp:' + (apiUser?.username || '')}),
+      "ms" = (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - "createdAt")) * 1000)::int
+    WHERE "id" = ${runId} AND "status" IN ('queued', 'running')
+    RETURNING "id", "projectId"`;
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row) {
+    const existing = await prisma.$queryRaw`SELECT "status" FROM "ClaudeProjectRun" WHERE "id" = ${runId} LIMIT 1`;
+    const found = Array.isArray(existing) ? existing[0] : null;
+    if (!found) throw Object.assign(new Error(`run_not_found: there is no run ${runId} on the board.`), { status: 404 });
+    throw Object.assign(new Error(`run_already_settled: run ${runId} is already ${found.status}. Post without runId to add it as a new result instead.`), { status: 409 });
+  }
+  await ensureProjectRunDataTable();
+  await prisma.$executeRaw`DELETE FROM "ClaudeProjectRunData" WHERE "runId" = ${runId}`;
+  const projects = await prisma.$queryRaw`SELECT "name" FROM "ClaudeProject" WHERE "id" = ${row.projectId} LIMIT 1`;
+  const name = (Array.isArray(projects) ? projects[0]?.name : '') || 'the project';
+  return {
+    ok: true,
+    runId,
+    project: name,
+    status: ok
+      ? `Run ${runId} is done. The answer is on "${name}" in QT-Tools -> Projects, under Results.`
+      : `Run ${runId} is marked as failed on the board, with your reason.`
+  };
+}
+
+async function mcpShiftHandover(hours) {
+  const windowHours = Math.min(168, Math.max(1, Number(hours) || 12));
+  const since = new Date(Date.now() - windowHours * 3600000);
+  const now = Date.now();
+
+  const events = dedupeTicketEvents(await prisma.ticketEvent.findMany({
+    where: { createdAt: { gte: since }, eventType: { in: ['ticket_status_changed', 'ticket_assignedAgent_changed', 'ticket_created', 'comment_added', 'reply_proposed'] } },
+    select: { ticketId: true, eventType: true, oldValue: true, newValue: true, createdAt: true },
+    orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }]
+  }));
+
+  const movedIds = new Set(events.map(e => e.ticketId));
+  const openTickets = await prisma.ticket.findMany({
+    where: { AND: [{ NOT: { status: 'Resolved' } }, { duplicateOfExternalId: null }, { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }] }] },
+    select: INSIGHT_TICKET_SELECT
+  });
+
+  const describe = ticket => ({
+    ticketNumber: ticket.displayNumber ? `#${String(ticket.displayNumber).padStart(4, '0')}` : null,
+    subject: ticket.subject || '(no subject)',
+    company: ticket.companyName || 'Unknown',
+    agent: ticket.assignedAgent || 'Unassigned',
+    priority: ticket.priority || 'Normal',
+    status: ticket.status,
+    ageHours: Math.round(((now - new Date(ticket.createdAt).getTime()) / 3600000) * 10) / 10
+  });
+
+  const statusMoves = events.filter(e => e.eventType === 'ticket_status_changed');
+  const openById = new Map(openTickets.map(t => [t.id, t]));
+
+  const moved = [...new Set(statusMoves.map(e => e.ticketId))]
+    .map(ticketId => {
+      const ticket = openById.get(ticketId);
+      const list = statusMoves.filter(e => e.ticketId === ticketId);
+      return {
+        ticketId,
+        ticketNumber: ticket ? describe(ticket).ticketNumber : null,
+        subject: ticket?.subject || null,
+        from: list[0].oldValue,
+        to: list[list.length - 1].newValue,
+        hops: list.length
+      };
+    })
+    .filter(row => row.ticketNumber);
+
+  // Nothing has happened to these in the window, and they are not resolved.
+  // The point of a handover is that the next shift knows these exist.
+  const stuck = openTickets
+    .filter(ticket => !movedIds.has(ticket.id))
+    .map(describe)
+    .sort((a, b) => b.ageHours - a.ageHours)
+    .slice(0, 15);
+
+  const urgent = openTickets
+    .filter(ticket => ['Urgent', 'High'].includes(String(ticket.priority || '')))
+    .map(describe)
+    .sort((a, b) => b.ageHours - a.ageHours)
+    .slice(0, 15);
+
+  const unassigned = openTickets.filter(t => !t.assignedAgent).map(describe).slice(0, 15);
+
+  return {
+    ok: true,
+    window: { hours: windowHours, since: since.toISOString() },
+    summary: {
+      openTickets: openTickets.length,
+      touchedInWindow: movedIds.size,
+      statusMoves: statusMoves.length,
+      createdInWindow: events.filter(e => e.eventType === 'ticket_created').length,
+      resolvedInWindow: statusMoves.filter(e => e.newValue === 'Resolved').length,
+      stuck: openTickets.filter(t => !movedIds.has(t.id)).length,
+      unassigned: openTickets.filter(t => !t.assignedAgent).length
+    },
+    moved: moved.slice(0, 25),
+    stuck,
+    urgent,
+    unassigned
+  };
+}
+// For scripts/project-runner.ps1: is there anything to do? Answered with a
+// connector token, so the runner can check the queue every few seconds without
+// starting Claude - and without spending anyone's usage - when it is empty.
+// ?mine=1 is a runner on someone's own PC: it gets only the runs its token's
+// owner queued. Without it, the shared runner gets everyone else's, plus any of
+// theirs that a personal runner left waiting past the grace period.
+app.get('/api/mcp/project-runs/queued', requireApiToken, mcpApiLimiter, async (req, res) => {
+  try {
+    await ensureProjectRunTable();
+    await expireStaleProjectRuns();
+    const mine = req.query.mine === '1' || req.query.mine === 'true';
+    await noteProjectRunnerCheckIn(req.apiUser.username, mine ? 'mine' : 'shared');
+    const fresh = new Date(Date.now() - PROJECT_RUNNER_FRESH_MS);
+    const graceCutoff = new Date(Date.now() - PROJECT_LOCAL_GRACE_MS);
+    const rows = mine
+      ? await prisma.$queryRaw`
+          SELECT r."id", p."name" AS "project", r."createdBy", r."createdAt"
+          FROM "ClaudeProjectRun" r JOIN "ClaudeProject" p ON p."id" = r."projectId"
+          WHERE r."status" = 'queued' AND LOWER(r."createdBy") = ${String(req.apiUser.username || '').toLowerCase()}
+          ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 20`
+      : await prisma.$queryRaw`
+          SELECT r."id", p."name" AS "project", r."createdBy", r."createdAt"
+          FROM "ClaudeProjectRun" r JOIN "ClaudeProject" p ON p."id" = r."projectId"
+          WHERE r."status" = 'queued'
+            AND (r."createdAt" < ${graceCutoff} OR NOT EXISTS (
+              SELECT 1 FROM "ClaudeProjectRunner" w
+              WHERE w."mode" = 'mine' AND w."username" = LOWER(r."createdBy") AND w."lastSeen" > ${fresh}))
+          ORDER BY r."createdAt" ASC, r."id" ASC LIMIT 20`;
+    const runs = (Array.isArray(rows) ? rows : []).map(r => ({
+      runId: r.id, project: r.project, requestedBy: r.createdBy || '', queuedAt: r.createdAt, prompt: projectRunHandoffPrompt(r.id)
+    }));
+    return res.json({ ok: true, count: runs.length, runs });
+  } catch (error) {
+    console.error('Project queue lookup failed:', error?.message || error);
+    return res.status(500).json({ error: 'project_queue_failed' });
+  }
+});
 
 app.get('/api/mcp/tickets', requireApiToken, mcpApiLimiter, async (req, res) => {
   const tickets = await mcpListTickets(req.query);
@@ -4980,8 +10925,25 @@ function mcpTextResult(value) {
 function mcpErrorResult(error) {
   return { content: [{ type: 'text', text: error?.message || String(error) }], isError: true };
 }
+/* What a Claude is told when it connects. The point is "push to kanban prod":
+   said inside a Claude project, it should put that project on the board with
+   no slug, prompt or copy-paste from anyone. */
+function kanbanMcpInstructions() {
+  return [
+    `This is the Support Kanban ${BOARD_LABEL} board (${APP_BASE_URL}). A Claude may have more than one Support Kanban connector switched on (prod and preprod); they are separate boards with separate run ids, so use the one the request names.`,
+    '',
+    'PUSH A PROJECT. When the user says "push to kanban", "push to kanban prod", "push to kanban preprod", "push this to the board" or similar inside a Claude project:',
+    `1. Pick the board: "prod" means the prod board, "preprod" the preprod board, nothing named means prod. If that is not this board (${BOARD_LABEL}), use the other Support Kanban connector instead of this one.`,
+    '2. Call list_board_projects. If a project with the same name (or obviously the same project) is there, reuse its slug so the entry is updated, not duplicated.',
+    '3. Call register_project with: name = the name of this Claude project; instructions = your own project instructions, verbatim and complete; a one-line description; inputs = each piece of information the project asks people for (e.g. Team ID, Mode as a select with its options), required where the instructions require it.',
+    '4. Do not ask for confirmation first - the user already asked. Answer with one line: what was pushed, to which board, and how many input fields it has. If register_project says admin_required, say the connector token must belong to an admin.',
+    '',
+    'RUN A QUEUED JOB. When asked to claim a run, call claim_project_run, do the work, and always finish with post_project_run (output, or error) so the board stops waiting. If the claim returns "collected", the board has already done that data-collection step server-side: use the data and never call the collection gateway or look for its API key yourself.'
+  ].join('\n');
+}
+
 function buildKanbanMcpServer(apiUser, { McpServer, z }) {
-  const server = new McpServer({ name: 'support-kanban', version: '1.0.0' });
+  const server = new McpServer({ name: 'support-kanban', version: '1.0.0' }, { instructions: kanbanMcpInstructions() });
 
   server.registerTool(
     'list_tickets',
@@ -5037,11 +10999,173 @@ function buildKanbanMcpServer(apiUser, { McpServer, z }) {
         status: z.enum(TICKET_STATUS_ENUM).optional(),
         assignedAgent: z.string().optional().describe('Agent trigram to assign, or empty string to unassign'),
         csAgent: z.string().optional().describe('CS owner trigram, or empty string to clear'),
-        priority: z.enum(['Low', 'Normal', 'High', 'Urgent']).optional()
+        priority: z.enum(['Low', 'Normal', 'Medium', 'High', 'Urgent']).optional().describe('The board writes Medium/High/Low in practice; Normal and Urgent are accepted for compatibility.')
       }
     },
     async ({ ticketId, ...fields }) => {
       try { return mcpTextResult(await mcpUpdateTicket(apiUser, ticketId, fields)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'propose_reply',
+    {
+      title: 'Propose a reply to the client',
+      description: 'Write a suggested reply and attach it to the ticket for an agent to review. This does NOT email anyone - the draft lands on the ticket as a proposed reply, and an agent chooses whether to send it. Use this instead of claiming a reply was sent.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket - not the #-prefixed ticketNumber shown on the board.'),
+        text: z.string().min(1).max(8000).describe('The proposed reply, as plain text. Write it as the agent would send it to the client.')
+      }
+    },
+    async ({ ticketId, text }) => {
+      try { return mcpTextResult(await mcpProposeReply(apiUser, ticketId, text)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'suggest_template',
+    {
+      title: 'Find a message template for a ticket',
+      description: 'Match a ticket against the team\'s shared message templates and return the best fits, with each [bracketed] placeholder pre-filled from the ticket where the ticket can answer it. Placeholders listed under "unfilled" are the ones a person still has to supply.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket.'),
+        limit: z.number().int().min(1).max(5).optional()
+      }
+    },
+    async ({ ticketId, limit }) => {
+      try { return mcpTextResult(await mcpSuggestTemplate(ticketId, limit)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'find_duplicates',
+    {
+      title: 'Find likely duplicates of a ticket',
+      description: 'Look for other tickets from the same sender, near the same date, with a similar subject. Returns candidates with a confidence score. It does not mark anything - report the ticket numbers and let an agent confirm on the board.',
+      inputSchema: {
+        ticketId: z.number().int().positive().describe('The internalId from list_tickets/get_ticket.'),
+        limit: z.number().int().min(1).max(10).optional()
+      }
+    },
+    async ({ ticketId, limit }) => {
+      try { return mcpTextResult(await mcpFindDuplicates(ticketId, limit)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'register_project',
+    {
+      title: 'Put this project on the support board',
+      description: "Register the Claude project you are running inside with the support board, so the team can run it from QT-Tools without opening Claude. Use this when someone asks to add, register, push or update a project on the board - including the short form \"push to kanban prod\" / \"push to kanban preprod\" (use the connector for the board named). If Compliance API sync is unavailable, this is the direct route: read your OWN project instructions out of your context and pass them as instructions, and describe the information the project asks the user for as inputs - the board turns that list into a form. Calling it again with the same name updates the entry; leaving instructions empty keeps whatever is already saved.",
+      inputSchema: {
+        name: z.string().min(1).describe('The project name, as it appears in Claude.'),
+        description: z.string().optional().describe('One line on what the project does.'),
+        instructions: z.string().optional().describe("The project's own instructions, verbatim. This is what the board sends as the system prompt when it runs the project."),
+        owner: z.string().optional().describe('Who owns it - a person or a team.'),
+        scope: z.enum(['mine', 'org', 'shared']).optional().describe('Which tab it belongs under. Defaults to org.'),
+        inputs: z.array(z.object({
+          key: z.string().describe('Short identifier, e.g. websiteUrl.'),
+          label: z.string().describe('What the field is called on screen.'),
+          type: z.enum(['text', 'textarea', 'number', 'url', 'select']).optional(),
+          required: z.boolean().optional(),
+          placeholder: z.string().optional(),
+          help: z.string().optional(),
+          options: z.array(z.string()).optional().describe('For type select only.')
+        })).optional().describe('The information this project asks for. Each entry becomes a field on the board form.')
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpRegisterProject(apiUser, args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'list_board_projects',
+    {
+      title: 'List the projects registered on the board',
+      description: 'What is already on the support board, and whether each one has instructions saved. Use it before registering, to update an entry rather than duplicate it.',
+      inputSchema: {}
+    },
+    async () => {
+      try { return mcpTextResult(await mcpListBoardProjects()); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'claim_project_run',
+    {
+      title: 'Take a project run queued on the support board',
+      description: "Someone pressed Run on a project in QT-Tools and the job is waiting for you. This claims it and returns everything needed to do it: the project's instructions, the brief from the form, and any follow-up conversation. Do the work with the tools you have, then call post_project_run with the same runId. Pass runId when you were given one; leave it out to take the oldest waiting run.",
+      inputSchema: {
+        runId: z.number().int().positive().optional().describe('The run to take, e.g. from a "claim_project_run with runId N" request. Omit to take the oldest queued run.')
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpClaimProjectRun(apiUser, args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'get_project_run_data',
+    {
+      title: 'Read data the board collected for a run',
+      description: "Some projects need data collected before Claude can work (e.g. the Q-data audit corpus from the n8n gateway). The board does that collection itself, server-side, so no API key is ever handed to Claude. claim_project_run returns it inline when it is small; otherwise it says how many parts there are, and this returns one part at a time. Join the parts in order to get the full data.",
+      inputSchema: {
+        runId: z.number().int().positive().describe('The run you claimed.'),
+        part: z.number().int().positive().optional().describe('Which part, starting at 1. Defaults to 1.')
+      }
+    },
+    async ({ runId, part }) => {
+      try { return mcpTextResult(await readProjectRunData(runId, part || 1)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'list_queued_project_runs',
+    {
+      title: 'See project runs waiting on the board',
+      description: 'Runs queued from QT-Tools that no Claude has finished yet - waiting, or claimed and in progress. Use claim_project_run to take one.',
+      inputSchema: {}
+    },
+    async () => {
+      try { return mcpTextResult(await mcpListQueuedProjectRuns()); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'post_project_run',
+    {
+      title: 'Put a result on the support board',
+      description: "Hand the board the result of running a project, so the team can read it in QT-Tools without opening Claude. For a run you took with claim_project_run, pass its runId - that completes the run the board is waiting on. If you could not do it, pass runId with error instead of output, so the board stops waiting. For a run nobody queued, pass the project name instead of runId and it is added as a new result. Markdown in output is rendered (headings, lists, tables, code).",
+      inputSchema: {
+        runId: z.number().int().positive().optional().describe('The run from claim_project_run. Completes that queued run.'),
+        project: z.string().optional().describe('The project name or slug, when there is no runId. Check with list_board_projects.'),
+        output: z.string().optional().describe('The finished result, verbatim. Markdown is rendered on the board.'),
+        error: z.string().optional().describe('With runId and no output: why the run could not be done.'),
+        title: z.string().optional().describe('A short label for this run, e.g. the hotel or URL it was about. Shown in the history list.'),
+        model: z.string().optional().describe('Which model produced it, if worth recording.'),
+        inputs: z.array(z.object({
+          label: z.string().describe('What was asked for, e.g. Website URL.'),
+          value: z.string().describe('What was supplied.')
+        })).optional().describe('The inputs this run was given, so the board can show what the answer was for.')
+      }
+    },
+    async (args) => {
+      try { return mcpTextResult(await mcpPostProjectRun(apiUser, args)); } catch (error) { return mcpErrorResult(error); }
+    }
+  );
+
+  server.registerTool(
+    'shift_handover',
+    {
+      title: 'Summarise the shift for handover',
+      description: 'What moved, what is stuck, and what the next shift must not drop. Reads the ticket event log over the last N hours. Use it to write a handover note at the end of a shift.',
+      inputSchema: {
+        hours: z.number().int().min(1).max(168).optional().describe('How far back to look. Defaults to 12.')
+      }
+    },
+    async ({ hours }) => {
+      try { return mcpTextResult(await mcpShiftHandover(hours)); } catch (error) { return mcpErrorResult(error); }
     }
   );
 
@@ -5099,11 +11223,29 @@ let sseRev = 0;
 // session-local (caches, read-receipts) and deliberately not broadcast.
 const LIVE_SYNC_FIELDS = [
   'ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketAssignee', 'ticketCSOwner',
-  'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride',
+  'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketCSTouchedAt',
   'ticketPriority', 'ticketCategory', 'ticketSubtype', 'ticketJira',
   'ticketHubspotId', 'ticketArchived', 'ticketResolutionMeta',
   'ticketHasNewReply', 'ticketNumbers', 'ticketComments', 'ticketCreatedBy',
-  'ticketDuplicateOf'
+  // A snooze hides the ticket for everyone, so every open board has to hear
+  // about it immediately - otherwise one agent parks a ticket and another is
+  // still looking at it.
+  // A reply restarts the SLA clock, and every open board has to agree about
+  // when - otherwise one tab shows a badge as breached and another does not.
+  'ticketDuplicateOf', 'ticketSnooze', 'ticketSlaResetAt',
+  // A Velma bug link puts the SLA on hold, so every board has to show it.
+  'ticketVelmaBug',
+  // So does an admin freeze.
+  'ticketSlaHold',
+  // A CS send-back lands in the support agent's My Alerts, so it has to reach
+  // their open board now rather than on their next reload.
+  'ticketSendBackAlerts',
+  // A client reply that brings a closed ticket back has to show as Re-opened
+  // on every board, not just the tab whose mail poll picked it up.
+  'ticketReopenedAt',
+  // The "could be re-opened" prompt has to appear on every board that can see
+  // the ticket, and leave all of them once one person has answered it.
+  'ticketReopenRequests'
 ];
 
 function sseFrame(rev, type, data) {
@@ -5210,7 +11352,21 @@ app.post('/api/state', requireAuth, async (req, res) => {
       data: { provider: 'kanban', syncType: 'board_state_to_ticket_db', status: 'error', message: error.message || String(error) }
     }).catch(() => null);
   }
+  // New rows have just been given their Postgres number - put those on the
+  // board, and send them back to this tab too: its own live patch is ignored
+  // as an echo, so the response is the only way it hears its new tickets'
+  // numbers.
+  try {
+    const reconciled = await reconcileTicketNumbersWithDatabase();
+    if (result.state) {
+      result.state.ticketNumbers = reconciled.ticketNumbers;
+      result.state.ticketNumberCounter = reconciled.ticketNumberCounter;
+    }
+  } catch (error) {
+    console.error('Ticket number reconcile failed:', error?.message || error);
+  }
   const { state: _fullState, ...resultSummary } = result;
+  resultSummary.ticketNumbers = (_fullState && _fullState.ticketNumbers) || undefined;
 
   // Push the delta to every other open board. Note this reflects the MERGED
   // post-write state, not the raw payload - so a stale tab's rejected fields
@@ -5857,6 +12013,223 @@ async function fetchMessageImageAttachments(mailbox, msgId, req) {
 
 // One inline image, streamed from the mail store.
 //
+// ---------------------------------------------------------------------------
+// Ticket attachments
+//
+// A manual ticket is typed by an agent, and until now the only thing they
+// could hand over was prose. Half of what support actually needs is a
+// screenshot: the error dialog, the broken layout, the console. Describing a
+// screenshot in words is lossy work nobody should be doing.
+//
+// Keyed by the ticket's externalId, not by Ticket.id. A manual ticket is
+// created in the browser and lands in the board's state snapshot; its database
+// row appears later, or not at all. Hanging attachments off the external id
+// means an upload never has to wait for a row to exist.
+//
+// The bytes live in Postgres. It is the one store this deployment already has
+// - no bucket, no credentials, no PVC on a read-only root filesystem - and the
+// ceilings below are what keep that honest. Images are downscaled in the
+// browser before they are sent, so the common case is a few hundred KB rather
+// than the six megabytes a phone screenshot starts at.
+// ---------------------------------------------------------------------------
+const TICKET_ATTACH_MAX_FILES = 10;
+const TICKET_ATTACH_MAX_BYTES = 10 * 1024 * 1024;
+const TICKET_ATTACH_MAX_TOTAL = 40 * 1024 * 1024;
+// What may be stored. Anything not here is refused by name rather than being
+// quietly dropped, so an agent knows the file did not go.
+const TICKET_ATTACH_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif',
+  'application/pdf', 'text/plain', 'text/csv', 'application/json',
+  'application/zip', 'message/rfc822', 'application/vnd.ms-outlook',
+  'application/msword', 'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+]);
+// Served inline rather than downloaded. Deliberately narrow: an SVG or an HTML
+// file rendered in the board's own origin is a script execution, so neither is
+// on this list even though both are harmless to store.
+const TICKET_ATTACH_INLINE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif', 'application/pdf']);
+const attachmentUploadLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+
+async function ensureTicketAttachmentTable() {
+  await prisma.$executeRaw`
+    CREATE TABLE IF NOT EXISTS "TicketAttachment" (
+      "id" SERIAL PRIMARY KEY,
+      "ticketExternalId" TEXT NOT NULL,
+      "filename" TEXT NOT NULL DEFAULT 'attachment',
+      "contentType" TEXT NOT NULL DEFAULT 'application/octet-stream',
+      "size" INTEGER NOT NULL DEFAULT 0,
+      "width" INTEGER,
+      "height" INTEGER,
+      "data" BYTEA NOT NULL,
+      "uploadedBy" TEXT NOT NULL DEFAULT '',
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `;
+  await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "TicketAttachment_ticket_idx" ON "TicketAttachment"("ticketExternalId","createdAt")`;
+}
+
+// A filename from a browser is caller-controlled, and it ends up in a
+// Content-Disposition header. Strip anything that could break out of the
+// quoted string or walk a path.
+function safeAttachmentName(raw) {
+  const base = String(raw || 'attachment').split(/[\\/]/).pop();
+  const cleaned = base.replace(/[\u0000-\u001f\u007f"\\]/g, '').trim();
+  return (cleaned || 'attachment').slice(0, 180);
+}
+
+function ticketAttachmentRow(row) {
+  const type = String(row.contentType || 'application/octet-stream');
+  return {
+    id: row.id,
+    filename: row.filename,
+    contentType: type,
+    size: Number(row.size || 0),
+    width: row.width == null ? null : Number(row.width),
+    height: row.height == null ? null : Number(row.height),
+    isImage: type.startsWith('image/'),
+    inline: TICKET_ATTACH_INLINE.has(type),
+    uploadedBy: row.uploadedBy || '',
+    createdAt: row.createdAt,
+    url: `/api/ticket-attachments/${row.id}`
+  };
+}
+
+function feedbackAttachmentKey(logId) {
+  return `feedback:${Number(logId)}`;
+}
+
+function attachmentError(code, status, message) {
+  return Object.assign(new Error(message || code), { code, status });
+}
+
+/* Validates and stores a batch of base64 files against one key.
+   Throws on the first thing it will not take, rather than storing half a batch
+   and reporting success: a reporter who attached three files and got one is
+   worse off than one who was told which file was refused. */
+async function saveAttachmentFiles({ key, files, uploadedBy }) {
+  const list = Array.isArray(files) ? files : [];
+  if (!list.length) throw attachmentError('no_files', 400, 'No files were sent.');
+  if (list.length > TICKET_ATTACH_MAX_FILES) {
+    throw attachmentError('too_many_files', 400, `Up to ${TICKET_ATTACH_MAX_FILES} files at a time.`);
+  }
+  await ensureTicketAttachmentTable();
+  const existing = await prisma.$queryRaw`
+    SELECT COALESCE(sum("size"), 0)::bigint AS total FROM "TicketAttachment" WHERE "ticketExternalId" = ${key}`;
+  let running = Number(Array.isArray(existing) ? existing[0]?.total || 0 : 0);
+
+  const rows = [];
+  for (const file of list) {
+    const type = String(file?.type || '').toLowerCase().split(';')[0].trim();
+    const filename = safeAttachmentName(file?.name);
+    if (!TICKET_ATTACH_TYPES.has(type)) {
+      throw attachmentError('unsupported_type', 415, `"${filename}" is a ${type || 'unknown'} file, which cannot be attached.`);
+    }
+    // Base64 rather than multipart: express.json already accepts 25mb, and a
+    // multipart parser would be a new dependency for two routes. The cost is
+    // the 33% encoding overhead on the wire.
+    const buffer = Buffer.from(String(file?.data || ''), 'base64');
+    if (!buffer.length) throw attachmentError('empty_file', 400, `"${filename}" arrived empty.`);
+    if (buffer.length > TICKET_ATTACH_MAX_BYTES) {
+      throw attachmentError('file_too_large', 413, `"${filename}" is ${(buffer.length / 1048576).toFixed(1)}MB; the limit is ${TICKET_ATTACH_MAX_BYTES / 1048576}MB per file.`);
+    }
+    running += buffer.length;
+    if (running > TICKET_ATTACH_MAX_TOTAL) {
+      throw attachmentError('quota', 413, `That would go over ${TICKET_ATTACH_MAX_TOTAL / 1048576}MB of attachments here.`);
+    }
+    const width = Number.isFinite(Number(file?.width)) ? Math.max(0, Math.min(20000, Number(file.width))) : null;
+    const height = Number.isFinite(Number(file?.height)) ? Math.max(0, Math.min(20000, Number(file.height))) : null;
+    const saved = await prisma.$queryRaw`
+      INSERT INTO "TicketAttachment" ("ticketExternalId","filename","contentType","size","width","height","data","uploadedBy")
+      VALUES (${key}, ${filename}, ${type}, ${buffer.length}, ${width}, ${height}, ${buffer}, ${String(uploadedBy || '')})
+      RETURNING "id","filename","contentType","size","width","height","uploadedBy","createdAt"`;
+    const row = Array.isArray(saved) ? saved[0] : null;
+    if (row) rows.push(ticketAttachmentRow(row));
+  }
+  return { rows };
+}
+
+app.get('/api/tickets/:externalId/attachments', requireAuth, async (req, res) => {
+  const externalId = String(req.params.externalId || '').trim();
+  if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+  try {
+    await ensureTicketAttachmentTable();
+    const rows = await prisma.$queryRaw`
+      SELECT "id","filename","contentType","size","width","height","uploadedBy","createdAt"
+      FROM "TicketAttachment" WHERE "ticketExternalId" = ${externalId}
+      ORDER BY "createdAt", "id"`;
+    return res.json({ ok: true, rows: (Array.isArray(rows) ? rows : []).map(ticketAttachmentRow) });
+  } catch (error) {
+    console.error('Attachment list failed:', error?.message || error);
+    return res.status(500).json({ error: 'attachment_list_failed' });
+  }
+});
+
+app.post('/api/tickets/:externalId/attachments', requireAuth, attachmentUploadLimiter, async (req, res) => {
+  const externalId = String(req.params.externalId || '').trim();
+  if (!externalId) return res.status(400).json({ error: 'missing_ticket' });
+  try {
+    const { rows } = await saveAttachmentFiles({
+      key: externalId,
+      files: req.body?.files,
+      uploadedBy: req.session?.username || ''
+    });
+    return res.json({ ok: true, rows });
+  } catch (error) {
+    if (error?.code) {
+      return res.status(error.status || 400).json({ error: error.code, message: error.message });
+    }
+    console.error('Attachment upload failed:', error?.message || error);
+    return res.status(500).json({ error: 'attachment_upload_failed', message: String(error?.message || error).slice(0, 200) });
+  }
+});
+
+// The bytes. Same posture as the mail-image route below: cached hard but only
+// in the agent's own browser, never sniffed, and sandboxed so that even a type
+// which can carry script cannot run in the board's origin.
+app.get('/api/ticket-attachments/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    await ensureTicketAttachmentTable();
+    const rows = await prisma.$queryRaw`SELECT "filename","contentType","data" FROM "TicketAttachment" WHERE "id" = ${id} LIMIT 1`;
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return res.status(404).json({ error: 'attachment_not_found' });
+    const type = String(row.contentType || 'application/octet-stream');
+    const inline = TICKET_ATTACH_INLINE.has(type);
+    res.set('Content-Type', inline ? type : 'application/octet-stream');
+    res.set('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${safeAttachmentName(row.filename)}"`);
+    res.set('Cache-Control', 'private, max-age=86400, immutable');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+    return res.send(Buffer.from(row.data));
+  } catch (error) {
+    console.error('Attachment fetch failed:', error?.message || error);
+    return res.status(500).json({ error: 'attachment_failed' });
+  }
+});
+
+app.delete('/api/ticket-attachments/:id', requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+  try {
+    await ensureTicketAttachmentTable();
+    const rows = await prisma.$queryRaw`SELECT "uploadedBy" FROM "TicketAttachment" WHERE "id" = ${id} LIMIT 1`;
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return res.status(404).json({ error: 'attachment_not_found' });
+    // Whoever attached it, or an admin. An agent removing their own mistaken
+    // screenshot should not have to find one.
+    const own = String(row.uploadedBy || '') === String(req.session?.username || '');
+    if (!own && !isAdminRole(req.session.role)) return res.status(403).json({ error: 'not_yours' });
+    await prisma.$executeRaw`DELETE FROM "TicketAttachment" WHERE "id" = ${id}`;
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Attachment delete failed:', error?.message || error);
+    return res.status(500).json({ error: 'attachment_delete_failed' });
+  }
+});
+
 // The mailbox is not a parameter. This route turns an id in a URL into a read
 // from Graph with the agent's delegated token, and letting the caller name the
 // mailbox would make it a general-purpose mail reader for anything that token
@@ -6509,35 +12882,52 @@ const FEEDBACK_CATEGORIES = {
 // collects this itself (which view, which build, which browser), and it is the
 // difference between "the board is broken" and a reproducible report - but it
 // arrives from a browser, so none of it is trusted to be sane.
+/* A report carries five things: who wrote it, how to reach them, the ticket
+   they had open if they had one, when, and what they said.
+
+   It used to carry the build, the page, the viewport, the theme and the full
+   user agent as well. That was defensible for a bug report and noise for
+   everything else, and it went to a Teams channel where nobody reads a user
+   agent. Now none of it is collected, so none of it can be sent - the honest
+   way to stop sending something. */
 function sanitizeFeedbackContext(raw) {
   const context = (raw && typeof raw === 'object') ? raw : {};
   const str = (value, max) => String(value == null ? '' : value).trim().slice(0, max);
   return {
-    view: str(context.view, 40),
     ticketId: str(context.ticketId, 200),
-    build: str(context.build, 60),
-    url: str(context.url, 300),
-    theme: str(context.theme, 20),
-    viewport: str(context.viewport, 24),
-    userAgent: str(context.userAgent, 300)
+    // What the board calls that ticket on screen (#0042). The id is internal
+    // and means nothing to whoever reads the report.
+    ticketLabel: str(context.ticketLabel, 60)
   };
 }
 
-function feedbackContextRows(context, actor) {
+// The ticket line is present only when there was a ticket. An empty row saying
+// "Ticket: -" is a row somebody has to read before learning nothing.
+function feedbackFacts(context, actor, sentAt) {
+  const ticket = context.ticketLabel || context.ticketId || '';
   return [
-    ['From', actor.label],
-    ['View', context.view || 'board'],
-    ['Ticket', context.ticketId || '-'],
-    ['Build', context.build || 'unknown'],
-    ['Page', context.url || '-'],
-    ['Screen', `${context.viewport || '-'}${context.theme ? ` (${context.theme} theme)` : ''}`],
-    ['Browser', context.userAgent || '-']
+    ['User', actor.label],
+    ['Email', actor.email || 'not on file'],
+    ...(ticket ? [['Ticket', ticket]] : []),
+    ['Time', sentAt || new Date().toISOString()]
   ];
 }
 
-function buildFeedbackEmailHtml({ category, message, context, actor }) {
+function feedbackAttachmentLinks(attachments, base) {
+  const list = Array.isArray(attachments) ? attachments : [];
+  if (!list.length) return '';
+  const items = list.map(a =>
+    `<li style="margin:2px 0;"><a href="${escapeHtml(base + a.url)}" style="color:#4f46e5;">${escapeHtml(a.filename)}</a>`
+    + ` <span style="color:#98a2b3;">(${Math.max(1, Math.round((a.size || 0) / 1024))} KB)</span></li>`
+  ).join('');
+  return `<div style="margin-top:14px;font-size:12px;"><strong>Attached</strong>`
+    + `<ul style="margin:5px 0 0;padding-left:18px;">${items}</ul>`
+    + `<div style="margin-top:5px;font-size:11px;color:#98a2b3;">Opening these needs a board login.</div></div>`;
+}
+
+function buildFeedbackEmailHtml({ category, message, context, actor, sentAt, attachments }) {
   const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
-  const rows = feedbackContextRows(context, actor)
+  const rows = feedbackFacts(context, actor, sentAt)
     .map(([key, value]) => `<tr><td style="padding:3px 12px 3px 0;color:#667085;font-size:12px;white-space:nowrap;vertical-align:top;">${escapeHtml(key)}</td><td style="padding:3px 0;font-size:12px;color:#0f172a;word-break:break-all;">${escapeHtml(value)}</td></tr>`)
     .join('');
   return [
@@ -6547,26 +12937,41 @@ function buildFeedbackEmailHtml({ category, message, context, actor }) {
     // hand and the part that has to be read.
     `<div style="margin:10px 0 16px;padding:13px 15px;border-left:3px solid #${meta.colour};background:#f8fafc;border-radius:0 8px 8px 0;white-space:pre-wrap;font-size:14px;">${escapeHtml(message)}</div>`,
     `<table style="border-collapse:collapse;">${rows}</table>`,
+    feedbackAttachmentLinks(attachments, APP_BASE_URL),
     '<div style="margin-top:14px;font-size:11px;color:#98a2b3;">Sent by the Feedback button on the support board. Reply to this mail to answer the reporter.</div>',
     '</div>'
   ].join('');
 }
 
-function buildFeedbackWebhookPayload({ category, message, context, actor }) {
+function buildFeedbackWebhookPayload({ category, message, context, actor, sentAt, attachments }) {
   const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
   const title = `${meta.emoji} ${meta.label} from ${actor.label}`;
-  const facts = feedbackContextRows(context, actor).map(([name, value]) => ({ name, value }));
+  const when = sentAt || new Date().toISOString();
+  const ticket = context.ticketLabel || context.ticketId || '';
+  const facts = feedbackFacts(context, actor, when).map(([name, value]) => ({ name, value }));
+  const files = (Array.isArray(attachments) ? attachments : []).map(a => ({
+    name: a.filename,
+    size: a.size,
+    url: APP_BASE_URL + a.url
+  }));
   return {
     // Read by a Power Automate flow, or by anything else pointed at this URL.
+    //
+    // Five fields, and the ticket only when there was one - a flow checking
+    // for it should find it absent rather than find an empty string. The
+    // browser/build/page block and the recipient list that used to ride along
+    // here are gone; anything reading them needs updating.
     kind: 'support_kanban_feedback',
     category,
-    categoryLabel: meta.label,
+    user: actor.label,
+    email: actor.email || '',
+    ...(ticket ? { ticket } : {}),
+    time: when,
     message,
-    reporter: actor.label,
-    reporterEmail: actor.email || '',
-    recipientEmail: FEEDBACK_EMAIL,
-    recipientEmails: FEEDBACK_EMAILS,
-    context,
+    // Named files, not attachments: this payload already carries an
+    // attachments array for the Adaptive Card, and the later key in an object
+    // literal wins - which silently ate this field the first time.
+    ...(files.length ? { files } : {}),
     // Rendered by a Teams incoming webhook without a flow in between.
     '@type': 'MessageCard',
     '@context': 'https://schema.org/extensions',
@@ -6574,7 +12979,7 @@ function buildFeedbackWebhookPayload({ category, message, context, actor }) {
     summary: title,
     title,
     text: message,
-    sections: [{ facts, markdown: false }],
+    sections: [{ facts: facts.concat(files.length ? [{ name: 'Attached', value: files.map(f => f.name).join(', ') }] : []), markdown: false }],
     /* And the Adaptive Card, for Teams Workflows.
 
        Microsoft retired the Office 365 connector that consumed the MessageCard
@@ -6594,7 +12999,12 @@ function buildFeedbackWebhookPayload({ category, message, context, actor }) {
         body: [
           { type: 'TextBlock', text: title, weight: 'Bolder', size: 'Medium', wrap: true },
           { type: 'TextBlock', text: message, wrap: true, spacing: 'Small' },
-          { type: 'FactSet', facts: facts.map(f => ({ title: f.name, value: f.value })), spacing: 'Medium' }
+          { type: 'FactSet', facts: facts.map(f => ({ title: f.name, value: f.value })), spacing: 'Medium' },
+          ...(files.length ? [{
+            type: 'TextBlock',
+            text: files.map(f => `[${f.name}](${f.url})`).join('  ·  '),
+            wrap: true, spacing: 'Small', isSubtle: true
+          }] : [])
         ],
         actions: actor.email
           ? [{ type: 'Action.OpenUrl', title: `Email ${actor.username || 'the reporter'}`, url: `mailto:${actor.email}` }]
@@ -6657,26 +13067,34 @@ async function sendFeedbackEmail({ req, subject, html, actor }) {
   return 'graph';
 }
 
-async function deliverFeedback({ req, category, message, context, actor }) {
+async function deliverFeedback({ req, category, message, context, actor, attachments }) {
   const meta = FEEDBACK_CATEGORIES[category] || FEEDBACK_CATEGORIES.other;
   const subject = `[Kanban ${meta.label}] ${feedbackFirstLine(message)}`;
+  const sentAt = new Date().toISOString();
   const result = { emailed: false, notified: false, emailError: '', webhookError: '', emailVia: '' };
-
-  try {
-    result.emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
-    result.emailed = true;
-  } catch (error) {
-    result.emailError = String(error?.message || error).slice(0, 300);
-    console.warn('Feedback email failed:', result.emailError);
-  }
 
   if (FEEDBACK_WEBHOOK_URL) {
     try {
-      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
+      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor, sentAt, attachments }));
       result.notified = true;
     } catch (error) {
       result.webhookError = String(error?.message || error).slice(0, 300);
       console.warn('Feedback webhook failed:', result.webhookError);
+    }
+  }
+
+  // Skip the Graph-delegated fallback when Teams is the only channel this
+  // deployment has configured: without MAIL_WEBHOOK_URL that fallback needs
+  // Mail.Send consent nobody granted, so it always 403s and reports a scary
+  // "email failed" for a leg nobody meant to use. Still attempted when there
+  // is a mail flow (safe to try) or no Teams webhook either (the only leg left).
+  if (MAIL_WEBHOOK_URL || !FEEDBACK_WEBHOOK_URL) {
+    try {
+      result.emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor, sentAt, attachments }), actor });
+      result.emailed = true;
+    } catch (error) {
+      result.emailError = String(error?.message || error).slice(0, 300);
+      console.warn('Feedback email failed:', result.emailError);
     }
   }
   return result;
@@ -6697,6 +13115,47 @@ async function feedbackActorFor(req) {
   };
 }
 
+/* Every report also lands on the board as a ticket assigned to the support
+   agent who looks after the board, so it is worked and tracked like any
+   other ticket instead of living only in an inbox. Written straight into the
+   board state with no actor, so the reporter's own assignment rights do not
+   apply: the board assigns it, not them. The reporter is the sender, and an
+   internal sender never gets a client email, so HubSpot leaves it alone. */
+const FEEDBACK_TICKET_AGENT = 'SFA';
+async function createFeedbackTicket({ logId, category, message, context, actor }) {
+  const id = `feedback_${logId || Date.now()}`;
+  const now = new Date().toISOString();
+  const label = FEEDBACK_CATEGORIES[category]?.label || 'Feedback';
+  const firstLine = message.split(/\r?\n/).find(line => line.trim()) || message;
+  const subject = `${label} from ${String(actor.username || 'unknown').toUpperCase()}: ${firstLine.trim().slice(0, 120)}`;
+  const ticketLine = context.ticketLabel || context.ticketId;
+  const summary = [message, '', `Sent by ${actor.label}${actor.email ? ` <${actor.email}>` : ''} from the Feedback button.`, ticketLine ? `About ticket ${ticketLine}.` : null].filter(line => line !== null).join('\n');
+  const email = { id, subject, summary, sender: actor.email || 'feedback@board', recipients: null, receivedDateTime: now, sentDateTime: now, webLink: null, uri: null, importance: 'normal', isRead: true, isManual: true };
+
+  const state = safeReadState();
+  const map = key => (state[key] = (state[key] && typeof state[key] === 'object') ? state[key] : {});
+  state.allTickets = [{ id, email, priority: category === 'bug' ? 'High' : 'Medium', isManual: true }, ...(Array.isArray(state.allTickets) ? state.allTickets : [])];
+  map('ticketState')[id] = 'new';
+  map('ticketStageTouchedAt')[id] = Date.now();
+  map('ticketPriority')[id] = category === 'bug' ? 'High' : 'Medium';
+  map('ticketCategory')[id] = 'Other';
+  map('ticketCreatedAt')[id] = now;
+  map('ticketCreatedBy')[id] = String(actor.username || '').toUpperCase() || null;
+  map('ticketAssignee')[id] = FEEDBACK_TICKET_AGENT;
+  map('ticketAssigneeTouchedAt')[id] = Date.now();
+  map('ticketAssignmentMode')[id] = 'support';
+  map('manualSupportOverride')[id] = true;
+  map('ticketCSOwner')[id] = null;
+  map('manualCSOverride')[id] = true;
+  map('ticketCSTouchedAt')[id] = Date.now();
+
+  const result = await safeWriteState(state, null);
+  await upsertBoardTicketsToDatabase(result.state || state, { session: {} });
+  await reconcileTicketNumbersWithDatabase().catch(error => console.error('Ticket number reconcile failed:', error?.message || error));
+  sseBroadcast('board_reload', { reason: 'feedback_ticket', actor: String(actor.username || '').toUpperCase() || null });
+  return id;
+}
+
 /* Wrapped, because this endpoint's whole job is to be run when delivery is
    broken - and an async throw out of an Express handler is an unhandled
    rejection, which on current Node ends the process. A diagnostic that takes
@@ -6705,14 +13164,8 @@ async function feedbackActorFor(req) {
 app.post('/api/feedback/test', requireAdmin, feedbackLimiter, async (req, res) => {
  try {
   const actor = await feedbackActorFor(req);
-  const context = sanitizeFeedbackContext({
-    view: 'delivery test',
-    build: APP_BUILD_VERSION,
-    url: '/api/feedback/test',
-    theme: '-',
-    viewport: '-',
-    userAgent: String(req.headers['user-agent'] || '')
-  });
+  const context = sanitizeFeedbackContext({});
+  const sentAt = new Date().toISOString();
   const message = [
     `This is a delivery test for the Feedback button on the support board.`,
     ``,
@@ -6782,29 +13235,33 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
     console.error('Feedback could not be recorded:', String(error?.message || error).slice(0, 200));
   }
 
-  const meta = FEEDBACK_CATEGORIES[category];
-  const subject = `[Kanban ${meta.label}] ${message.split(/\r?\n/)[0].slice(0, 90)}`;
-  let emailed = false;
-  let emailError = '';
-  let emailVia = '';
-  try {
-    emailVia = await sendFeedbackEmail({ req, subject, html: buildFeedbackEmailHtml({ category, message, context, actor }), actor });
-    emailed = true;
-  } catch (error) {
-    emailError = String(error?.message || error).slice(0, 200);
-    console.warn('Feedback email failed:', emailError);
+  // Files the reporter attached, stored against the record that was just
+  // written so a screenshot cannot outlive the report it belongs to.
+  let attachments = [];
+  if (logId && Array.isArray(req.body?.files) && req.body.files.length) {
+    try {
+      const saved = await saveAttachmentFiles({
+        key: feedbackAttachmentKey(logId),
+        files: req.body.files,
+        uploadedBy: username
+      });
+      attachments = saved.rows;
+    } catch (error) {
+      // A report that arrives without its screenshot is worth far more than no
+      // report, so this is logged and the send continues.
+      console.warn('Feedback attachments not stored:', String(error?.message || error).slice(0, 200));
+    }
   }
 
-  let notified = false;
-  let webhookError = '';
-  if (FEEDBACK_WEBHOOK_URL) {
-    try {
-      await postJson(FEEDBACK_WEBHOOK_URL, buildFeedbackWebhookPayload({ category, message, context, actor }));
-      notified = true;
-    } catch (error) {
-      webhookError = String(error?.message || error).slice(0, 200);
-      console.warn('Feedback webhook failed:', webhookError);
-    }
+  const { emailed, notified, emailError, webhookError, emailVia } =
+    await deliverFeedback({ req, category, message, context, actor, attachments });
+
+  // A ticket that cannot be made never costs the reporter their report.
+  let ticketId = null;
+  try {
+    ticketId = await createFeedbackTicket({ logId, category, message, context, actor });
+  } catch (error) {
+    console.error('Feedback ticket not created:', String(error?.message || error).slice(0, 200));
   }
 
   if (logId) {
@@ -6816,7 +13273,7 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
         where: { id: logId },
         data: {
           status: emailed || notified ? 'delivered' : 'stored_only',
-          metadata: { actor, context, emailed, notified, emailVia: emailVia || undefined, emailError: emailError || undefined, webhookError: webhookError || undefined }
+          metadata: { actor, context, emailed, notified, ticketId: ticketId || undefined, emailVia: emailVia || undefined, emailError: emailError || undefined, webhookError: webhookError || undefined }
         }
       })
       .catch(() => null);
@@ -6825,6 +13282,7 @@ app.post('/api/feedback', requireAuth, feedbackLimiter, async (req, res) => {
   return res.json({
     ok: true,
     stored: !!logId,
+    ticketCreated: !!ticketId,
     emailed,
     notified,
     webhookConfigured: !!FEEDBACK_WEBHOOK_URL,
@@ -6842,8 +13300,12 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
     if (!tool) return res.status(400).json({ isError: true, error: 'missing_tool' });
 
     if (tool.includes('outlook_email_search')) {
+      // Authorization before any work: checking after the token fetch meant an
+      // unauthorized mailbox still triggered a Graph round trip, and any error
+      // there answered the request before the check was ever reached.
+      const mailbox = resolveReadableMailbox(args?.mailboxOwnerEmail);
+      if (!mailbox) return res.status(403).json({ isError: true, error: 'mailbox_not_allowed' });
       const token = await graphDelegatedToken(req);
-      const mailbox = args?.mailboxOwnerEmail || SUPPORT_MAILBOX;
       const top = Math.min(Math.max(Number(args?.limit || 20), 1), 200);
       const select = '$select=id,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,webLink,conversationId,internetMessageId';
       const orderBy = '$orderby=receivedDateTime desc';
@@ -6857,7 +13319,10 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       const idMatch = rawUri.match(/mail:\/\/\/messages\/([^?]+)/);
       const msgId = idMatch?.[1];
       const ownerMatch = rawUri.match(/[?&]owner=([^&]+)/);
-      const mailbox = ownerMatch?.[1] ? decodeURIComponent(ownerMatch[1]) : SUPPORT_MAILBOX;
+      // Same hole as the search branch above, reached through the URI instead
+      // of the body.
+      const mailbox = resolveReadableMailbox(ownerMatch?.[1] ? decodeURIComponent(ownerMatch[1]) : SUPPORT_MAILBOX);
+      if (!mailbox) return res.status(403).json({ isError: true, error: 'mailbox_not_allowed' });
       if (!msgId) return res.status(400).json({ isError: true, error: 'missing_message_id' });
       const msg = await graphGetResilient(`/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(msgId)}?$select=body,bodyPreview,hasAttachments`, req);
       // hasAttachments is false when a message carries ONLY inline images.
@@ -7036,6 +13501,48 @@ function qtDetectInHtml(html) {
   return { detected: false, confidence: 'high', marker: null, via: null, src: null };
 }
 
+const dnsPromises = require('dns').promises;
+
+// Every address a hostname resolves to has to be public - a name with one
+// public A record and one pointing at 127.0.0.1 is a rebinding attempt, and
+// taking the first answer would let it through half the time.
+async function qtResolvesToPublicHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return false;
+  if (qtIsBlockedHost(host)) return false;
+  // A literal IP is already what it resolves to.
+  if (/^[0-9.]+$/.test(host) || host.includes(':')) return !qtIsBlockedHost(host);
+  try {
+    const records = await dnsPromises.lookup(host, { all: true });
+    if (!records.length) return false;
+    return records.every(record => !qtIsBlockedHost(record.address));
+  } catch (_) {
+    // Unresolvable is not reachable either; let the fetch report it.
+    return true;
+  }
+}
+
+const QT_MAX_REDIRECTS = 5;
+
+// fetch() with the redirects taken one at a time, checking the destination
+// before each hop instead of trusting the first URL and looking away.
+async function qtFetchGuarded(startUrl, init) {
+  let current = startUrl;
+  for (let hop = 0; hop <= QT_MAX_REDIRECTS; hop++) {
+    const parsed = new URL(current);
+    if (!/^https?:$/.test(parsed.protocol)) throw Object.assign(new Error('blocked_scheme'), { qtBlocked: true });
+    if (!(await qtResolvesToPublicHost(parsed.hostname))) throw Object.assign(new Error('blocked_host'), { qtBlocked: true });
+
+    const res = await fetch(current, { ...init, redirect: 'manual' });
+    if (![301, 302, 303, 307, 308].includes(res.status)) return { res, finalUrl: current };
+
+    const location = res.headers.get('location');
+    if (!location) return { res, finalUrl: current };
+    current = new URL(location, current).toString();
+  }
+  throw Object.assign(new Error('too_many_redirects'), { qtBlocked: true });
+}
+
 async function qtCheckUrl(rawUrl) {
   const url = qtNormalizeUrl(rawUrl);
   const started = Date.now();
@@ -7044,8 +13551,7 @@ async function qtCheckUrl(rawUrl) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), QT_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
-      redirect: 'follow',
+    const { res, finalUrl: reachedUrl } = await qtFetchGuarded(url, {
       signal: controller.signal,
       headers: {
         // Some sites serve a stripped page to non-browser agents.
@@ -7058,7 +13564,7 @@ async function qtCheckUrl(rawUrl) {
     return {
       input: rawUrl,
       url,
-      finalUrl: res.url || url,
+      finalUrl: reachedUrl || res.url || url,
       httpStatus: res.status,
       status: res.ok ? 'ok' : 'http_error',
       detected: hit.detected,
@@ -7071,6 +13577,18 @@ async function qtCheckUrl(rawUrl) {
     };
   } catch (error) {
     const aborted = error?.name === 'AbortError';
+    // A blocked destination is reported as its own status rather than as a
+    // network failure, so "this URL redirects somewhere internal" does not read
+    // as "that site is down".
+    if (error?.qtBlocked) {
+      return {
+        input: rawUrl, url, status: 'blocked', detected: false, confidence: 'low',
+        error: error.message === 'blocked_host'
+          ? 'That address resolves to a private or internal host, so it was not fetched.'
+          : error.message === 'too_many_redirects' ? 'Too many redirects.' : 'Blocked URL scheme.',
+        ms: Date.now() - started
+      };
+    }
     return {
       input: rawUrl, url, status: aborted ? 'timeout' : 'fetch_error',
       detected: false, confidence: 'low',
@@ -8502,8 +15020,662 @@ app.get('/', (req, res) => {
   res.type('html').sendFile(path.join(__dirname, 'index.html'));
 });
 
+// ===========================================================================
+// Churn signals API - bulk, pre-aggregated per-company friction signals for
+// the anti-churn n8n workflow (support-api.md is the full spec). This is a
+// first pass, not the complete spec - see the deviations noted inline and
+// in each response's `meta` block, rather than silently approximating them.
+//
+// Known deviations from support-api.md:
+// - `quinta_property_id` is not stored anywhere in this app (tickets only
+//   carry a free-text `companyName` from HubSpot) and no HubSpot custom
+//   property is wired up to fetch it either. Every result is keyed by
+//   `company_name` instead - exact match, no fuzzy matching, matching the
+//   spec's own warning about name variants.
+// - `recurring_issues[]` clustering is a first-pass heuristic (shared
+//   significant subject words within the same company), not the semantic
+//   clustering the spec describes reusing from an MCP `find_duplicates`
+//   tool - that tool does not exist anywhere in this codebase.
+// - `component` is the ticket's persisted `category` (the broad bucket -
+//   "Integration", "Content / RYA", "Platform / Access", etc.). The more
+//   granular subtype label ("Booking engine broken", "PMS sync failure")
+//   is board-only state kept in a local JSON file, not the database, so
+//   it is not used here. `vendor` has no data source at all and is always
+//   null.
+// - SLA figures use working hours (08:00-12:00 and 14:00-17:00, weekdays)
+//   against SLA_HOURS_BY_PRIORITY, not the dashboard's shift-time-aware SLA
+//   clock, which also leaves out the time the assigned agent was logged off
+//   or on a break. Flagged via `meta.sla_definition` on every response.
+const CHURN_POLICY_SUBJECT_PATTERNS = [
+  /acceso\s+quick\s?text/i,
+  /quinta\s+access/i,
+  /forgot\s+your\s+password/i,
+  /reactivar\s+usuario/i,
+  /no\s+puedo\s+acceder/i
+];
+function isChurnPolicyTicket(ticket) {
+  return CHURN_POLICY_SUBJECT_PATTERNS.some(re => re.test(String(ticket.subject || '')));
+}
+
+const CHURN_SIGNALS_SELECT = {
+  externalId: true,
+  displayNumber: true,
+  subject: true,
+  status: true,
+  priority: true,
+  category: true,
+  companyName: true,
+  jiraTicketKey: true,
+  duplicateOfExternalId: true,
+  createdAt: true,
+  resolvedAt: true
+};
+
+// Replays *_changed events for one field to answer "what was this field's
+// value as of a given moment" - the ticket's CURRENT column only tells you
+// the LATEST value, which leaks present-day knowledge into a backtest
+// reconstructing what the model could have known at an earlier date
+// (support-api.md §5). Used for status, priority, and category alike -
+// point-in-time correctness for status alone is not enough when priority/
+// category (used for open_critical, SLA targets, component tagging, and
+// policy-ticket detection) are read from the same present-day columns.
+//
+// If a ticket has zero events for this field, its current value is assumed
+// to have held since creation - true unless a status/priority/category
+// write ever succeeded while its paired (fire-and-forget) audit-event
+// insert failed, a gap this app's event logging does not fully close.
+function buildFieldHistory(ticket, eventsByTicket, eventKey, currentValue) {
+  const events = (eventsByTicket.get(ticket.externalId)?.[eventKey] || [])
+    .slice()
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt) || a.id - b.id);
+  const history = [];
+  if (events.length) {
+    history.push({ atMs: new Date(ticket.createdAt).getTime(), value: events[0].oldValue });
+    for (const ev of events) {
+      history.push({ atMs: new Date(ev.createdAt).getTime(), value: ev.newValue });
+    }
+  } else {
+    history.push({ atMs: new Date(ticket.createdAt).getTime(), value: currentValue });
+  }
+  return history;
+}
+function valueAsOf(history, asOfMs) {
+  let value = history[0].value;
+  for (const entry of history) {
+    if (entry.atMs > asOfMs) break;
+    value = entry.value;
+  }
+  return value;
+}
+// The event timestamp of the resolution that was CURRENT as of asOfMs - not
+// necessarily the ticket's present resolvedAt, which reflects the latest of
+// possibly several resolve/reopen cycles.
+function resolvedAtAsOf(statusHistory, asOfMs) {
+  let resolvedAtMs = null;
+  for (const entry of statusHistory) {
+    if (entry.atMs > asOfMs) break;
+    resolvedAtMs = normalizeDbStatusForBoard(entry.value) === 'res' ? entry.atMs : null;
+  }
+  return resolvedAtMs;
+}
+
+function normalizeSubjectWords(subject) {
+  const STOPWORDS = new Set(['the', 'a', 'an', 'and', 'or', 'of', 'to', 'for', 'on', 'in', 'is', 'are', 'with', 're', 'fwd', 'issue', 'problem', 'ticket', 'help', 'support', 'please', 'hello', 'hi']);
+  return String(subject || '')
+    .toLowerCase()
+    .replace(/^(re|fwd|fw)\s*:\s*/gi, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOPWORDS.has(w));
+}
+// First-pass "same underlying issue" heuristic, scoped to one company: two
+// tickets cluster together when at least half of their significant subject
+// words overlap. Real semantic clustering is future work - see the
+// deviation note at the top of this section.
+function clusterRecurringIssues(tickets) {
+  const clusters = [];
+  for (const ticket of tickets) {
+    const words = new Set(normalizeSubjectWords(ticket.subject));
+    if (!words.size) continue;
+    let best = null;
+    let bestScore = 0;
+    for (const cluster of clusters) {
+      const overlap = [...words].filter(w => cluster.words.has(w)).length;
+      const score = overlap / Math.max(words.size, cluster.words.size);
+      if (score > bestScore) { bestScore = score; best = cluster; }
+    }
+    if (best && bestScore >= 0.5) {
+      best.tickets.push(ticket);
+      words.forEach(w => best.words.add(w));
+    } else {
+      clusters.push({ tickets: [ticket], words });
+    }
+  }
+  return clusters.filter(c => c.tickets.length >= 2);
+}
+function clusterIdFor(words, usedIds) {
+  const slug = words.slice(0, 3).join('-').slice(0, 60) || 'issue';
+  let id = slug;
+  let n = 2;
+  while (usedIds.has(id)) { id = `${slug}-${n++}`; }
+  usedIds.add(id);
+  return id;
+}
+
+function churnTicketRef(t) {
+  return t.jiraTicketKey || (t.displayNumber ? `#${String(t.displayNumber).padStart(4, '0')}` : t.externalId);
+}
+
+// Core per-company aggregation. `tickets` must already be scoped to this
+// company, non-Spam, and cover everything needed for the requested windows
+// plus the full backlog of still-open tickets regardless of age.
+function computeCompanySignals(companyName, tickets, eventsByTicket, asOfMs, windows) {
+  const nonDuplicate = tickets.filter(t => !t.duplicateOfExternalId);
+  if (!nonDuplicate.length) {
+    return { quinta_property_id: null, company_name: companyName, data_available: false, reason: 'NO_TICKETS_EVER' };
+  }
+
+  const withHistory = nonDuplicate.map(t => {
+    const events = eventsByTicket.get(t.externalId) || {};
+    const statusHistory = buildFieldHistory(t, eventsByTicket, 'ticket_status_changed', t.status);
+    const priorityHistory = buildFieldHistory(t, eventsByTicket, 'ticket_priority_changed', t.priority);
+    const categoryHistory = buildFieldHistory(t, eventsByTicket, 'ticket_category_changed', t.category);
+    const statusNow = valueAsOf(statusHistory, asOfMs);
+    const stageNow = normalizeDbStatusForBoard(statusNow);
+    const resolvedAtMs = resolvedAtAsOf(statusHistory, asOfMs);
+    const priorityAsOf = valueAsOf(priorityHistory, asOfMs);
+    const categoryAsOf = valueAsOf(categoryHistory, asOfMs);
+    return {
+      t, statusHistory, stageAsOf: stageNow, resolvedAtMsAsOf: resolvedAtMs,
+      priorityAsOf, categoryAsOf, createdAtMs: new Date(t.createdAt).getTime()
+    };
+  }).filter(x => x.createdAtMs <= asOfMs); // did not exist yet as of asOf
+
+  const openAsOf = withHistory.filter(x => x.stageAsOf !== 'res');
+  // This app has four flat priorities (High/Medium/Normal/Low), not the
+  // three-tier critical/high/medium the spec's example implies. High maps to
+  // "critical" and Medium to "high" here - the closest honest fit, not an
+  // attempt to invent a tier this app doesn't track.
+  const openCritical = openAsOf.filter(x => x.priorityAsOf === 'High');
+  const oldestOpenDays = openAsOf.length
+    ? Math.max(...openAsOf.map(x => (asOfMs - x.createdAtMs) / 86400000))
+    : 0;
+
+  const maxWindow = Math.max(...windows, 0);
+  const dayMs = 86400000;
+  const windowCounts = {};
+  for (const w of windows) {
+    windowCounts[`tickets_${w}d`] = withHistory.filter(x => x.createdAtMs > asOfMs - w * dayMs).length;
+  }
+  const primaryWindow = windows[0] || 30;
+  const prevWindowCount = withHistory.filter(x =>
+    x.createdAtMs > asOfMs - 2 * primaryWindow * dayMs && x.createdAtMs <= asOfMs - primaryWindow * dayMs
+  ).length;
+
+  function avgResolutionHours(sinceMs, untilMs) {
+    const resolved = withHistory.filter(x => x.resolvedAtMsAsOf && x.resolvedAtMsAsOf > sinceMs && x.resolvedAtMsAsOf <= untilMs);
+    if (!resolved.length) return null;
+    const hours = resolved.map(x => (x.resolvedAtMsAsOf - x.createdAtMs) / 3600000);
+    return Math.round((hours.reduce((a, b) => a + b, 0) / hours.length) * 10) / 10;
+  }
+  const avgResolutionHours30d = avgResolutionHours(asOfMs - primaryWindow * dayMs, asOfMs);
+  const avgResolutionHoursPrev30d = avgResolutionHours(asOfMs - 2 * primaryWindow * dayMs, asOfMs - primaryWindow * dayMs);
+
+  // Reopens: a ticket_status_changed event moving OUT of Resolved, replayed
+  // only up to asOfMs so a backtest can't see a reopen that hadn't happened
+  // yet at that point in time.
+  let reopens90d = 0;
+  let resolutions90d = 0;
+  for (const x of withHistory) {
+    for (const entry of x.statusHistory) {
+      if (entry.atMs > asOfMs || entry.atMs <= asOfMs - 90 * dayMs) continue;
+      if (normalizeDbStatusForBoard(entry.value) === 'res') resolutions90d++;
+    }
+    for (let i = 1; i < x.statusHistory.length; i++) {
+      const prev = x.statusHistory[i - 1];
+      const cur = x.statusHistory[i];
+      if (cur.atMs > asOfMs || cur.atMs <= asOfMs - 90 * dayMs) continue;
+      if (normalizeDbStatusForBoard(prev.value) === 'res' && normalizeDbStatusForBoard(cur.value) !== 'res') reopens90d++;
+    }
+  }
+  const reopenRate90d = resolutions90d ? Math.round((reopens90d / resolutions90d) * 100) / 100 : 0;
+
+  const window90 = withHistory.filter(x => x.createdAtMs > asOfMs - 90 * dayMs);
+  const escalations90d = window90.filter(x => x.categoryAsOf === 'IT Escalation').length;
+  const policyTickets90d = window90.filter(x => isChurnPolicyTicket(x.t)).length;
+
+  // SLA: working hours vs SLA_HOURS_BY_PRIORITY - see the deviation note at
+  // the top of this section for how this differs from the dashboard's own
+  // shift-time-aware SLA clock.
+  const resolvedInWindow90 = window90.filter(x => x.resolvedAtMsAsOf);
+  let slaBreaches90d = 0;
+  for (const x of resolvedInWindow90) {
+    const targetHours = slaTargetHoursFor(x.priorityAsOf);
+    const hoursToResolve = businessMsInRange(x.createdAtMs, x.resolvedAtMsAsOf) / 3600000;
+    if (hoursToResolve > targetHours) slaBreaches90d++;
+  }
+  const slaBreachRate90d = resolvedInWindow90.length ? Math.round((slaBreaches90d / resolvedInWindow90.length) * 100) / 100 : 0;
+
+  const byExternalId = new Map(withHistory.map(x => [x.t.externalId, x]));
+  const recurringClusters = clusterRecurringIssues(window90.map(x => x.t));
+  const usedClusterIds = new Set();
+  const recurringIssues = recurringClusters.map(cluster => {
+    const clusterTickets = cluster.tickets;
+    const clusterEntries = clusterTickets.map(t => byExternalId.get(t.externalId));
+    const dates = clusterTickets.map(t => new Date(t.createdAt).getTime());
+    const hasHigh = clusterEntries.some(x => x.priorityAsOf === 'High');
+    const componentCounts = {};
+    clusterEntries.forEach(x => { const c = x.categoryAsOf || 'Other'; componentCounts[c] = (componentCounts[c] || 0) + 1; });
+    const component = Object.entries(componentCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    const stillOpen = clusterEntries.some(x => x.stageAsOf !== 'res');
+    return {
+      cluster_id: clusterIdFor([...cluster.words], usedClusterIds),
+      label: clusterTickets[0].subject || '(no subject)',
+      occurrences_90d: clusterTickets.length,
+      first_seen: new Date(Math.min(...dates)).toISOString().slice(0, 10),
+      last_seen: new Date(Math.max(...dates)).toISOString().slice(0, 10),
+      severity: hasHigh ? 'high' : 'medium',
+      // Heuristic: Integration/IT Escalation categories are the
+      // booking-engine/PMS/payment/channel-facing ones - not a real
+      // revenue-impact assessment, which this app has no data for.
+      revenue_impacting: component === 'Integration' || component === 'IT Escalation',
+      component,
+      vendor: null,
+      currently_open: stillOpen,
+      ticket_refs: clusterTickets.map(churnTicketRef)
+    };
+  }).sort((a, b) => b.occurrences_90d - a.occurrences_90d);
+
+  const criticalOpen = openCritical
+    .sort((a, b) => a.createdAtMs - b.createdAtMs)
+    .slice(0, 25)
+    .map(x => {
+      const targetHours = slaTargetHoursFor(x.priorityAsOf);
+      const ageHours = (asOfMs - x.createdAtMs) / 3600000;
+      return {
+        ticket_ref: churnTicketRef(x.t),
+        opened_at: new Date(x.createdAtMs).toISOString(),
+        age_days: Math.round((ageHours / 24) * 10) / 10,
+        severity: 'critical',
+        revenue_impacting: x.categoryAsOf === 'Integration' || x.categoryAsOf === 'IT Escalation',
+        component: x.categoryAsOf || null,
+        sla_breached: businessMsInRange(x.createdAtMs, asOfMs) / 3600000 > targetHours
+      };
+    });
+
+  return {
+    quinta_property_id: null,
+    company_name: companyName,
+    data_available: true,
+    summary: {
+      open_tickets: openAsOf.length,
+      open_critical: openCritical.length,
+      // See the mapping note above openCritical: High -> "critical", Medium
+      // -> "high" - this app has no distinct critical tier to report instead.
+      open_high: openAsOf.filter(x => x.priorityAsOf === 'Medium').length,
+      oldest_unresolved_days: Math.round(oldestOpenDays * 10) / 10,
+      ...windowCounts,
+      tickets_prev_30d: prevWindowCount,
+      avg_resolution_hours_30d: avgResolutionHours30d,
+      avg_resolution_hours_prev_30d: avgResolutionHoursPrev30d,
+      reopen_rate_90d: reopenRate90d,
+      escalations_90d: escalations90d,
+      policy_tickets_90d: policyTickets90d
+    },
+    recurring_issues: recurringIssues,
+    critical_open: criticalOpen,
+    sla: { breaches_90d: slaBreaches90d, breach_rate_90d: slaBreachRate90d }
+  };
+}
+
+// Only a token whose ApiToken.scope is exactly this value may pass - a
+// normal (scope: null) token, valid everywhere requireApiToken is used, is
+// deliberately refused here too. This is what makes a service-account token
+// handed to an external automation genuinely narrow: it authenticates
+// against this one endpoint and nothing else the token mechanism protects.
+function requireScopedApiToken(scope) {
+  return async (req, res, next) => {
+    try {
+      const token = await loadBearerApiToken(req);
+      if (!token) return res.status(401).json({ error: { code: 'missing_token', message: 'Missing or invalid bearer token.', request_id: req.churnRequestId } });
+      if (token.scope !== scope) return res.status(403).json({ error: { code: 'forbidden', message: 'Token is not scoped for this endpoint.', request_id: req.churnRequestId } });
+      req.apiUser = { id: token.user.id, username: token.user.username, role: token.user.role, displayName: token.user.displayName };
+      return next();
+    } catch (error) {
+      console.error(`Scoped API token auth failed [${req.churnRequestId}]:`, error.message || error);
+      return res.status(500).json({ error: { code: 'auth_failed', message: 'Unexpected server error.', request_id: req.churnRequestId } });
+    }
+  };
+}
+const requireChurnApiAccess = requireScopedApiToken('churn_signals');
+const churnSignalsLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+app.use('/api/churn-signals', (req, res, next) => { req.churnRequestId = crypto.randomUUID(); res.set('X-Request-Id', req.churnRequestId); next(); });
+
+async function runChurnSignalsQuery(req, res) {
+  const requestId = req.churnRequestId;
+  try {
+    const body = req.method === 'POST' ? (req.body || {}) : {};
+    const singleCompany = req.params.companyName ? decodeURIComponent(req.params.companyName) : null;
+    let companyNames = singleCompany ? [singleCompany] : body.company_names;
+    if (companyNames !== undefined && (!Array.isArray(companyNames) || companyNames.some(c => typeof c !== 'string'))) {
+      return res.status(400).json({ error: { code: 'invalid_request', message: 'company_names must be an array of strings.', request_id: requestId } });
+    }
+    if (companyNames && companyNames.length > 1000) {
+      return res.status(400).json({ error: { code: 'invalid_request', message: 'company_names exceeds the 1000-item cap.', request_id: requestId } });
+    }
+    const windows = Array.isArray(body.windows) && body.windows.every(w => Number.isFinite(w) && w > 0) ? body.windows : [30, 60, 90];
+
+    let asOfMs;
+    if (body.as_of) {
+      const parsed = new Date(`${body.as_of}T23:59:59.999Z`);
+      if (Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({ error: { code: 'invalid_request', message: 'as_of must be a valid YYYY-MM-DD date.', request_id: requestId } });
+      }
+      asOfMs = parsed.getTime();
+    } else {
+      asOfMs = Date.now();
+    }
+    const asOfDate = new Date(asOfMs).toISOString().slice(0, 10);
+    const maxWindowDays = Math.max(...windows, 90) * 2;
+
+    if (!companyNames) {
+      const distinct = await prisma.ticket.findMany({
+        where: { NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }], companyName: { not: null } },
+        select: { companyName: true },
+        distinct: ['companyName']
+      });
+      companyNames = distinct.map(d => d.companyName).filter(Boolean);
+      if (companyNames.length > 1000) companyNames = companyNames.slice(0, 1000);
+    }
+
+    const CHURN_EVENT_TYPES = ['ticket_status_changed', 'ticket_priority_changed', 'ticket_category_changed'];
+
+    async function computeOneCompany(companyName) {
+      try {
+        const tickets = await prisma.ticket.findMany({
+          where: {
+            companyName,
+            NOT: [{ category: { equals: 'Spam', mode: 'insensitive' } }],
+            createdAt: { lte: new Date(asOfMs) },
+            // Bounds the query while still catching every ticket that could
+            // have been open AT as_of: created within the window (for
+            // volume/trend stats), never resolved (obviously still
+            // relevant), or resolved but only AFTER as_of - `status`/
+            // `resolvedAt` here are the ticket's CURRENT values, so a ticket
+            // resolved after as_of can still have been open at that earlier
+            // point; the event replay below determines its actual
+            // point-in-time state. A ticket resolved BEFORE as_of with an
+            // old createdAt correctly falls outside every branch - it was
+            // already resolved and irrelevant to backlog/open stats at
+            // as_of, and too old to count toward window volume.
+            OR: [
+              { createdAt: { gt: new Date(asOfMs - maxWindowDays * 86400000) } },
+              { resolvedAt: null },
+              { resolvedAt: { gt: new Date(asOfMs) } }
+            ]
+          },
+          select: CHURN_SIGNALS_SELECT,
+          orderBy: [{ id: 'asc' }]
+        });
+        const externalIds = tickets.map(t => t.externalId).filter(Boolean);
+        const events = externalIds.length
+          ? await prisma.ticketEvent.findMany({
+              where: { eventType: { in: CHURN_EVENT_TYPES }, ticket: { externalId: { in: externalIds } } },
+              select: { id: true, eventType: true, createdAt: true, oldValue: true, newValue: true, ticket: { select: { externalId: true } } },
+              orderBy: [{ createdAt: 'asc' }, { id: 'asc' }]
+            })
+          : [];
+        // Map<externalId, Map<eventType, event[]>> - buildFieldHistory reads
+        // eventsByTicket.get(id)?.[eventType], one replay per tracked field.
+        const eventsByTicket = new Map();
+        for (const ev of events) {
+          const key = ev.ticket.externalId;
+          if (!eventsByTicket.has(key)) eventsByTicket.set(key, {});
+          const byType = eventsByTicket.get(key);
+          if (!byType[ev.eventType]) byType[ev.eventType] = [];
+          byType[ev.eventType].push(ev);
+        }
+        return { ok: true, result: computeCompanySignals(companyName, tickets, eventsByTicket, asOfMs, windows) };
+      } catch (error) {
+        console.error(`Churn signals failed for company "${companyName}" [${requestId}]:`, error.message || error);
+        return { ok: false, result: { quinta_property_id: null, company_name: companyName, data_available: false, reason: 'SOURCE_ERROR' } };
+      }
+    }
+
+    // Bounded concurrency: enough to matter for a large portfolio request
+    // (spec asks for <30s end to end) without opening hundreds of
+    // simultaneous connections against the Postgres pool.
+    const CONCURRENCY = 10;
+    const results = new Array(companyNames.length);
+    let anyFailure = false;
+    let cursor = 0;
+    async function worker() {
+      while (cursor < companyNames.length) {
+        const i = cursor++;
+        const { ok, result } = await computeOneCompany(companyNames[i]);
+        if (!ok) anyFailure = true;
+        results[i] = result;
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, companyNames.length) }, worker));
+
+    const responseBody = {
+      as_of: asOfDate,
+      generated_at: new Date().toISOString(),
+      results,
+      meta: {
+        requested: companyNames.length,
+        returned: results.length,
+        identity_note: 'quinta_property_id is not available in this app yet; results are keyed by company_name (exact match) instead.',
+        sla_definition: 'working_hours_vs_priority_target (08:00-12:00 and 14:00-17:00, weekdays) - not the dashboard\'s shift-time-aware SLA clock',
+        point_in_time_reconstruction: 'event_replay'
+      }
+    };
+    return res.status(anyFailure ? 207 : 200).json(responseBody);
+  } catch (error) {
+    console.error(`Churn signals request failed [${requestId}]:`, error.message || error);
+    return res.status(500).json({ error: { code: 'internal_error', message: 'Unexpected server error.', request_id: requestId } });
+  }
+}
+
+// Rate limit BEFORE auth: a missing/invalid/wrong-scope token would
+// otherwise never reach the limiter, leaving token-guessing traffic
+// unthrottled (each attempt still costs a DB round trip in
+// loadBearerApiToken). Impractical to actually brute-force given the
+// token's entropy, but this is free defense-in-depth.
+app.post('/api/churn-signals/bulk', churnSignalsLimiter, requireChurnApiAccess, runChurnSignalsQuery);
+app.get('/api/churn-signals/:companyName', churnSignalsLimiter, requireChurnApiAccess, runChurnSignalsQuery);
+
+/* One-off: restart the SLA clock of every ticket sitting in Waiting on Contact.
+
+   The clock is frozen in that column now, but these tickets went in with time
+   already on it - some of it from before the hold existed - and would come
+   out overdue the moment the client answered. Moving their restart point to
+   now gives each one a full SLA from here. Only that column: every other
+   ticket keeps its clock as it is.
+
+   Runs once per board: the marker file sits next to the board state, so a
+   restart does not reset them again. The state-file write is synchronous, so
+   no board save can land in between the read and the write. The database
+   copy (what the KPI dashboard reads) follows. */
+const SLA_WCT_RESET_MARKER = path.join(path.dirname(DATA_PATH), 'sla-reset-waiting-on-contact.json');
+async function resetWaitingOnContactSlaOnce() {
+  if (fs.existsSync(SLA_WCT_RESET_MARKER)) return;
+  const now = Date.now();
+  const state = safeReadState();
+  const stages = (state.ticketState && typeof state.ticketState === 'object') ? state.ticketState : {};
+  const ids = Object.keys(stages).filter(id => stages[id] === 'wct');
+  if (ids.length) {
+    state.ticketSlaResetAt = (state.ticketSlaResetAt && typeof state.ticketSlaResetAt === 'object') ? state.ticketSlaResetAt : {};
+    ids.forEach((id) => { state.ticketSlaResetAt[id] = now; });
+    fs.writeFileSync(DATA_PATH, JSON.stringify(state, null, 2), 'utf8');
+  }
+  // Recorded before the database is touched: the board state is what the
+  // badges and every later save come from, so that is the part that must not
+  // run twice.
+  fs.writeFileSync(SLA_WCT_RESET_MARKER, JSON.stringify({ at: new Date(now).toISOString(), tickets: ids }, null, 2), 'utf8');
+  if (ids.length) {
+    await prisma.ticket.updateMany({ where: { externalId: { in: ids } }, data: { slaResetAt: new Date(now) } });
+  }
+  console.log(`SLA reset for ${ids.length} ticket(s) in Waiting on Contact.`);
+}
+
+/* One-off: hand SGU's tickets in New to the rest of the support team.
+
+   Until the distribution changed, every ticket that named nobody could land
+   on SGU, and SGU was left holding a New column the rest of the team should
+   have been sharing. This moves those tickets - only SGU's, only in New - to
+   the other support agents, at random, weighted towards whoever has the most
+   room under the per-priority targets the board now spreads by (8 High, 10
+   Medium, 10 Low open each, the same numbers as SUPPORT_PRIORITY_TARGETS in
+   index.html). Here the targets are hard caps: a ticket that would push every
+   agent past theirs stays with SGU rather than overloading someone.
+
+   Runs once per database, recorded as a SyncLog row - not a marker file next
+   to the board state, because a container started on a fresh volume would
+   find no file and shuffle the queue again. If the database cannot be asked
+   whether it already ran, it does not run. The board state is written with a
+   fresh assignment clock, so a tab still holding the old assignment loses the
+   per-ticket merge instead of putting the ticket back on SGU. */
+const SGU_NEW_REDISTRIBUTION_SYNC_TYPE = 'sgu_new_redistribution_v1';
+const REDISTRIBUTION_FROM = 'SGU';
+const REDISTRIBUTION_TO = [...SUPPORT_AGENT_CODES].filter(code => code !== REDISTRIBUTION_FROM);
+const REDISTRIBUTION_CAPS = { High: 8, Medium: 10, Low: 10 };
+const redistributionPriority = (value) => {
+  const p = String(value || '').trim().toLowerCase();
+  if (p === 'high' || p === 'urgent') return 'High';
+  if (p === 'low') return 'Low';
+  return 'Medium';
+};
+// Pure planning step, kept apart from the writes so it can be checked on its
+// own. random is injectable for the same reason.
+function planSguNewRedistribution(state, random = Math.random, onLeave = new Set()) {
+  const stage = id => String(state.ticketState?.[id] || 'new').trim().toLowerCase();
+  const isLive = id => state.ticketCategory?.[id] !== 'Spam'
+    && !state.ticketArchived?.[id]
+    && !state.ticketDuplicateOf?.[id];
+  const priorityOf = id => redistributionPriority(state.ticketPriority?.[id]);
+  const assignees = state.ticketAssignee || {};
+  const load = Object.fromEntries(REDISTRIBUTION_TO.map(a => [a, { High: 0, Medium: 0, Low: 0 }]));
+  Object.keys(assignees).forEach((id) => {
+    const agent = String(assignees[id] || '').toUpperCase();
+    if (!load[agent] || !isLive(id) || stage(id) === 'res') return;
+    load[agent][priorityOf(id)]++;
+  });
+  const candidates = Object.keys(assignees)
+    .filter(id => String(assignees[id] || '').toUpperCase() === REDISTRIBUTION_FROM && stage(id) === 'new' && isLive(id));
+  // Shuffled, so when the room runs out it is not always the same end of the
+  // queue that stays behind.
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+  const moves = [];
+  const kept = [];
+  for (const id of candidates) {
+    const priority = priorityOf(id);
+    const cap = REDISTRIBUTION_CAPS[priority];
+    const room = REDISTRIBUTION_TO
+      .filter(agent => !onLeave.has(agent))
+      .map(agent => ({ agent, room: Math.max(0, cap - load[agent][priority]) }))
+      .filter(x => x.room > 0);
+    if (!room.length) { kept.push(id); continue; }
+    let roll = random() * room.reduce((sum, x) => sum + x.room, 0);
+    const pick = room.find(x => (roll -= x.room) < 0) || room[room.length - 1];
+    load[pick.agent][priority]++;
+    moves.push({ id, to: pick.agent, priority });
+  }
+  return { moves, kept, load };
+}
+
+async function redistributeSguNewTicketsOnce() {
+  let done;
+  try {
+    done = await prisma.syncLog.findFirst({ where: { provider: 'kanban', syncType: SGU_NEW_REDISTRIBUTION_SYNC_TYPE, status: 'success' } });
+  } catch (error) {
+    console.warn('SGU redistribution skipped - could not check whether it already ran:', error?.message || error);
+    return;
+  }
+  if (done) return;
+  // The database's view of who holds what wins over a stale state file.
+  const state = await hydrateStateFromDatabase(safeReadState());
+  // Who is off has to be known before anything is handed out.
+  await loadAgentLeave();
+  const { moves, kept, load } = planSguNewRedistribution(state, Math.random, new Set(Object.keys(activeAgentLeave())));
+  const now = Date.now();
+  if (moves.length) {
+    const entries = [];
+    moves.forEach(({ id, to }) => {
+      entries.push({ field: 'ticketAssignee', id, value: to });
+      entries.push({ field: 'ticketAssigneeTouchedAt', id, value: now });
+      entries.push({ field: 'ticketAssignmentMode', id, value: 'support' });
+      entries.push({ field: 'ticketAssigneeBy', id, value: { by: null, source: 'redistribution/sgu-new', at: now } });
+    });
+    writeServerFieldsIntoState(entries);
+  }
+  // Recorded straight after the board state, before the database copy: the
+  // board is what every later save comes from, so that part must not repeat.
+  await prisma.syncLog.create({
+    data: {
+      provider: 'kanban',
+      syncType: SGU_NEW_REDISTRIBUTION_SYNC_TYPE,
+      status: 'success',
+      message: `Moved ${moves.length} of SGU's New ticket(s); ${kept.length} stayed with SGU (every agent at their cap).`,
+      metadata: { at: new Date(now).toISOString(), moves, kept, loadAfter: load }
+    }
+  }).catch((error) => console.error('SGU redistribution marker write failed:', error?.message || error));
+  for (const { id, to } of moves) {
+    try {
+      const ticket = await findTicketRecordByKanbanId(id);
+      if (!ticket) continue;
+      const updated = await prisma.ticket.update({ where: { id: ticket.id }, data: { assignedAgent: to } });
+      // The assignment event is also the assignment's clock for
+      // hydrateStateFromDatabase, so the new owner wins on the next load too.
+      await auditTicketChanges({
+        ticketId: ticket.id,
+        before: ticket,
+        after: updated,
+        fields: ['assignedAgent'],
+        fieldMetadata: { assignedAgent: { actor: null, source: 'redistribution/sgu-new' } }
+      });
+    } catch (error) {
+      console.warn(`SGU redistribution: database update failed for ${id}:`, error?.message || error);
+    }
+  }
+  const byAgent = moves.reduce((acc, m) => { acc[m.to] = (acc[m.to] || 0) + 1; return acc; }, {});
+  console.log(`SGU redistribution: moved ${moves.length} New ticket(s) ${JSON.stringify(byAgent)}, ${kept.length} kept with SGU.`);
+}
+
 const server = app.listen(PORT, () => {
   console.log(`Support Kanban secure web app on http://localhost:${PORT}`);
+  refreshAgentRoster().then(loaded => {
+    if (loaded) console.log(`Agent roster: ${SUPPORT_AGENT_CODES.size} support, ${CS_AGENT_CODES.size} CS (from users)`);
+  });
+  resetWaitingOnContactSlaOnce().catch((error) => {
+    console.error('Waiting on Contact SLA reset failed:', error?.message || error);
+  });
+  redistributeSguNewTicketsOnce().catch((error) => {
+    console.error('SGU redistribution failed:', error?.message || error);
+  });
+  // Every agent starts from 100% at the baseline: what was resolved before it
+  // counts as met, and what was still open is measured from it. Once per
+  // database, so it no longer waits on an admin pressing the button. The first
+  // KPI snapshot comes after it, so it sees the restarted clocks.
+  // Snoozes that run out give their held SLA time back even with no board open.
+  setInterval(() => { releaseExpiredSnoozes().catch(error => console.error('Snooze release failed:', error?.message || error)); }, 60000).unref?.();
+  restartOpenSlaClocksAtBaselineOnce()
+    .catch((error) => console.error('SLA baseline restart failed:', error?.message || error))
+    .then(() => resetSlaOfNamedTicketsOnce())
+    .catch((error) => console.error('SLA manual reset failed:', error?.message || error))
+    .then(() => resetFrozenSlaClocksOnce())
+    .catch((error) => console.error('Frozen SLA reset failed:', error?.message || error))
+    .then(() => resetArchivedOpenSlaClocksOnce())
+    .catch((error) => console.error('Archived SLA reset failed:', error?.message || error))
+    .then(() => resetUncategorisedSlaClocksOnce())
+    .catch((error) => console.error('Uncategorised SLA reset failed:', error?.message || error))
+    .then(() => currentKpiSnapshot())
+    .catch((error) => console.error('KPI snapshot failed:', error?.message || error))
+    .finally(scheduleKpiSnapshots);
   if (SESSION_SECRET === 'change-this-session-secret') {
     console.log('WARNING: Set SESSION_SECRET before production use.');
   }

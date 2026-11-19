@@ -7,27 +7,45 @@
   <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
   <title>Quinta Support Login</title>
   <style>
-    body{font-family:Segoe UI,Arial,sans-serif;background:linear-gradient(135deg,#f8fafc,#e2e8f0);display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
-    .card{background:#fff;padding:28px;border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.12);width:min(380px,92vw)}
-    h1{margin:0 0 8px;font-size:20px;color:#1e293b}
-    p{margin:0 0 16px;color:#64748b;font-size:13px}
-    label{display:block;font-size:12px;color:#475569;font-weight:600;margin-bottom:6px}
-    input{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:12px;box-sizing:border-box}
-    button{width:100%;padding:10px;border:none;border-radius:8px;background:#4f46e5;color:#fff;font-weight:700;cursor:pointer}
-    button:disabled{opacity:.65;cursor:not-allowed}
-    .link-btn{border:0;background:transparent;color:#4f46e5;width:auto;padding:0;font-size:13px;font-weight:700}
-    .row{display:flex;justify-content:flex-end;margin:-4px 0 14px}
-    .err,.msg{margin-top:10px;font-size:12px;min-height:16px}
+    @import url('https://fonts.googleapis.com/css2?family=Caladea:wght@700&family=Inter:wght@400;500;600;700&display=swap');
+    /* Same chrome as the board: the brand's black warmed towards violet, with
+       the accent gradient kept for the one action on the page. */
+    :root{--ink:#0d0f20;--text:#13152c;--muted:#5a6082;--border:#cdd1e6;--primary:#5b4cf5;--grad:linear-gradient(135deg,#6d5efc 0%,#a855f7 62%,#ec4899 130%)}
+    *{box-sizing:border-box}
+    body{font-family:Inter,'Segoe UI',Arial,sans-serif;margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;padding:24px 16px;color:var(--text);-webkit-font-smoothing:antialiased;
+      background:radial-gradient(700px 420px at 12% 8%,rgba(124,92,255,.45),transparent 70%),radial-gradient(600px 400px at 92% 96%,rgba(236,72,153,.28),transparent 70%),linear-gradient(180deg,#1a1d38,var(--ink))}
+    .brand{display:flex;align-items:center;gap:12px;color:#fff}
+    .brand-mark{width:40px;height:40px;border-radius:12px;background:#fff;color:#000;display:grid;place-items:center;font-weight:800;font-size:20px;box-shadow:0 10px 30px rgba(124,92,255,.5)}
+    .brand-name{font-family:Caladea,Georgia,serif;font-weight:700;font-size:26px;letter-spacing:-.01em;line-height:1}
+    .brand-tag{display:block;font-family:Inter,'Segoe UI',sans-serif;font-size:12px;font-weight:500;color:rgba(255,255,255,.55);margin-top:5px;letter-spacing:.02em}
+    .card{background:#fff;padding:30px 30px 26px;border-radius:20px;box-shadow:0 30px 80px rgba(0,0,0,.45),0 0 0 1px rgba(255,255,255,.06);width:min(400px,100%);animation:rise .3s cubic-bezier(.2,.9,.3,1.1)}
+    @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+    h1{margin:0 0 6px;font-family:Caladea,Georgia,serif;font-size:24px;font-weight:700;color:var(--text)}
+    p{margin:0 0 20px;color:var(--muted);font-size:14px;line-height:1.5}
+    label{display:block;font-size:12.5px;color:#353a5c;font-weight:600;margin-bottom:6px}
+    input{width:100%;padding:11px 12px;border:1px solid var(--border);border-radius:11px;margin-bottom:14px;font:inherit;font-size:15px;color:var(--text);background:#fff;transition:border-color .15s,box-shadow .15s}
+    input:hover{border-color:#b4abfb}
+    input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(91,76,245,.22)}
+    button{width:100%;padding:12px;border:none;border-radius:11px;background:var(--grad);color:#fff;font:inherit;font-size:15px;font-weight:650;cursor:pointer;box-shadow:0 8px 22px rgba(109,94,252,.35),inset 0 1px 0 rgba(255,255,255,.22);transition:filter .15s,transform .15s}
+    button:hover{filter:brightness(1.07);transform:translateY(-1px)}
+    button:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(91,76,245,.35)}
+    button:disabled{opacity:.65;cursor:not-allowed;transform:none;filter:none}
+    .link-btn{border:0;background:transparent;color:var(--primary);width:auto;padding:0;font-size:13px;font-weight:600;box-shadow:none}
+    .link-btn:hover{transform:none;filter:none;text-decoration:underline}
+    .row{display:flex;justify-content:flex-end;margin:-6px 0 18px}
+    .err,.msg{margin-top:12px;font-size:13px;min-height:16px}
     .err{color:#dc2626}
-    .msg{color:#64748b}
+    .msg{color:var(--muted)}
     .msg.ok{color:#16a34a}
     .msg.err{color:#dc2626}
     .hidden{display:none}
+    @media (prefers-reduced-motion:reduce){.card{animation:none}}
   </style>
 </head>
 <body>
+  <div class="brand" aria-hidden="true"><span class="brand-mark">Q</span><span><span class="brand-name">Support Kanban</span><span class="brand-tag">The Quintessence of Data</span></span></div>
   <form class="card" id="login-form">
-    <h1>Support Kanban</h1>
+    <h1>Sign in</h1>
     <p>Sign in to access the secure board.</p>
     <label for="username">Username</label>
     <input id="username" name="username" autocomplete="username" required />

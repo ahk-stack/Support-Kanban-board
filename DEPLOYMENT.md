@@ -448,6 +448,27 @@ If a leg fails: a 403 on the email means the consent above is missing or the
 chosen mailbox is refused; a webhook error means the URL is wrong, the flow is
 off, or the flow rejected the body.
 
+## Where feedback goes
+
+### The feedback bubble
+
+Feedback is a bubble in the bottom-right corner, not a header button and not a
+modal. That is deliberate: a modal takes the screen, so the thing being
+reported on disappears behind it at exactly the moment it is needed. The bubble
+sits over the board and the ticket stays visible.
+
+It is a chat only in shape - there is no thread and nothing replies for real.
+What comes back is the board saying which delivery leg actually worked:
+*posted to Teams*, *emailed*, both, or that neither did. A failure is never
+dressed up as a thank-you.
+
+**Teams needs `FEEDBACK_WEBHOOK_URL` set** - it is currently empty, so nothing
+reaches Teams. The payload the board posts carries three shapes in one body: a
+MessageCard (old Office 365 connector), an Adaptive Card in `attachments`
+(Teams Workflows, the supported route now), and the raw fields (anyone reading
+it with their own Power Automate flow). So the same URL works whichever kind of
+webhook it points at, with no change here.
+
 ## Where feedback from the Feedback button goes
 
 Three things happen to one report, independently, so that no single failure
@@ -539,6 +560,429 @@ npm run check:m365
   backoff, and the pictures are fetched separately so a throttled attachment
   call no longer discards the whole message.
 
+## Projects
+
+QT-Tools → **Projects** is the team's Claude projects, runnable from the board:
+tabs for Your projects / Organization / Shared with you, a search box, and a
+card per project that expands into **a form built from that project's own
+inputs** — Q-SEO Implementation asks for a URL, account ID, license key and a
+server-language dropdown; Q-Share Mapping asks for a URL and a teamId.
+
+**The board never calls a model and needs no Anthropic API key.** Claude does
+the work, on a Claude account the team already has:
+
+1. **Run** queues the job (form values, and the project's instructions) and
+   the card shows *Waiting for Claude*.
+2. A Claude with the support board connector takes it with `claim_project_run`.
+   Either a runner PC does this by itself (`scripts/project-runner.ps1`, below),
+   or someone clicks **Copy for Claude** on the card and pastes the one line
+   into a claude.ai chat with the connector switched on.
+3. Claude does the work with its own tools — web, browser, any other MCP
+   servers it has — and calls `post_project_run` with the run's id.
+4. The card shows *Claude working*, then the answer under **Results**. Closing
+   the tab does not matter; the answer lands either way.
+
+**Ask a follow-up** queues another run carrying the conversation so far.
+
+Projects reach the board the same way: an admin opens the project in Claude and
+says **push to kanban prod** (or **push to kanban preprod**). The connector's
+own instructions tell Claude what that means: find or reuse the board entry with
+`list_board_projects`, then `register_project` with the project's name, its
+instructions verbatim and its input fields. The connector token must be an
+admin's. There is no free API that lists claude.ai Projects, so Claude pushes
+them rather than the board pulling them.
+
+### Data the board collects itself (Q-data audit)
+
+An audit starts by pulling the hotel's corpus from the n8n audit gateway with
+`AUDIT_API_KEY`. That call is made **by the board server**, not by Claude: a
+Claude handed the key and told to post it to an outside URL is refused by its
+own safety check, and the key has no business leaving the server anyway.
+
+When `AUDIT_API_KEY` is set and a project's slug or name matches
+`AUDIT_PROJECT_PATTERN` and it has a Team ID field, Run puts the run in
+*Collecting data*, POSTs `{"team_id": <n>}` to `AUDIT_GATEWAY_URL` with
+`Authorization: Bearer <AUDIT_API_KEY>`, stores the answer, and only then
+queues the run. `claim_project_run` hands the corpus to Claude as `collected`
+(inline when small, otherwise paged through `get_project_run_data`). A gateway
+error fails the run with the reason, before any Claude is involved. The stored
+corpus is deleted once the run is answered.
+
+| Variable | Default | |
+|---|---|---|
+| `AUDIT_API_KEY` | *(unset: no collection)* | Secret. Server env only. |
+| `AUDIT_GATEWAY_URL` | `https://n8n-staging.quicktext.im/webhook/qdata-audit-api` | |
+| `AUDIT_PROJECT_PATTERN` | `audit` | Regex, case-insensitive, on slug + name. |
+| `AUDIT_COLLECT_TIMEOUT_SECONDS` | `300` | |
+| `BOARD_LABEL` | `preprod` if `APP_BASE_URL` says so, else `prod` in production | Set it on every deployment: it names the board in hand-off lines and connector instructions, so a Claude with both connectors uses the right one. |
+
+### The runner PC
+
+`scripts/project-runner.ps1` turns Run into a hands-off button for **both**
+boards. On an always-on Windows PC with Claude Code signed in to the team
+account (its claude.ai connectors, Quinta MCP and skills come along), run once:
+
+    .\scripts\project-runner.ps1 -Install -ProdToken <prod token> -PreprodToken <preprod token>
+
+That registers a scheduled task that starts the runner hidden at every logon
+and restarts it if it dies; log in `%LOCALAPPDATA%\kanban-runner\runner.log`.
+It checks each board's queue over plain HTTP every 20 seconds, so an empty
+queue costs nothing, and starts `claude -p` only when a run is waiting, with
+only that board's connector enabled. Bash is not allowed: nothing a run needs
+should require a secret on the runner. Runs count against the Claude account
+signed in on that PC, and use that account's skill versions - update skills
+(e.g. `q-data-audit`) there. Without a runner, runs wait for someone to paste
+the hand-off line.
+
+### A runner on your own PC
+
+The same script on an agent's own PC, with their own connector tokens and
+`-Mine`, makes Run go straight to that PC — no tab, nothing to paste — and does
+the run on that agent's own Claude account:
+
+    .\scripts\project-runner.ps1 -Install -Mine -ProdToken <your prod token> -PreprodToken <your preprod token>
+
+A `-Mine` runner asks for `/api/mcp/project-runs/queued?mine=1` and gets only
+the runs its token's owner queued. Every queue check is a check-in
+(`ClaudeProjectRunner`, created on first use), so the board knows whose PC is
+listening: the shared runner leaves a run alone while its owner's PC has
+checked in within the last 90 seconds, and takes it anyway once it has waited
+past the grace period (the PC is busy with another run, or asleep). While a run
+waits, the panel says who is picking it up — your PC, the shared runner, or
+nobody, in which case the hand-off line is the way.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `PROJECT_LOCAL_RUNNER_GRACE_SECONDS` | `180` | How long the shared runner leaves a run to its owner's own PC before taking it. |
+
+### Why the catalogue lives here and not in Claude
+
+**There is no API for claude.ai Projects.** The Admin API covers members,
+invites, workspaces, API keys, rate limits, service accounts, WIF and CMEK; for
+a claude.ai organisation it is narrower still — members, invites, groups, custom
+roles, spend limits. A project's name, description and instructions are not
+retrievable through any of them, so the board cannot sync that grid and keeps
+its own registry in `ClaudeProject`, created on first use with
+`CREATE TABLE IF NOT EXISTS` (no migration step).
+
+The table is seeded once, on an empty table, with the projects already in use
+and the inputs each one names. **Instructions are deliberately left empty**:
+only the people who wrote each project can supply those, and a guessed system
+prompt would be worse than an honest gap. Until one is filled in the card reads
+*Needs setup* and Run is disabled.
+
+### What has to be configured
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `PROJECT_RUN_STALE_MINUTES` | `120` | A run Claude claimed but never answered is reported as failed after this long. |
+| `PROJECT_QUEUE_EXPIRE_HOURS` | `72` | A run nobody picked up is dropped after this long. |
+| `CLAUDE_CREDENTIAL_SECRET` | falls back to `SESSION_SECRET` | Wraps each agent's Compliance Access Key before it is stored. See below. |
+
+No `ANTHROPIC_API_KEY` is needed for projects.
+
+### The Compliance Access Key is encrypted at rest
+
+The key an agent pastes into **Connect Claude** is the one Anthropic credential
+that cannot live in the environment: each agent supplies their own, so it has to
+be persisted. It is wrapped with AES-256-GCM before it goes into
+`OAuthToken.accessToken`, so a database dump — a backup, a restored snapshot, a
+support export — does not hand over a key that can read the organisation's
+Claude projects.
+
+The wrapping key is derived from `CLAUDE_CREDENTIAL_SECRET`, or from
+`SESSION_SECRET` when that is unset, so an existing deployment needs no new
+configuration. Two consequences worth knowing:
+
+- **Rotating either secret makes stored keys unreadable.** The connection then
+  reports itself as disconnected and the agent pastes theirs again. That is the
+  correct outcome for a rotated secret, not a failure.
+- **A key stored before this shipped is still plaintext and is still read.**
+  Upgrading disconnects nobody; the next connect or sync rewrites it wrapped.
+
+Only the Claude provider goes through this. HubSpot and M365 tokens are stored
+exactly as they were.
+
+Then, per project: **Edit → paste the instructions → Save**. Admins only.
+
+Inputs are defined as JSON on the same editor, and that is what generates the
+form:
+
+    [{"key":"websiteUrl","label":"Website URL","type":"url","required":true},
+     {"key":"serverLanguage","label":"Server language","type":"select",
+      "required":true,"options":["Node.js","Python","PHP"]}]
+
+Types: `text`, `textarea`, `number`, `url`, `select`.
+
+### Runs
+
+Streamed server-side and awaited whole — these produce long answers, and a
+non-streaming request of that size is what trips an HTTP timeout. The response
+comes back complete rather than token by token; forwarding the stream to the
+browser would be nicer and is a clean follow-up.
+
+Runs cost money and are started by a button, so they have their own rate limit
+(10 per minute per board) rather than sharing the general API limiter. A policy
+refusal arrives as a normal 200 with `stop_reason: "refusal"` and is reported as
+a refusal, not as empty output.
+
+### Follow-ups
+
+`POST /api/projects/:id/chat` continues a thread that Run started. It is the
+same request as a run with a different message list — the project's instructions
+stay the cached system prompt on every turn, so turn nine still answers as that
+project rather than drifting into a general chat.
+
+The transcript is held in the browser and replayed on each request rather than
+stored: a project thread is a working session, not a record the board owes
+anyone, which means no new table and nothing to prune. It is still checked like
+any other untrusted input — roles must be `user` or `assistant`, they must
+alternate, the first must be the project's own answer and the last the question
+being asked, at most 40 turns of 20,000 characters each. Past that the panel
+says to run the project again rather than silently truncating the history.
+
+Follow-ups share the run limiter, because they cost the same money.
+
+## The SLA clock
+
+An SLA counts **08:00-12:00 and 14:00-17:00 on weekdays** - seven hours a day,
+not twenty-four and not the nine between the first and last. The lunch gap
+matters: counting through it made a ticket that arrived at 11:50 look an hour
+older by 14:00 than the work anyone could have done on it.
+
+On top of the business hours, the clock only runs while the ticket's **assigned
+agent is logged in and not on a break**. An unassigned ticket says so rather
+than showing a countdown nobody is working against.
+
+The same rule is implemented twice on purpose - `businessMsInRange` in
+`server.js` for the KPI dashboard, and its twin in `index.html` for the badges -
+so both sides of the app agree. Change one and change the other.
+
+Those hours are the team's local time. The board reads them in the browser's
+timezone; the server sets its own at startup from `SLA_TIMEZONE` (an IANA name,
+default `Africa/Tunis`, GMT+1 with no daylight saving). A generic `TZ` is
+ignored on purpose: a cluster-wide `TZ=UTC` put every KPI checkpoint an hour
+after the time the page showed. Without this the container counted in UTC, an
+hour off the board.
+
+A hold (Waiting on Contact, a Jira link, an open Velma bug) carries the clock
+over in working time: when it ends, the ticket resumes with exactly the working
+hours it had when the hold began (`businessPointBefore`).
+
+**Shift history survives deploys.** `data/` is not a persistent volume, so
+`data/shifts.json` is also saved to Postgres (`OAuthToken` row `shift-store`) a
+few seconds after each change and on SIGTERM, and merged back at boot. Before
+this, every deploy wiped all logged-in time, and every resolved ticket's SLA
+read "met in 0h". `since` in that row is when the history became complete;
+resolved tickets whose clock started earlier are reported as not measured
+(`no_history`) instead of met.
+
+An agent marked **Off** puts every open ticket they hold on hold. Each leave is
+also kept as a period in `data/shifts.json` (`agents.<CODE>.leaves`), because
+the leave row itself is deleted when it ends, and those periods are cut out of
+the clock - so it resumes where it stopped when they are back, or as soon as
+the ticket is given to someone who is in.
+
+### Breaks
+
+| | | |
+| --- | --- | --- |
+| `SHIFT_BREAK_MS` | 15 minutes | How long a break lasts. |
+| `SHIFT_BREAK_COOLDOWN_MS` | 2 hours | How long until the next one. |
+
+A break **ends by itself** after fifteen minutes. That is enforced on read
+rather than by a timer: a break that was started and never ended is treated as
+having ended fifteen minutes after it began, so an agent who closes the laptop
+mid-break does not get an open-ended pause on their SLA clock. Coming back early
+is always allowed and simply shortens it.
+
+The cooldown is measured from the **start** of the last break, not its end -
+from the end, someone could take fifteen minutes, come back, and be eligible
+again two hours later having actually paused twice in that window. While it is
+running the button is greyed and counts down; the server refuses a second break
+with `429 break_cooldown` regardless of what the button says.
+
+### A reply restarts the clock
+
+Every new message in a ticket's thread resets its SLA. The commitment is a
+response time, not a lifetime: a conversation that has been going back and forth
+for a week should be measured from its last reply, not from the day it arrived.
+
+The board records that moment per ticket, and it is mirrored into
+`Ticket.slaResetAt` so the KPI dashboard measures the same thing the badges do -
+otherwise the same ticket reads breached in one place and on track in the other.
+Null means never replied to, and the clock runs from `createdAt`.
+
+**This needs `prisma migrate deploy`** - unlike the other recent tables, a
+Prisma-selected column cannot be added with runtime DDL. Prisma validates a
+`select` against its own generated schema, so the column has to be in
+`schema.prisma` and the client regenerated (`prisma generate`), both of which
+are in the repo. Deploying the code without running the migration leaves the KPI
+dashboard returning 500.
+
+A ticket sitting in **Waiting on Contact** that gets a genuine client reply
+moves itself to **Waiting on Us** and starts counting again - that stage move
+already existed; what is new is that the clock restarts with it.
+
+### The SLA baseline and the KPI checkpoints
+
+Every agent starts from **100%** at the baseline, `SLA_BASELINE_AT` (default
+2026-10-16 08:00 +01:00; empty turns it off). A ticket resolved before it counts
+as met. On its first start with the baseline the server also restarts, at the
+baseline, the clock of every ticket still open then, so the backlog is
+measured from there too. That runs once per database (a `SyncLog` row of type
+`sla_baseline_restart_v1` records it); the Manage Users button only reports when
+it ran.
+
+From the baseline on, the SLA is measured live, and the **KPI dashboard updates
+at 00:00, 09:00, 12:00 and 16:00** in the SLA's time zone (Tunisia time). At each checkpoint the
+server takes one snapshot of the tickets, and every KPI figure and drilldown
+comes from it, with SLA positions judged as of that moment, until the next
+checkpoint. A change made in between reaches the dashboard at the next one, and
+everyone sees the same figures. The KPI page pulls once per checkpoint, not on a
+timer or on board changes; its header says what time the figures are from and
+when they next update. The snapshot is kept in memory, so a server that starts
+between checkpoints takes one at start-up, and the header shows that time.
+
+### Snoozed tickets
+
+A snoozed ticket's SLA is **held**: the badge reads "SLA on hold - snoozed" and
+the KPI dashboard counts it as `snoozeHold`, out of overdue and at risk. When
+the snooze ends (woken by hand, by a client reply, by moving the ticket, or by
+running out), the restart point moves forward so the clock resumes with the
+working time it had when the ticket was snoozed, like the admin hold.
+Re-snoozing a ticket that is already snoozed keeps it as one hold. A snooze
+that runs out while no board is open is ended by the server within a minute.
+
+A support agent can have at most **5** snoozed tickets at once
+(`SNOOZE_MAX_PER_AGENT`), counted on the ticket's assignee, whoever pressed
+Snooze. The board refuses the sixth up front, and the server drops it from any
+save that gets through anyway. Snoozes already there when the limit shipped are
+left alone; no new one is accepted until that agent is back under 5.
+Unassigned tickets, and tickets held by CS, are not limited.
+
+## One-time SLA reset for Waiting on Contact
+
+On its first start after this deploy, the server restarts the SLA clock of every
+ticket that is in **Waiting on Contact** at that moment, so none of them comes
+out of the column already overdue. Nothing else is touched. It writes
+`data/sla-reset-waiting-on-contact.json` (when, and which tickets) and does not
+run again while that file exists - delete it to run the reset once more.
+
+## Velma bug links
+
+A ticket can be linked to a row of the Velma bug Google Sheet: the agent enters
+the bug's ID, the server finds that row and stores a copy on the ticket. While
+linked, the SLA is on hold, the same as a Jira link.
+
+**This needs `prisma migrate deploy`** (`Ticket.velmaBugId`, `Ticket.velmaBugRow`)
+for the same reason as `slaResetAt` above.
+
+The sheet is private, so the server needs a Google identity that can read it.
+Either of these works; with both, the service account is tried first.
+
+**Option A - sign in with Google from the board (no admin needed per person).**
+Set this up once, then any agent who can already open the sheet connects their
+account from **Account > Google account** (or from the Velma modal when it says
+nothing can read the sheet). Their refresh token is stored encrypted in
+`OAuthToken` (`google:<userId>`) and the board keeps reading as them after they
+close the tab. If several people connect, the most recent one is tried first and
+an account without access to the sheet is skipped for the next.
+
+1. In Google Cloud, enable the **Google Sheets API**.
+2. Configure the OAuth consent screen with the scopes `openid`, `email` and
+   `.../auth/spreadsheets.readonly`. Audience: **External, published** (not
+   Testing, whose tokens expire after 7 days). **Internal** only works when the
+   Cloud project belongs to quinta.im's own Google organisation - the current
+   project ("Dash Spreadsheet Connection") is under `sfa-org`, where Internal
+   refuses every quinta.im account with `403 org_internal`. An unverified
+   External app shows a "Google hasn't verified this app" warning on first
+   sign-in: Advanced > Go to the app.
+3. Create an **OAuth client ID** of type *Web application* with the authorised
+   redirect URI `https://<board host>/auth/google/callback` - one per environment
+   (pre-prod and prod each need their own URI listed).
+4. Paste the client ID and secret into the board: **Account > Google account**
+   (admins only) shows these steps with the exact origin and redirect URI to copy,
+   and a form to save the two values - stored in `OAuthToken`
+   (`google-oauth-client`), the secret encrypted. No env change or redeploy.
+   Alternatively set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`,
+   which take precedence and lock the board form. The redirect URI is derived
+   from `APP_BASE_URL`; set `GOOGLE_OAUTH_REDIRECT_URI` only if it has to differ.
+
+"Sign in with Google" then opens Google in a new tab; when it finishes, the tab
+tells the board (over a BroadcastChannel, since Cross-Origin-Opener-Policy cuts
+`window.opener`) and closes itself.
+
+The stored tokens are encrypted with `CLAUDE_CREDENTIAL_SECRET` (falling back to
+`SESSION_SECRET`), the same key as the Claude connector - changing it disconnects
+everyone, who then simply sign in again.
+
+If no signed-in account or service account can read the sheet, the server falls back to the sheet's
+link: a sheet shared as "Anyone with the link can view" is read from its CSV
+export with no credential.
+
+**Option B - a service account (nobody has to stay signed in).**
+
+1. In Google Cloud, enable the **Google Sheets API**, create a service account
+   and download a JSON key for it.
+2. Share the sheet with the service account's email (Viewer is enough).
+3. Either upload the key file from the board - **Account > Google account**
+   (admins only), stored encrypted in `OAuthToken` (`google-service-account`)
+   and checked against the sheet on save - or set `GOOGLE_SERVICE_ACCOUNT_JSON`
+   to the key file's contents, raw or base64 (the environment wins).
+
+**Status and the SLA.** The bug's **Status** column is read with the row (the
+value the dropdown shows). While it is anything other than DONE the ticket's SLA
+is on hold. Every few minutes (`VELMA_SYNC_MS`, default 3 minutes) the server
+re-reads the sheet for every linked ticket: when a bug turns DONE the hold ends
+and the SLA resumes from where the link stopped it (the restart point moves
+forward by the length of the hold, so the wait is not counted against support);
+if DONE is taken off again a new hold starts. A Jira link or Waiting on Contact
+still holds the ticket on its own. **Account > Google account > Check linked bugs
+now** runs the same check immediately.
+
+Optional: `VELMA_BUG_SHEET_ID` and `VELMA_BUG_SHEET_GID` (default to the current
+sheet and tab); `VELMA_BUG_EXTRA_SHEETS` - more sheets to look bugs up in, as
+`<spreadsheet id>:<gid>` comma separated (defaults to the second Velma bug sheet,
+`1NEMGFrVtEPJUqdfUX53lfKxAD3J87E_YikYj0y41_JA:1291300537`; set it empty for none).
+Sheets are searched in order and the first match wins; a link keeps its sheet.
+The Google account or service account must be able to open every sheet; one it
+cannot open is skipped and logged. `VELMA_BUG_ID_COLUMN` - the header of the ID column, if the
+automatic guess (a header such as `ID`, `Bug ID`, `Ticket ID`) picks the wrong one;
+`VELMA_BUG_STATUS_COLUMN` - the header of the status dropdown, if it is not called
+`Status`; `VELMA_DONE_STATUSES` - comma-separated values that count as done
+(default `DONE`; case, spaces and emoji are ignored).
+
+## Ticket distribution
+
+A ticket whose mail names a support agent, or is addressed to one, goes to that
+agent. Every other ticket goes to a support agent other than SGU, at random,
+weighted by how far each agent is below their share for the ticket's priority:
+on average **8 open High, 10 Medium and 10 Low** each (`SUPPORT_PRIORITY_TARGETS`
+in index.html). These are targets, not caps - once everyone is at or past theirs,
+the ticket goes to whoever holds the fewest of that priority. The roll is seeded
+by the ticket id, so two open boards make the same choice.
+
+**Leave.** A support agent can be marked off from **Account > Availability**
+(or by clicking their name in the header's team load): admins for anyone, every
+agent for themselves, with an optional return date (the day they are back - the
+leave ends at the start of that day by itself). While off they are greyed out and
+cannot be picked in the assign menu, the bulk-assign bar or the new-ticket form;
+the automatic distribution skips them at every step (named in the mail, tagged,
+the weighted roll); the SGU redistribution gives them nothing; and the Claude
+connector's `update_ticket` refuses them (`409 agent_on_leave`). Tickets they
+already hold stay with them. Stored in Postgres (`OAuthToken`, provider
+`agent-leave:<CODE>`), so a redeploy does not forget it; no migration needed.
+
+**One-off on first start of this build:** SGU's tickets in **New** are handed to
+the other six support agents, at random within the same numbers used as hard caps
+(8 High / 10 Medium / 10 Low open each); anything that would push everyone past
+their cap stays with SGU. It runs once per database - recorded as a `SyncLog`
+row with `syncType = 'sgu_new_redistribution_v1'`, whose `metadata` lists every
+ticket moved and where to - so it also runs once on prod when this build ships
+there, unless that row is inserted first.
+
 ## Important security note
+
 
 The uploaded ZIP contained a `.env` file. Rotate the Neon password and any Microsoft/HubSpot secrets before production deployment.

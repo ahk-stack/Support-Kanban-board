@@ -60,6 +60,32 @@
     .message { min-height: 24px; margin-top: 14px; font-size: 0.95rem; }
     @media (max-width: 1040px) { .panel-grid { grid-template-columns: 1fr; } .users-list { max-height: none; } }
     @media (max-width: 700px) { .search-row { grid-template-columns: 1fr; } .form-row { grid-template-columns: 1fr; } }
+  
+    /* Board palette: the same violet-black chrome and accent gradient as the
+       main board, so moving between pages does not change products. */
+    :root { --q-ink: #0d0f20; --q-ink-soft: #1a1d38; --q-primary: #5b4cf5; --q-grad: linear-gradient(135deg, #6d5efc 0%, #a855f7 62%, #ec4899 130%); --q-ring: 0 0 0 3px rgba(91, 76, 245, .22); }
+    body { -webkit-font-smoothing: antialiased; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--q-primary) !important; box-shadow: var(--q-ring) !important; }
+    input[type="checkbox"] { accent-color: var(--q-primary); }
+    :root { color: #13152c; }
+    body { background: radial-gradient(1000px 480px at -10% -8%, rgba(124, 92, 255, .12), transparent 60%), radial-gradient(800px 420px at 110% 110%, rgba(236, 72, 153, .08), transparent 60%), #f3f4fb; }
+    a { color: var(--q-primary); }
+    .title { font-family: Caladea, Georgia, serif; font-weight: 700; letter-spacing: -.01em; }
+    .subtitle { color: #5a6082; }
+    .panel { border-radius: 20px; border-color: #e3e5f2; box-shadow: 0 2px 6px rgba(25, 22, 70, .04), 0 18px 44px rgba(25, 22, 70, .08); }
+    .btn { border-radius: 11px; font-weight: 650; padding: 11px 16px; }
+    .btn-primary { background: var(--q-grad); box-shadow: 0 8px 22px rgba(109, 94, 252, .30), inset 0 1px 0 rgba(255, 255, 255, .2); }
+    .btn-primary:hover { filter: brightness(1.07); }
+    .btn-secondary { border-color: #cdd1e6; color: #353a5c; }
+    .top a.btn-secondary { min-width: 0; padding: 11px 18px; border-radius: 11px; font-weight: 650; color: #353a5c; }
+    .search-row input, .form-group input, .form-group select { border-radius: 11px; border-color: #cdd1e6; background: #fff; }
+    .users-list { border-radius: 18px; background: #f8f9fe; }
+    .card { border-radius: 16px; border-color: #e3e5f2; }
+    .card:hover { box-shadow: 0 12px 28px rgba(109, 94, 252, .12); }
+    .card.selected { border-color: rgba(91, 76, 245, .5); box-shadow: 0 0 0 3px rgba(91, 76, 245, .15), 0 12px 28px rgba(109, 94, 252, .14); }
+    .card .avatar { background: var(--q-grad); color: #fff; }
+    .card .meta .role { background: #efedff; color: #4636d9; }
+    .card .status { background: #efedff; color: #4636d9; }
   </style>
 </head>
 <body>
@@ -98,6 +124,38 @@
         </div>
       </aside>
     </div>
+
+    <section class="panel" id="repairPanel" style="margin-top:22px;">
+      <div class="panel-header">
+        <div>
+          <h2>Restore wrongly re-opened tickets</h2>
+          <p>Finds resolved tickets that were moved out of Resolved in the chosen window without the client writing back, and puts them back to Resolved. Preview first - nothing changes until you press Restore.</p>
+        </div>
+      </div>
+      <div class="form-row" style="max-width:640px;">
+        <div class="form-group"><label for="repairSince">From</label><input id="repairSince" type="datetime-local" /></div>
+        <div class="form-group"><label for="repairUntil">To</label><input id="repairUntil" type="datetime-local" /></div>
+      </div>
+      <div class="button-row" style="margin-top:14px;">
+        <button class="btn btn-secondary" id="repairPreview" type="button">Preview</button>
+        <button class="btn btn-primary" id="repairApply" type="button" disabled>Restore</button>
+      </div>
+      <div class="message" id="repairMessage"></div>
+      <div id="repairList" class="help-text"></div>
+    </section>
+
+    <section class="panel" id="slaBaselinePanel" style="margin-top:22px;">
+      <div class="panel-header">
+        <div>
+          <h2>Start the SLA live from the baseline</h2>
+          <p>Tickets resolved before the baseline already count as met. This restarts the SLA clock of every ticket still open from the baseline, so the backlog is measured live from there too. The server does this by itself on its first start with the baseline, once per database; pressing it only says when it ran.</p>
+        </div>
+      </div>
+      <div class="button-row" style="margin-top:14px;">
+        <button class="btn btn-primary" id="slaBaselineRun" type="button">Restart open SLA clocks</button>
+      </div>
+      <div class="message" id="slaBaselineMessage"></div>
+    </section>
   </div>
 
   <script>
@@ -151,6 +209,24 @@
       return `${includeOwner ? '<option value="owner">Owner</option>' : ''}<option value="admin">Admin</option><option value="cs">CS</option><option value="support">Support</option>`;
     }
 
+    // The team is which dropdowns the person appears in on the board: the CS
+    // owner list, the support assignee list, or neither.
+    function teamOptionsHtml() {
+      return '<option value="">None</option><option value="cs">CS</option><option value="support">Support</option>';
+    }
+
+    function teamLabel(team) {
+      return { cs: 'CS team', support: 'Support team' }[team] || '';
+    }
+
+    // Picking CS or Support as the role puts them on that team too; an admin's
+    // team is left alone, since an admin can also work as an agent.
+    function followRoleWithTeam(roleSelect, teamSelect) {
+      roleSelect.addEventListener('change', () => {
+        if (roleSelect.value === 'cs' || roleSelect.value === 'support') teamSelect.value = roleSelect.value;
+      });
+    }
+
     function roleLabel(role) {
       const labels = { owner: 'Owner', admin: 'Admin', cs: 'CS', support: 'Support', agent: 'Support', viewer: 'Support' };
       return labels[role] || role || 'Support';
@@ -159,7 +235,7 @@
     function renderUsers() {
       const query = elements.searchInput.value.trim().toLowerCase();
       const visible = state.users.filter(user => {
-        const text = [user.username, user.displayName, user.email, user.role].filter(Boolean).join(' ').toLowerCase();
+        const text = [user.username, user.displayName, user.email, user.role, teamLabel(user.team)].filter(Boolean).join(' ').toLowerCase();
         return text.includes(query);
       });
       if (!visible.length) {
@@ -200,6 +276,14 @@
           role.style.color = '#92400e';
         }
         nameRow.append(name, role);
+        if (user.team) {
+          const team = document.createElement('span');
+          team.className = 'role';
+          team.style.background = user.team === 'cs' ? '#ecfdf5' : '#fff7ed';
+          team.style.color = user.team === 'cs' ? '#047857' : '#c2410c';
+          team.textContent = teamLabel(user.team);
+          nameRow.append(team);
+        }
 
         const subtitle = document.createElement('div');
         subtitle.className = 'subtitle';
@@ -232,8 +316,9 @@
           <div class="form-group"><label for="newEmail">Email</label><input id="newEmail" type="email" autocomplete="email" /></div>
           <div class="form-row">
             <div class="form-group"><label for="newRole">Role</label><select id="newRole">${roleOptionsHtml(currentUserIsOwner())}</select></div>
-            <div class="form-group"><label for="newPassword">Password</label><input id="newPassword" type="password" autocomplete="new-password" /></div>
+            <div class="form-group"><label for="newTeam">Team</label><select id="newTeam">${teamOptionsHtml()}</select></div>
           </div>
+          <div class="form-group"><label for="newPassword">Password</label><input id="newPassword" type="password" autocomplete="new-password" /></div>
         </div>
         <div class="button-row" style="justify-content:flex-end;gap:10px;margin-top:18px;">
           <button class="btn btn-secondary" id="cancelCreate" type="button">Cancel</button>
@@ -248,6 +333,9 @@
       const inputEmail = document.getElementById('newEmail');
       const inputRole = document.getElementById('newRole');
       const inputPassword = document.getElementById('newPassword');
+      const inputTeam = document.getElementById('newTeam');
+      inputTeam.value = ['cs', 'support'].includes(inputRole.value) ? inputRole.value : '';
+      followRoleWithTeam(inputRole, inputTeam);
       const createMessage = document.getElementById('createMessage');
       const submitCreate = document.getElementById('submitCreate');
       const cancelCreate = document.getElementById('cancelCreate');
@@ -268,6 +356,7 @@
         const displayName = inputDisplayName.value.trim() || null;
         const email = inputEmail.value.trim() || null;
         const role = inputRole.value;
+        const team = inputTeam.value;
 
         if (!username) {
           createMessage.textContent = 'Username is required.';
@@ -286,7 +375,7 @@
         try {
           await api('/api/admin/users', {
             method: 'POST',
-            body: { username, password, displayName, email, role }
+            body: { username, password, displayName, email, role, team }
           });
           createMessage.textContent = 'User created successfully.';
           createMessage.style.color = '#16a34a';
@@ -351,13 +440,14 @@
             <div class="form-group"><label for="inputRole">Role</label><select id="inputRole">${roleOptionsHtml(currentUserIsOwner() || isOwner(user))}</select></div>
             <div class="form-group"><label for="inputStatus">Status</label><select id="inputStatus"><option value="true">Active</option><option value="false">Disabled</option></select></div>
           </div>
+          <div class="form-group"><label for="inputTeam">Team (board dropdowns)</label><select id="inputTeam">${teamOptionsHtml()}</select></div>
           <div class="form-group"><label for="inputPassword">New password</label><input id="inputPassword" type="password" placeholder="Leave empty to keep current" autocomplete="new-password" /></div>
         </div>
         <div class="button-row">
           <button class="btn btn-primary" id="saveProfile" type="button">Save changes</button>
           <button class="btn btn-danger" id="deleteProfile" type="button">Delete user</button>
         </div>
-        <p class="help-text">Username, role, and email can be changed here. Upload a PNG/JPG/WEBP avatar if you want a profile photo.</p>
+        <p class="help-text">Team decides which board dropdowns this person is listed in: CS owners, Support assignees, or neither. Disabling or deleting a user takes them off it. Username, role, and email can be changed here. Upload a PNG/JPG/WEBP avatar if you want a profile photo.</p>
         <div class="message" id="profileMessage"></div>
       `;
 
@@ -375,12 +465,15 @@
       const inputRole = document.getElementById('inputRole');
       const inputStatus = document.getElementById('inputStatus');
       const inputPassword = document.getElementById('inputPassword');
+      const inputTeam = document.getElementById('inputTeam');
 
       inputRole.value = user.role;
+      inputTeam.value = user.team || '';
+      followRoleWithTeam(inputRole, inputTeam);
       inputStatus.value = String(user.isActive !== false);
       const ownerLocked = isOwner(user) && !currentUserIsOwner() && !currentUserIsSelectedUser(user);
       if (ownerLocked) {
-        [inputUsername, inputDisplayName, inputEmail, inputRole, inputStatus, inputPassword, uploadAvatar, removeAvatar, saveProfile, deleteProfile].forEach(el => {
+        [inputUsername, inputDisplayName, inputEmail, inputRole, inputTeam, inputStatus, inputPassword, uploadAvatar, removeAvatar, saveProfile, deleteProfile].forEach(el => {
           if (el) el.disabled = true;
         });
         profileMessage.textContent = 'Owner account: only an owner can change or delete this profile.';
@@ -443,6 +536,7 @@
           displayName: inputDisplayName.value.trim() || null,
           email: inputEmail.value.trim() || null,
           role: inputRole.value,
+          team: inputTeam.value,
           isActive: inputStatus.value === 'true'
         };
         if (inputPassword.value.trim()) payload.password = inputPassword.value.trim();
@@ -538,6 +632,58 @@
     });
 
     loadUsers();
+
+    // Restore wrongly re-opened tickets (POST /api/admin/repair/resolved-flips).
+    (() => {
+      const sinceEl = document.getElementById('repairSince');
+      const untilEl = document.getElementById('repairUntil');
+      const previewBtn = document.getElementById('repairPreview');
+      const applyBtn = document.getElementById('repairApply');
+      const msg = document.getElementById('repairMessage');
+      const list = document.getElementById('repairList');
+      const toLocalInput = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+      sinceEl.value = toLocalInput(new Date(Date.now() - 24 * 60 * 60 * 1000));
+      untilEl.value = toLocalInput(new Date());
+      const windowBody = () => ({ since: new Date(sinceEl.value).toISOString(), until: new Date(untilEl.value).toISOString() });
+      const show = (out) => {
+        const rows = (out.candidates || []).map(c => `<li><strong>${escapeHtml(c.ticketNumber || '')}</strong> ${escapeHtml(c.subject || '')} - now ${escapeHtml(c.status || '')}, moved ${escapeHtml(new Date(c.flippedAt).toLocaleString())}${c.flippedBy ? ' by ' + escapeHtml(c.flippedBy) : ''}</li>`).join('');
+        const skipped = (out.skipped || []).length ? `<p>${out.skipped.length} left alone (the client wrote back, or the ticket moved again since).</p>` : '';
+        list.innerHTML = (rows ? `<ul>${rows}</ul>` : '<p>Nothing to restore in this window.</p>') + skipped;
+      };
+      previewBtn.addEventListener('click', async () => {
+        msg.textContent = 'Looking...'; msg.style.color = '#475569'; list.innerHTML = ''; applyBtn.disabled = true;
+        try {
+          const out = await api('/api/admin/repair/resolved-flips', { method: 'POST', body: windowBody() });
+          msg.textContent = `${out.count} ticket(s) would be put back to Resolved.`;
+          show(out);
+          applyBtn.disabled = !out.count;
+        } catch (error) { msg.textContent = error.message; msg.style.color = '#b91c1c'; }
+      });
+      applyBtn.addEventListener('click', async () => {
+        if (!confirm('Put these tickets back to Resolved?')) return;
+        applyBtn.disabled = true; msg.textContent = 'Restoring...'; msg.style.color = '#475569';
+        try {
+          const out = await api('/api/admin/repair/resolved-flips', { method: 'POST', body: { ...windowBody(), apply: true } });
+          msg.textContent = `${out.restored} ticket(s) restored to Resolved. Open boards reload automatically.`;
+          msg.style.color = '#16a34a';
+          show(out);
+        } catch (error) { msg.textContent = error.message; msg.style.color = '#b91c1c'; applyBtn.disabled = false; }
+      });
+    })();
+
+    // Restart open SLA clocks at the baseline (POST /api/admin/sla/restart-at-baseline).
+    document.getElementById('slaBaselineRun').addEventListener('click', async (ev) => {
+      const msg = document.getElementById('slaBaselineMessage');
+      if (!confirm('Restart the SLA clock of every open ticket from the baseline? This runs once.')) return;
+      ev.target.disabled = true; msg.textContent = 'Restarting...'; msg.style.color = '#475569';
+      try {
+        const out = await api('/api/admin/sla/restart-at-baseline', { method: 'POST', body: {} });
+        msg.textContent = out.alreadyDone
+          ? `Already done on ${new Date(out.at).toLocaleString()}: ${out.message || ''}`
+          : `SLA clock restarted from ${new Date(out.baselineAt).toLocaleString()} for ${out.board} open ticket(s) on the board (${out.database} in the database).`;
+        msg.style.color = '#16a34a';
+      } catch (error) { msg.textContent = error.message; msg.style.color = '#b91c1c'; ev.target.disabled = false; }
+    });
   </script>
 </body>
 </html>

@@ -14,6 +14,9 @@ model User {
   isActive     Boolean  @default(true)
   displayName  String?
   email        String?
+  // Agent roster: 'cs', 'support' or null. Fills the CS/Support dropdowns;
+  // independent of role, since an admin can also be on a roster.
+  team         String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -50,6 +53,12 @@ model ApiToken {
   createdAt  DateTime  @default(now())
   lastUsedAt DateTime?
   revokedAt  DateTime?
+  // NULL = full access equal to the underlying user's role (every token
+  // issued before this column existed, and every one the UI/OAuth flow
+  // issues today). A non-null scope (e.g. 'churn_signals') narrows a token
+  // to exactly one endpoint - see requireApiToken/requireScopedApiToken in
+  // server.js for the enforcement.
+  scope      String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -108,6 +117,15 @@ model Ticket {
   emailMessageId          String?
   hubspotTicketId         String?
   jiraTicketKey           String?
+  // A row of the Velma bug spreadsheet this ticket is waiting on. Like a Jira
+  // link it puts the SLA on hold. velmaBugRow is the row as it read when the
+  // link was made: { row, url, fields: { header: value } }.
+  velmaBugId              String?
+  velmaBugRow             Json?
+  // An admin froze this ticket's SLA clock (the Hold button on the card):
+  // when, and who. Cleared on release, when the clock resumes where it stopped.
+  slaHoldAt               DateTime?
+  slaHoldBy               String?
   body                    String?
   emailRaw                Json?
   // The message body as Outlook returned it, captured the first time the
@@ -127,6 +145,12 @@ model Ticket {
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
   resolvedAt              DateTime?
+  // When this ticket's SLA clock was last restarted. Every new message in the
+  // thread resets it: the commitment is a response time, not a lifetime, so a
+  // conversation that has been going for a week is measured from its last
+  // reply rather than from the day it arrived. Null means never replied to,
+  // and the clock runs from createdAt.
+  slaResetAt              DateTime?
   resolvedTeamsNotifiedAt DateTime?
   // The short "#0042"-style number agents actually use to refer to a
   // ticket - durable (Postgres-assigned via its own sequence, backfilled
