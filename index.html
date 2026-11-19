@@ -6403,6 +6403,23 @@ body > header::after {
 .jt-sla-breached{color:var(--red-600);font-weight:800;}
 .jt-sla-met{color:var(--green-700);font-weight:700;}
 .jt-muted{color:var(--muted);}
+.jt-status-bar{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;}
+.jt-status-btn{font:inherit;font-size:13px;font-weight:700;padding:5px 11px;border-radius:999px;border:1px solid var(--border);background:var(--white);color:var(--text,inherit);cursor:pointer;white-space:nowrap;}
+.jt-status-btn .jt-n{font-weight:600;color:var(--muted);margin-left:4px;}
+.jt-status-btn.active{background:var(--blue-500);border-color:var(--blue-500);color:#fff;}
+.jt-status-btn.active .jt-n{color:rgba(255,255,255,.85);}
+.jt-status-btn.jt-done-status{font-style:italic;}
+.jt-status-sep{width:1px;align-self:stretch;background:var(--border);margin:2px 4px;}
+.jt-linked{margin-top:6px;display:flex;flex-direction:column;gap:3px;font-size:13px;}
+.jt-linked-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;}
+.jt-pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:700;background:var(--slate-100);border:1px solid var(--border);}
+.jt-pill.jt-cat-indeterminate{background:var(--blue-50,var(--slate-100));border-color:var(--blue-200,var(--border));color:var(--blue-700,inherit);}
+.jt-pill.jt-cat-done{opacity:.7;}
+.jt-sprint-active{color:var(--green-700);font-weight:700;}
+.jt-sprint-future{color:var(--blue-600,var(--blue-500));font-weight:700;}
+.jt-sprint-none{color:var(--amber-700);font-weight:700;}
+.jt-period-dates{display:none;align-items:center;gap:4px;}
+.jt-period-dates.on{display:inline-flex;}
 #assignlog-view-btn  { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12a9 9 0 1 0 3-6.7L3 8'/%3E%3Cpath d='M3 3v5h5M12 7v5l3 2'/%3E%3C/svg%3E"); }
 #projects-view-btn   { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E"); }
 #qt-seize-view-btn   { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Ccircle cx='12' cy='12' r='5'/%3E%3Ccircle cx='12' cy='12' r='1'/%3E%3C/svg%3E"); }
@@ -8486,17 +8503,30 @@ th {
     </div>
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
       <select class="filter-sel" id="jt-opener-filter" style="max-width:190px;" aria-label="Opened by"><option value="all">Everyone</option></select>
-      <select class="filter-sel" id="jt-status-filter" style="max-width:150px;" aria-label="Status">
-        <option value="open">Open</option>
-        <option value="done">Done</option>
-        <option value="all">All</option>
+      <select class="filter-sel" id="jt-period-filter" style="max-width:170px;" aria-label="Created in">
+        <option value="all">Created: any time</option>
+        <option value="today">Created today</option>
+        <option value="this_week">Created this week</option>
+        <option value="last_week">Created last week</option>
+        <option value="this_month">Created this month</option>
+        <option value="last_month">Created last month</option>
+        <option value="last_30">Created in the last 30 days</option>
+        <option value="last_90">Created in the last 90 days</option>
+        <option value="this_quarter">Created this quarter</option>
+        <option value="custom">Custom dates&hellip;</option>
       </select>
+      <span class="jt-period-dates" id="jt-period-dates">
+        <input class="filter-sel" id="jt-period-from" type="date" aria-label="Created from" style="max-width:150px;">
+        <span class="jt-muted">to</span>
+        <input class="filter-sel" id="jt-period-to" type="date" aria-label="Created to" style="max-width:150px;">
+      </span>
       <input class="filter-sel" id="jt-search" type="search" placeholder="Search key or summary" style="max-width:220px;" autocomplete="off">
       <button class="chip" id="jt-scope-btn" type="button" hidden title="Which Jira tickets this page reads (JQL)">Scope</button>
       <button class="chip" id="jt-sync" type="button" title="Read the tickets from Jira again now">Sync</button>
     </div>
   </div>
   <div id="jt-notice"></div>
+  <div id="jt-status-bar" class="jt-status-bar" role="group" aria-label="Status"></div>
   <div id="jt-chips" class="jt-chips"></div>
   <div style="background:var(--white);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow-sm);overflow-x:auto;">
     <table class="jt-table" style="width:100%;border-collapse:collapse;font-size:14px;min-width:980px;">
@@ -13539,7 +13569,69 @@ function jiraBrowseLink(baseUrl,key){
   return`<a class="jt-key" href="${esc(baseUrl+encodeURIComponent(k))}" target="_blank" rel="noopener noreferrer">${esc(k)}</a>`;
 }
 let jiraTicketsData=null,jiraTicketsLoading=false,jiraTicketsLoadError='',jiraTicketsPollTimer=null;
-let jtOpenerFilter='all',jtStatusFilter='open',jtQuery='';
+// jtStatusFilter: 'open', 'done', 'all', or 's:<status name, lowercase>'.
+let jtOpenerFilter='all',jtStatusFilter='open',jtQuery='',jtPeriod='all',jtPeriodFrom='',jtPeriodTo='';
+/* [start, end) of the "created in" period, in the SLA zone (Tunisia), or
+   null for any time. Weeks run Monday to Sunday. A custom range includes both
+   of its days; either end may be left open. */
+function jtPeriodBounds(){
+  const DAY=86400000;
+  const now=Date.now();
+  const today=slaZoneDayStart(now);
+  const d=new Date(today);
+  const y=d.getUTCFullYear(),m=d.getUTCMonth(),wd=(d.getUTCDay()+6)%7;
+  const at=wall=>slaZoneToUtc(wall);
+  switch(jtPeriod){
+    case 'today':return[at(today),at(today+DAY)];
+    case 'this_week':return[at(today-wd*DAY),at(today+DAY)];
+    case 'last_week':return[at(today-(wd+7)*DAY),at(today-wd*DAY)];
+    case 'this_month':return[at(Date.UTC(y,m,1)),at(today+DAY)];
+    case 'last_month':return[at(Date.UTC(y,m-1,1)),at(Date.UTC(y,m,1))];
+    case 'last_30':return[at(today-29*DAY),at(today+DAY)];
+    case 'last_90':return[at(today-89*DAY),at(today+DAY)];
+    case 'this_quarter':return[at(Date.UTC(y,Math.floor(m/3)*3,1)),at(today+DAY)];
+    case 'custom':{
+      const day=v=>{const p=/^(\d{4})-(\d{2})-(\d{2})$/.exec(v||'');return p?Date.UTC(+p[1],+p[2]-1,+p[3]):null;};
+      let from=day(jtPeriodFrom),to=day(jtPeriodTo);
+      if(from===null&&to===null)return null;
+      if(from!==null&&to!==null&&from>to){
+        [from,to]=[to,from];[jtPeriodFrom,jtPeriodTo]=[jtPeriodTo,jtPeriodFrom];
+        const fromEl=document.getElementById('jt-period-from'),toEl=document.getElementById('jt-period-to');
+        if(fromEl)fromEl.value=jtPeriodFrom;if(toEl)toEl.value=jtPeriodTo;
+      }
+      return[from===null?-Infinity:at(from),to===null?Infinity:at(to+DAY)];
+    }
+    default:return null;
+  }
+}
+const JT_CATEGORY_ORDER={new:0,indeterminate:1,done:2};
+function jtStatusKey(t){return's:'+String(t.status||'').trim().toLowerCase();}
+function jtMatchesStatus(t,filter){
+  if(filter==='all')return true;
+  if(filter==='open')return!t.done;
+  if(filter==='done')return!!t.done;
+  return jtStatusKey(t)===filter;
+}
+// The linked dev issues under an open ticket: key, status, sprint.
+function jiraSprintText(l){
+  if(!l.sprintKnown)return'<span class="jt-muted" title="The board could not read this issue\'s sprint from Jira">Sprint unavailable</span>';
+  const s=l.sprint;
+  if(!s)return'<span class="jt-sprint-none">No sprint</span>';
+  const name=esc(s.name||'Sprint');
+  if(s.state==='active')return`<span class="jt-sprint-active" title="${s.endDate?'Ends '+esc(jiraZoneDate(s.endDate)):'Running'}">${name} · active</span>`;
+  if(s.state==='future')return`<span class="jt-sprint-future">${name} · planned${s.startDate?', starts '+esc(jiraZoneDate(s.startDate).replace(/,.*$/,'')):''}</span>`;
+  return`<span class="jt-sprint-none" title="Its last sprint closed without it being done">Not planned (was in ${name})</span>`;
+}
+function jiraLinkedHtml(baseUrl,linked){
+  if(!Array.isArray(linked)||!linked.length)return'';
+  // Open dev issues first; at most three, then a count.
+  const list=[...linked].sort((a,b)=>(a.statusCategory==='done'?1:0)-(b.statusCategory==='done'?1:0));
+  const shown=list.slice(0,3).map(l=>{
+    const cat=['new','indeterminate','done'].includes(l.statusCategory)?l.statusCategory:'new';
+    return`<div class="jt-linked-row"><span class="jt-muted">${esc(l.type||'linked')}</span> ${jiraBrowseLink(baseUrl,l.key)} <span class="jt-pill jt-cat-${cat}">${esc(l.status||'?')}</span> ${l.statusCategory==='done'?'':jiraSprintText(l)}${l.assignee?` <span class="jt-muted">· ${esc(l.assignee)}</span>`:''}</div>`;
+  }).join('');
+  return`<div class="jt-linked">${shown}${list.length>3?`<div class="jt-muted">+${list.length-3} more linked</div>`:''}</div>`;
+}
 function showJiraTicketsView(){
   if(currentUserTeam()==='cs'){showBoardView();return;}
   viewMode='jiraTickets';setBoardChromeVisible(false);hidePrimaryViews();
@@ -13600,27 +13692,50 @@ function renderJiraTicketsView(){
   if(openerSel.dataset.options!==openerOptions){openerSel.innerHTML=openerOptions;openerSel.dataset.options=openerOptions;}
   openerSel.value=jtOpenerFilter;
   openerSel.hidden=!isAdmin&&openers.length<=1;
-  document.getElementById('jt-status-filter').value=jtStatusFilter;
-  // One chip per opener: open now / total. Clicking one filters to it.
-  document.getElementById('jt-chips').innerHTML=openers.map(o=>{
-    const mine=tickets.filter(t=>(t.opener||'')===o);
-    const open=mine.filter(t=>!t.done).length;
-    const value=o||'__none';
-    return`<button type="button" class="jt-chip${jtOpenerFilter===value?' active':''}" data-jt-opener="${esc(value)}">${jiraOpenerBadge(o)}<span class="jt-chip-num"><strong>${open}</strong> open · ${mine.length} total</span></button>`;
-  }).join('');
+  document.getElementById('jt-period-filter').value=jtPeriod;
+  document.getElementById('jt-period-dates').classList.toggle('on',jtPeriod==='custom');
+  // Each control counts what the OTHER filters leave: the status buttons
+  // follow opener, period and search; the opener chips follow status, period
+  // and search. So every number reads "this many if you click it".
+  const bounds=jtPeriodBounds();
   const q=jtQuery.trim().toLowerCase();
-  const rows=tickets.filter(t=>{
-    if(jtOpenerFilter!=='all'&&(t.opener||'__none')!==jtOpenerFilter)return false;
-    if(jtStatusFilter==='open'&&t.done)return false;
-    if(jtStatusFilter==='done'&&!t.done)return false;
-    if(q&&!(String(t.key).toLowerCase().includes(q)||String(t.summary||'').toLowerCase().includes(q)))return false;
+  const base=tickets.filter(t=>{
+    if(bounds){const c=Date.parse(t.createdAt||'');if(!Number.isFinite(c)||c<bounds[0]||c>=bounds[1])return false;}
+    if(q){
+      const hay=[t.key,t.summary,...(t.linked||[]).flatMap(l=>[l.key,l.sprint?.name])].map(v=>String(v||'').toLowerCase());
+      if(!hay.some(v=>v.includes(q)))return false;
+    }
     return true;
   });
+  const byOpener=t=>jtOpenerFilter==='all'||(t.opener||'__none')===jtOpenerFilter;
+  const forStatus=base.filter(byOpener);
+  // A status picked earlier that no ticket has any more falls back to Open.
+  if(jtStatusFilter.startsWith('s:')&&!tickets.some(t=>jtStatusKey(t)===jtStatusFilter))jtStatusFilter='open';
+  const statuses=new Map();
+  tickets.forEach(t=>{const k=jtStatusKey(t);if(k!=='s:'&&!statuses.has(k))statuses.set(k,{key:k,name:t.status,cat:t.statusCategory||'new'});});
+  const statusList=[...statuses.values()].sort((a,b)=>(JT_CATEGORY_ORDER[a.cat]??1)-(JT_CATEGORY_ORDER[b.cat]??1)||a.name.localeCompare(b.name));
+  const btn=(value,label,extra='')=>`<button type="button" class="jt-status-btn${extra}${jtStatusFilter===value?' active':''}" data-jt-status="${esc(value)}">${esc(label)}<span class="jt-n">${forStatus.filter(t=>jtMatchesStatus(t,value)).length}</span></button>`;
+  const statusHtml=[btn('open','Open'),'<span class="jt-status-sep"></span>',
+    ...statusList.map(s=>btn(s.key,s.name,s.cat==='done'?' jt-done-status':'')),
+    '<span class="jt-status-sep"></span>',btn('done','Done'),btn('all','All')].join('');
+  const statusBar=document.getElementById('jt-status-bar');
+  if(statusBar.dataset.html!==statusHtml){statusBar.innerHTML=statusHtml;statusBar.dataset.html=statusHtml;}
+  // One chip per opener: open / total within the other filters. Clicking one filters to it.
+  const forOpener=base.filter(t=>jtMatchesStatus(t,jtStatusFilter));
+  const chipsHtml=openers.map(o=>{
+    const mine=forOpener.filter(t=>(t.opener||'')===o);
+    const open=mine.filter(t=>!t.done).length;
+    const value=o||'__none';
+    return`<button type="button" class="jt-chip${jtOpenerFilter===value?' active':''}" data-jt-opener="${esc(value)}">${jiraOpenerBadge(o)}<span class="jt-chip-num"><strong>${open}</strong> open · ${mine.length} shown</span></button>`;
+  }).join('');
+  const chipsEl=document.getElementById('jt-chips');
+  if(chipsEl.dataset.html!==chipsHtml){chipsEl.innerHTML=chipsHtml;chipsEl.dataset.html=chipsHtml;}
+  const rows=forOpener.filter(byOpener);
   const now=boardNow();
   const openCount=tickets.filter(t=>!t.done).length;
   const synced=data?.syncedAt?`last read from Jira ${jiraZoneDate(data.syncedAt)}`:'not read from Jira yet';
   document.getElementById('jt-summary').textContent=data
-    ?`${tickets.length} ticket${tickets.length===1?'':'s'} · ${openCount} open · ${synced}${isAdmin?'':' · showing the tickets you opened'}`
+    ?`${rows.length===tickets.length?'':rows.length+' of '}${tickets.length} ticket${tickets.length===1?'':'s'} · ${openCount} open · ${synced}${isAdmin?'':' · showing the tickets you opened'}`
     :(jiraTicketsLoading?'Loading…':'Not loaded');
   document.getElementById('jt-rows').innerHTML=rows.length?rows.map(t=>{
     const resolvedMs=Date.parse(t.resolvedAt||'');
@@ -13629,7 +13744,7 @@ function renderJiraTicketsView(){
       ?`<span class="jt-muted">${esc(jiraZoneDate(t.resolvedAt))}</span>${ageHours!==null?`<br><span class="jt-muted">took ${esc(fmtHours(ageHours))}</span>`:''}`
       :(ageHours!==null?esc(fmtHours(ageHours)):'-');
     return`<tr>
-      <td>${jiraBrowseLink(data?.browseBaseUrl,t.key)}<div style="margin-top:2px;">${esc(t.summary||'')}</div></td>
+      <td>${jiraBrowseLink(data?.browseBaseUrl,t.key)}<div style="margin-top:2px;">${esc(t.summary||'')}</div>${t.done?'':jiraLinkedHtml(data?.browseBaseUrl,t.linked)}</td>
       <td>${jiraOpenerBadge(t.opener)}</td>
       <td>${esc(t.status||'-')}</td>
       <td>${esc(t.priority||'-')}</td>
@@ -16227,7 +16342,13 @@ document.getElementById('jira-tickets-view-btn').addEventListener('click',()=>{i
 document.getElementById('jt-sync').addEventListener('click',()=>{kpiJiraLoadedKey='';loadJiraTickets(true);});
 document.getElementById('jt-scope-btn').addEventListener('click',editJiraTicketsScope);
 document.getElementById('jt-opener-filter').addEventListener('change',e=>{jtOpenerFilter=e.target.value||'all';renderJiraTicketsView();});
-document.getElementById('jt-status-filter').addEventListener('change',e=>{jtStatusFilter=e.target.value||'open';renderJiraTicketsView();});
+document.getElementById('jt-status-bar').addEventListener('click',e=>{
+  const b=e.target.closest('[data-jt-status]');if(!b)return;
+  jtStatusFilter=b.dataset.jtStatus||'open';renderJiraTicketsView();
+});
+document.getElementById('jt-period-filter').addEventListener('change',e=>{jtPeriod=e.target.value||'all';renderJiraTicketsView();});
+document.getElementById('jt-period-from').addEventListener('change',e=>{jtPeriodFrom=e.target.value||'';renderJiraTicketsView();});
+document.getElementById('jt-period-to').addEventListener('change',e=>{jtPeriodTo=e.target.value||'';renderJiraTicketsView();});
 document.getElementById('jt-search').addEventListener('input',e=>{jtQuery=e.target.value||'';renderJiraTicketsView();});
 document.getElementById('jt-chips').addEventListener('click',e=>{
   const chip=e.target.closest('[data-jt-opener]');if(!chip)return;

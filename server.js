@@ -6584,6 +6584,17 @@ const JIRA_SUPPORT_STALE_MS = 10 * 60 * 1000;
 // How long a request waits for a sync before answering with what it has.
 const JIRA_SUPPORT_WAIT_MS = 25000;
 const jiraSupportCache = { tickets: [], syncedAt: 0, attemptedAt: 0, error: null, truncated: false, total: 0, jql: '', inFlight: null };
+// Jira projects whose linked issues are shown on an open ticket (the dev
+// tickets a support request turned into), with their status and sprint.
+const JIRA_SUPPORT_LINKED_PROJECTS = String(process.env.JIRA_SUPPORT_LINKED_PROJECTS ?? 'QT')
+  .split(',').map(p => p.trim().toUpperCase()).filter(p => /^[A-Z][A-Z0-9]+$/.test(p));
+const JIRA_SPRINT_FIELD = String(process.env.JIRA_SPRINT_FIELD || 'customfield_10008').trim();
+// Linked issues by key. Kept across syncs: one that cannot be read this time
+// keeps what was known, rather than turning into "no sprint".
+const jiraLinkedCache = new Map();
+// Under the list's own ten minutes, so each refresh of the list re-reads them.
+const JIRA_LINKED_TTL_MS = 8 * 60 * 1000;
+const JIRA_LINKED_MAX_PER_SYNC = 200;
 
 async function getJiraSupportJql() {
   const stored = await getStoredOAuthTokens(JIRA_SUPPORT_SCOPE_PROVIDER);
@@ -6647,12 +6658,146 @@ function normalizeJiraSupportIssue(issue) {
     teamId: teamRaw === null || teamRaw === undefined || teamRaw === '' ? null : String(teamRaw).replace(/\.0+$/, '').slice(0, 20),
     project: String(f.project?.key || ''),
     issueType: String(f.issuetype?.name || ''),
-    sla: jiraSupportSla(f[JIRA_SUPPORT_SLA_FIELD])
+    sla: jiraSupportSla(f[JIRA_SUPPORT_SLA_FIELD]),
+    links: jiraSupportLinks(f.issuelinks)
   };
+}
+// The ticket's links into the dev projects, as Jira's link list gives them:
+// key, link type and the linked issue's status. Its sprint comes from a
+// separate lookup (lookupJiraLinkedIssues). A link to an issue the board's
+// Jira account cannot browse is left out by Jira itself.
+function jiraSupportLinks(issuelinks) {
+  if (!Array.isArray(issuelinks) || !JIRA_SUPPORT_LINKED_PROJECTS.length) return [];
+  const out = new Map();
+  issuelinks.forEach((link) => {
+    const ref = link?.outwardIssue || link?.inwardIssue;
+    const key = String(ref?.key || '').trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9]+-\d+$/.test(key) || out.has(key)) return;
+    if (!JIRA_SUPPORT_LINKED_PROJECTS.includes(key.split('-')[0])) return;
+    out.set(key, {
+      key,
+      type: String((link.outwardIssue ? link.type?.outward : link.type?.inward) || link.type?.name || 'linked').slice(0, 40),
+      summary: String(ref.fields?.summary || '').slice(0, 300),
+      status: String(ref.fields?.status?.name || ''),
+      statusCategory: String(ref.fields?.status?.statusCategory?.key || '').toLowerCase()
+    });
+  });
+  return [...out.values()];
+}
+// A sprint as Jira Software's agile API gives it, or as the Sprint custom
+// field's legacy text ("...Sprint@1a[id=5,rapidViewId=2,state=ACTIVE,
+// name=Sprint 217,startDate=...]"). Names can hold commas, so the name is
+// cut at the next known key rather than at the next comma.
+function jiraParseSprint(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') {
+    const state = String(raw.state || '').toLowerCase();
+    return { id: Number(raw.id) || null, name: String(raw.name || '').slice(0, 60), state: ['active', 'future', 'closed'].includes(state) ? state : '', startDate: jiraDateIso(raw.startDate), endDate: jiraDateIso(raw.endDate) };
+  }
+  const text = String(raw);
+  const pick = (re) => { const m = text.match(re); return m && m[1] !== '<null>' ? m[1] : null; };
+  const state = String(pick(/state=(\w+)/) || '').toLowerCase();
+  return {
+    id: Number(pick(/[[,]id=(\d+)/)) || null,
+    name: String(pick(/name=(.*?),(?:startDate|endDate|completeDate|activatedDate|sequence|goal|autoStartStop|synced|incompleteIssuesDestinationId)=/) || pick(/name=([^,\]]*)/) || '').slice(0, 60),
+    state: ['active', 'future', 'closed'].includes(state) ? state : '',
+    startDate: jiraDateIso(pick(/startDate=([^,\]]+)/)),
+    endDate: jiraDateIso(pick(/endDate=([^,\]]+)/))
+  };
+}
+// Which sprint says where the issue is planned: the running one, else the
+// next future one. A closed sprint only on an issue that is not done means it
+// was carried over and is not planned anywhere - reported as such.
+function jiraPlannedSprint(sprints) {
+  const list = (Array.isArray(sprints) ? sprints : []).filter(Boolean);
+  const active = list.filter(s => s.state === 'active').sort((a, b) => String(b.startDate || '').localeCompare(String(a.startDate || '')) || (a.id || 0) - (b.id || 0));
+  if (active.length) return { ...active[0], planned: true };
+  const future = list.filter(s => s.state === 'future').sort((a, b) => (a.startDate ? 0 : 1) - (b.startDate ? 0 : 1) || String(a.startDate || '').localeCompare(String(b.startDate || '')) || (a.id || 0) - (b.id || 0));
+  if (future.length) return { ...future[0], planned: true };
+  const closed = list.filter(s => s.state === 'closed').sort((a, b) => String(b.endDate || '').localeCompare(String(a.endDate || '')) || (b.id || 0) - (a.id || 0));
+  if (closed.length) return { ...closed[0], planned: false };
+  return null;
+}
+async function fetchJiraLinkedIssue(config, key) {
+  // Jira Software's issue endpoint returns the sprint as an object (plus the
+  // closed ones); a Jira without it falls back to the core API and the Sprint
+  // custom field.
+  try {
+    const issue = await jiraApiRequest(config, `/rest/agile/1.0/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,sprint,closedSprints`);
+    const f = issue?.fields || {};
+    const sprints = [f.sprint, ...(Array.isArray(f.closedSprints) ? f.closedSprints : [])].map(jiraParseSprint);
+    return { f, sprint: jiraPlannedSprint(sprints) };
+  } catch (error) {
+    const status = Number((String(error?.message || '').match(/^jira_api_error_(\d+)/) || [])[1] || 0);
+    if (![400, 403, 404].includes(status) && !/^jira_non_json_response_/.test(String(error?.message || ''))) throw error;
+  }
+  const issue = await jiraApiRequest(config, `/rest/api/2/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,${encodeURIComponent(JIRA_SPRINT_FIELD)}`);
+  const f = issue?.fields || {};
+  const raw = f[JIRA_SPRINT_FIELD];
+  return { f, sprint: jiraPlannedSprint((Array.isArray(raw) ? raw : (raw ? [raw] : [])).map(jiraParseSprint)) };
+}
+/* Status, assignee and sprint of the dev issues linked to OPEN tickets - a
+   closed ticket's links are history. One request per issue, four at a time:
+   a batched "key in (...)" search fails as a whole on a single deleted or
+   hidden key. Cached for ten minutes; a lookup that fails keeps the last
+   known answer. Never throws - the ticket list does not depend on it. */
+async function lookupJiraLinkedIssues(config, tickets, force = false) {
+  const wanted = [];
+  const seen = new Set();
+  // Newest tickets first, so a cap drops the oldest links.
+  [...tickets].filter(t => !t.done).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+    .forEach(t => (t.links || []).forEach((l) => {
+      if (seen.has(l.key) || l.statusCategory === 'done') return;
+      seen.add(l.key);
+      const cached = jiraLinkedCache.get(l.key);
+      // Sync pressed: read them all again - somebody may just have moved one.
+      if (force || !cached || Date.now() - cached.fetchedAt > JIRA_LINKED_TTL_MS) wanted.push(l.key);
+    }));
+  // Forget issues no open ticket links to any more.
+  for (const key of jiraLinkedCache.keys()) if (!seen.has(key)) jiraLinkedCache.delete(key);
+  if (wanted.length > JIRA_LINKED_MAX_PER_SYNC) console.warn(`[jira-support] ${wanted.length} linked issues to look up; only ${JIRA_LINKED_MAX_PER_SYNC} this time`);
+  const queue = wanted.slice(0, JIRA_LINKED_MAX_PER_SYNC);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+    while (next < queue.length) {
+      const key = queue[next++];
+      try {
+        const { f, sprint } = await fetchJiraLinkedIssue(config, key);
+        jiraLinkedCache.set(key, {
+          fetchedAt: Date.now(),
+          data: {
+            key,
+            summary: String(f.summary || '').slice(0, 300),
+            status: String(f.status?.name || ''),
+            statusCategory: String(f.status?.statusCategory?.key || '').toLowerCase(),
+            assignee: String(f.assignee?.displayName || ''),
+            sprint,
+            sprintKnown: true
+          }
+        });
+      } catch (error) {
+        console.warn(`[jira-support] linked issue ${key} not read:`, String(error?.message || error).slice(0, 160));
+      }
+    }
+  }));
+}
+// What the page shows for each link: the looked-up issue when there is one,
+// else what the ticket's own link list said, with the sprint marked unknown.
+function jiraLinkedForTicket(ticket) {
+  return (ticket.links || []).map((l) => {
+    // Status always from the ticket's own link list (read with the tickets,
+    // so never older than they are); assignee and sprint from the lookup. A
+    // dev issue that is done needs no sprint.
+    if (l.statusCategory === 'done') return { ...l, assignee: '', sprint: null, sprintKnown: true };
+    const cached = jiraLinkedCache.get(l.key)?.data;
+    return cached
+      ? { ...l, assignee: cached.assignee, sprint: cached.sprint, sprintKnown: true }
+      : { ...l, assignee: '', sprint: null, sprintKnown: false };
+  });
 }
 async function jiraSearchSupportTickets(config, jql, { limit = JIRA_SUPPORT_MAX_ISSUES } = {}) {
   const fields = ['summary', 'status', 'priority', 'created', 'resolutiondate', 'statuscategorychangedate', 'updated', 'assignee', 'project', 'issuetype',
-    JIRA_SUPPORT_AGENT_FIELD, JIRA_SUPPORT_TEAM_ID_FIELD, JIRA_SUPPORT_SLA_FIELD].join(',');
+    'issuelinks', JIRA_SUPPORT_AGENT_FIELD, JIRA_SUPPORT_TEAM_ID_FIELD, JIRA_SUPPORT_SLA_FIELD].join(',');
   const tickets = [];
   // Offset paging over a list that can change while it is read: a ticket
   // created mid-sync pushes every row down one, so the next page starts with
@@ -6691,7 +6836,7 @@ function jiraSupportErrorMessage(error) {
   if (jiraErrorIsTransient(error)) return 'Jira did not answer in time. Try Sync again in a moment.';
   return `Could not load the tickets from Jira (${msg.slice(0, 120)}).`;
 }
-function syncJiraSupportTickets() {
+function syncJiraSupportTickets(force = false) {
   if (jiraSupportCache.inFlight) return jiraSupportCache.inFlight;
   jiraSupportCache.attemptedAt = Date.now();
   jiraSupportCache.inFlight = (async () => {
@@ -6706,6 +6851,9 @@ function syncJiraSupportTickets() {
       jiraSupportCache.jql = jql;
       jiraSupportCache.syncedAt = Date.now();
       jiraSupportCache.error = null;
+      // Sync stays "in flight" until the links are read too, so a page that
+      // got the tickets first polls again and picks the sprints up.
+      await lookupJiraLinkedIssues(config, result.tickets, force).catch(() => {});
       if (result.truncated) console.warn(`[jira-support] scope matches ${result.total} tickets; only the newest ${JIRA_SUPPORT_MAX_ISSUES} are loaded`);
     } catch (error) {
       // The last good list stays on screen; the error says why it is not newer.
@@ -6726,7 +6874,13 @@ async function awaitJiraSupportSync(force) {
   // minute, unless somebody presses Sync.
   const recentlyFailed = jiraSupportCache.error && now - jiraSupportCache.attemptedAt < 60 * 1000;
   if (!force && (fresh || recentlyFailed)) return;
-  const sync = syncJiraSupportTickets();
+  // Sync pressed while a background refresh runs: that one may be using cached
+  // sprints, so let it finish and read everything again.
+  if (force && jiraSupportCache.inFlight) {
+    await Promise.race([jiraSupportCache.inFlight, new Promise(resolve => setTimeout(resolve, JIRA_SUPPORT_WAIT_MS).unref?.())]);
+    if (jiraSupportCache.inFlight) return;
+  }
+  const sync = syncJiraSupportTickets(!!force);
   // Only the very first load (or a forced one) is worth waiting for; a stale
   // list is shown at once and refreshed behind it.
   if (!force && jiraSupportCache.syncedAt) return;
@@ -6767,10 +6921,14 @@ async function sendJiraSupportTickets(req, res, force) {
     const config = await getJiraConfig();
     if (!config.connected) return res.json({ ...jiraSupportMeta(req, config), connected: false, tickets: [] });
     await awaitJiraSupportSync(force);
-    return res.json({ ...jiraSupportMeta(req, config), tickets: jiraSupportTicketsForActor(req) });
+    return res.json({ ...jiraSupportMeta(req, config), tickets: jiraSupportListTickets(req) });
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
   }
+}
+// The page's list: each open ticket with its linked dev issues filled in.
+function jiraSupportListTickets(req) {
+  return jiraSupportTicketsForActor(req).map(({ links, ...t }) => ({ ...t, linked: t.done ? [] : jiraLinkedForTicket({ links }) }));
 }
 app.get('/api/jira/support-tickets', requireSupportOrAdmin, (req, res) => sendJiraSupportTickets(req, res, false));
 app.post('/api/jira/support-tickets/sync', requireSupportOrAdmin, jiraSupportSyncLimiter, (req, res) => sendJiraSupportTickets(req, res, true));
@@ -6798,7 +6956,7 @@ app.post('/api/jira/support-tickets/scope', requireAdmin, jiraSupportScopeLimite
     if (jiraSupportCache.inFlight) await jiraSupportCache.inFlight.catch(() => {});
     jiraSupportCache.syncedAt = 0;
     await awaitJiraSupportSync(true);
-    return res.json({ ...jiraSupportMeta(req, config), tickets: jiraSupportTicketsForActor(req) });
+    return res.json({ ...jiraSupportMeta(req, config), tickets: jiraSupportListTickets(req) });
   } catch (error) {
     return res.status(500).json({ error: String(error.message || error) });
   }
