@@ -6384,6 +6384,25 @@ body > header::after {
 #mail-view-btn       { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2' y='4' width='20' height='16' rx='3'/%3E%3Cpath d='m22 7-10 6L2 7'/%3E%3C/svg%3E"); }
 #companies-view-btn  { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 21h18M5 21V5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v16M16 9h3a2 2 0 0 1 2 2v10M9 7h3M9 11h3M9 15h3'/%3E%3C/svg%3E"); }
 #dashboard-view-btn  { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M11 3l1.8 4.7L17.5 9.5l-4.7 1.8L11 16l-1.8-4.7L4.5 9.5l4.7-1.8z'/%3E%3Cpath d='M18.5 14.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z'/%3E%3C/svg%3E"); }
+#jira-tickets-view-btn { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 9V6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3a3 3 0 0 0 0 6v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a3 3 0 0 0 0-6z'/%3E%3Cpath d='M13 5v2M13 11v2M13 17v2'/%3E%3C/svg%3E"); }
+/* Jira Tickets page and the KPI section that reads the same data. The opener
+   badge colour comes from a fixed map (jiraOpenerColor), never from Jira text. */
+.jt-opener{display:inline-flex;align-items:center;gap:6px;padding:2px 9px 2px 7px;border-radius:999px;font-size:12px;font-weight:800;letter-spacing:.02em;white-space:nowrap;color:var(--jt-c);background:color-mix(in srgb,var(--jt-c) 14%,transparent);border:1px solid color-mix(in srgb,var(--jt-c) 45%,transparent);}
+.jt-opener::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--jt-c);flex:none;}
+.jt-opener.jt-none{--jt-c:var(--slate-500);font-weight:700;font-style:italic;}
+[data-theme="dark"] .jt-opener{color:color-mix(in srgb,var(--jt-c) 50%,#fff);background:color-mix(in srgb,var(--jt-c) 28%,transparent);border-color:color-mix(in srgb,var(--jt-c) 65%,transparent);}
+.jt-chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}
+.jt-chip{display:flex;align-items:center;gap:10px;background:var(--white);border:1px solid var(--border);border-radius:12px;padding:8px 12px;cursor:pointer;font:inherit;color:inherit;}
+.jt-chip.active{outline:2px solid var(--blue-500);outline-offset:1px;}
+.jt-chip-num{font-size:13px;color:var(--muted);}
+.jt-notice{font-size:14px;border-radius:10px;padding:8px 12px;margin-bottom:12px;background:var(--amber-50);border:1px solid var(--amber-300);color:var(--amber-800,var(--legacy-555));}
+.jt-notice.jt-info{background:var(--slate-100);border-color:var(--border);color:var(--muted);}
+.jt-table td{padding:8px 12px;vertical-align:top;border-top:1px solid var(--border);}
+.jt-table th{padding:9px 12px;white-space:nowrap;}
+.jt-key{font-weight:800;white-space:nowrap;}
+.jt-sla-breached{color:var(--red-600);font-weight:800;}
+.jt-sla-met{color:var(--green-700);font-weight:700;}
+.jt-muted{color:var(--muted);}
 #assignlog-view-btn  { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12a9 9 0 1 0 3-6.7L3 8'/%3E%3Cpath d='M3 3v5h5M12 7v5l3 2'/%3E%3C/svg%3E"); }
 #projects-view-btn   { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E"); }
 #qt-seize-view-btn   { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Ccircle cx='12' cy='12' r='5'/%3E%3Ccircle cx='12' cy='12' r='1'/%3E%3C/svg%3E"); }
@@ -8243,6 +8262,7 @@ th {
         <button class="crm-nav-btn" id="companies-view-btn">Companies</button>
         <button class="crm-nav-btn" id="dashboard-view-btn">Data Hygiene</button>
         <button class="crm-nav-btn" id="assignlog-view-btn">Assignment Log</button>
+        <button class="crm-nav-btn hidden" id="jira-tickets-view-btn">Jira Tickets</button>
       </div>
       <div class="crm-nav-section" aria-label="QT-Tools">
         <div class="crm-nav-section-title">QT-Tools</div>
@@ -8458,6 +8478,42 @@ th {
     </table>
   </div>
 </div>
+<div id="jira-tickets-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+    <div>
+      <div style="font-family:'Caladea',serif;font-size:24px;">Jira Tickets</div>
+      <div style="font-size:14px;color:var(--muted);" id="jt-summary">Loading&hellip;</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <select class="filter-sel" id="jt-opener-filter" style="max-width:190px;" aria-label="Opened by"><option value="all">Everyone</option></select>
+      <select class="filter-sel" id="jt-status-filter" style="max-width:150px;" aria-label="Status">
+        <option value="open">Open</option>
+        <option value="done">Done</option>
+        <option value="all">All</option>
+      </select>
+      <input class="filter-sel" id="jt-search" type="search" placeholder="Search key or summary" style="max-width:220px;" autocomplete="off">
+      <button class="chip" id="jt-scope-btn" type="button" hidden title="Which Jira tickets this page reads (JQL)">Scope</button>
+      <button class="chip" id="jt-sync" type="button" title="Read the tickets from Jira again now">Sync</button>
+    </div>
+  </div>
+  <div id="jt-notice"></div>
+  <div id="jt-chips" class="jt-chips"></div>
+  <div style="background:var(--white);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow-sm);overflow-x:auto;">
+    <table class="jt-table" style="width:100%;border-collapse:collapse;font-size:14px;min-width:980px;">
+      <thead><tr style="text-align:left;">
+        <th>Ticket</th>
+        <th>Opened by</th>
+        <th>Status</th>
+        <th>Priority</th>
+        <th>Created</th>
+        <th title="Working time (08:00-12:00, 14:00-17:00, weekdays) since it was opened, or until Jira resolved it">Age / Resolved</th>
+        <th>Jira assignee</th>
+        <th title="Jira Service Desk's own SLA for the ticket, when it has one">Jira SLA</th>
+      </tr></thead>
+      <tbody id="jt-rows"></tbody>
+    </table>
+  </div>
+</div>
 <div id="projects-view" style="display:none;min-height:calc(100dvh - 175px);padding:var(--content-pad);">
   <div id="projects-body"></div>
 </div>
@@ -8532,6 +8588,42 @@ th {
   <div id="kpi-alltime" class="kpi-alltime" hidden></div>
   <div id="kpi-status-cards" class="kpi-scroll-x" style="display:grid;grid-template-columns:repeat(8,minmax(160px,1fr));gap:12px;margin-bottom:12px;"></div>
   <div id="kpi-sla-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:12px;"></div>
+  <!-- Jira tickets the support team raised, from the Jira Tickets page's data.
+       Loaded on its own (loadKpiJiraSection) so a slow or broken Jira never
+       holds up or blanks the rest of the dashboard. Hidden for CS. -->
+  <div id="kpi-jira-section" hidden style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);margin-bottom:12px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+      <div style="font-family:Caladea,serif;font-size:24px;">Jira tickets raised by Support</div>
+      <div style="font-size:14px;color:var(--legacy-666);" id="kpi-jira-note">Loading&hellip;</div>
+    </div>
+    <div id="kpi-jira-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:12px;"></div>
+    <div class="responsive-grid-2" style="margin-bottom:0;">
+      <div class="kpi-scroll-x">
+        <table class="kpi-table kpi-table-narrow">
+          <thead><tr style="text-align:left;border-bottom:1px solid var(--legacy-ddd);">
+            <th style="padding:8px 10px;">Opened by</th>
+            <th style="padding:8px 10px;" title="Created in this range">Opened</th>
+            <th style="padding:8px 10px;" title="Closed by Jira in this range">Resolved</th>
+            <th style="padding:8px 10px;" title="Open right now, whatever the range">Open now</th>
+            <th style="padding:8px 10px;" title="Jira SLA breached, of the tickets opened in this range">SLA breached</th>
+            <th style="padding:8px 10px;" title="Median working time from opened to resolved">Median resolve</th>
+          </tr></thead>
+          <tbody id="kpi-jira-opener-rows"></tbody>
+        </table>
+      </div>
+      <div class="kpi-scroll-x">
+        <table class="kpi-table kpi-table-narrow">
+          <thead><tr style="text-align:left;border-bottom:1px solid var(--legacy-ddd);">
+            <th style="padding:8px 10px;">Oldest open</th>
+            <th style="padding:8px 10px;">Opened by</th>
+            <th style="padding:8px 10px;">Status</th>
+            <th style="padding:8px 10px;" title="Working time since it was opened">Age</th>
+          </tr></thead>
+          <tbody id="kpi-jira-open-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
   <div style="background:var(--white);border:1px solid var(--legacy-d7d7d7);border-radius:14px;padding:12px;box-shadow:0 6px 16px rgba(var(--shadow-rgb), .06);margin-bottom:12px;">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
       <div style="font-family:Caladea,serif;font-size:24px;">Overdue right now</div>
@@ -11607,6 +11699,7 @@ function setSideNavActive(mode){
   document.getElementById('qt-seize-view-btn')?.classList.toggle('active',mode==='qtSeize');
   document.getElementById('projects-view-btn')?.classList.toggle('active',mode==='projects');
   document.getElementById('assignlog-view-btn')?.classList.toggle('active',mode==='assignlog');
+  document.getElementById('jira-tickets-view-btn')?.classList.toggle('active',mode==='jiraTickets');
   document.getElementById('qt-detect-view-btn')?.classList.toggle('active',mode==='qtDetect');
   document.getElementById('mail-view-btn')?.classList.toggle('active',mode==='mail');
 }
@@ -11676,6 +11769,8 @@ function restoreLastWorkspaceSession(){
   if(mode==='kpi')return showKpiView();
   if(mode==='qtSeize')return showQtSeizeView();
   if(mode==='assignlog')return showAssignLogView();
+  // Falls back to the board itself for CS, whose button is hidden.
+  if(mode==='jiraTickets')return showJiraTicketsView();
   if(mode==='insights')return showInsightsView();
   if(mode==='projects')return showProjectsView();
   // showQtDetectView falls back to the board itself if the user is not an
@@ -11836,6 +11931,9 @@ function setAdminOnlyNavigationVisible(isAdmin){
     :'What changed on the tickets assigned to you, and who changed it';
   document.getElementById('jira-settings-btn')?.classList.toggle('hidden', !isAdmin);
   document.getElementById('insights-view-btn')?.classList.toggle('hidden', !isAdmin);
+  // Admins see every Jira ticket the team raised, a support agent their own;
+  // CS has none to see (the server answers 403).
+  document.getElementById('jira-tickets-view-btn')?.classList.toggle('hidden', !canReadAudit);
 }
 function syncRoleRestrictedControls(){
   // The Velma sheet connection is set up once, by an admin, for everyone.
@@ -13385,7 +13483,7 @@ function hidePrimaryViews(){stopKpiAutoRefresh();
   // than hanging over whichever list is opened next. renderBoard() puts it
   // back when there is still something to say.
   const filterNotice=document.getElementById('board-filter-notice');if(filterNotice){filterNotice.style.display='none';filterNotice.innerHTML='';}
-  document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';document.getElementById('mail-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
+  document.getElementById('main-board').style.display='none';document.getElementById('spam-view').classList.remove('active');document.getElementById('archive-view').classList.remove('active');document.getElementById('companies-view').style.display='none';document.getElementById('kpi-view').style.display='none';document.getElementById('insights-view').style.display='none';document.getElementById('projects-view').style.display='none';document.getElementById('qt-seize-view').style.display='none';document.getElementById('assignlog-view').style.display='none';document.getElementById('jira-tickets-view').style.display='none';document.getElementById('qt-detect-view').style.display='none';document.getElementById('mail-view').style.display='none';if(viewMode!=='board'){clearSelection();renderSelectionBar();}}
 function showBoardView(){viewMode='board';setBoardChromeVisible(true);hidePrimaryViews();setSideNavActive('board');saveLastWorkspaceSession('board');renderBoard();/* renderBoard() shows the flat board or the swimlanes, per boardGrouping */}
 function showSpamView(){viewMode='spam';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('spam-view').classList.add('active');setSideNavActive('spam');saveLastWorkspaceSession('spam');renderSpamView();}
 function showArchiveView(){viewMode='archive';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('archive-view').classList.add('active');setSideNavActive('archive');saveLastWorkspaceSession('archive');renderArchiveView();}
@@ -13393,6 +13491,264 @@ function showDashboardView(){companiesViewType='report';viewMode='companies';set
 function showKpiView(){viewMode='kpi';setBoardChromeVisible(true);hidePrimaryViews();document.getElementById('kpi-view').style.display='block';setSideNavActive('kpi');saveLastWorkspaceSession('kpi');startKpiAutoRefresh();renderKpiView();}
 function showQtSeizeView(){viewMode='qtSeize';setBoardChromeVisible(false);hidePrimaryViews();const frame=document.getElementById('qt-seize-frame');if(frame&&!frame.src)frame.src='/qt-seize/';document.getElementById('qt-seize-view').style.display='block';setSideNavActive('qtSeize');saveLastWorkspaceSession('qtSeize');}
 function showAssignLogView(){viewMode='assignlog';setBoardChromeVisible(false);hidePrimaryViews();document.getElementById('assignlog-view').style.display='block';setSideNavActive('assignlog');saveLastWorkspaceSession('assignlog');renderAssignLogView();}
+/* ---- Jira Tickets ----------------------------------------------------------
+   The Jira tickets the support team raises through the shared Jira account,
+   with who opened each one (Jira's "Support Agent" field). The server reads
+   Jira and scopes the list: everything for an admin, a support agent's own
+   tickets for them. */
+// Fixed, far-apart hues per support agent, so two openers never share a
+// colour (the board's hashed agentColor gives ZIO/MEZ, SFA/SHE and SGU/RMD the
+// same one). Anyone else - a new hire, a former agent - gets one of the spare
+// hues by a stable hash; an empty opener is grey.
+const JIRA_OPENER_COLORS={SGU:'var(--ag-1)',ZIO:'var(--ag-2)',SFA:'var(--ag-3)',MEZ:'var(--ag-4)',SHE:'var(--ag-5)',JBA:'var(--ag-8)',RMD:'var(--ag-14)'};
+const JIRA_OPENER_SPARE_COLORS=['var(--ag-16)','var(--ag-0)','var(--ag-21)','var(--ag-19)','var(--ag-11)'];
+function jiraOpenerColor(code){
+  const c=String(code||'').toUpperCase();
+  if(JIRA_OPENER_COLORS[c])return JIRA_OPENER_COLORS[c];
+  let h=0;for(const ch of c)h=(h*31+ch.charCodeAt(0))%JIRA_OPENER_SPARE_COLORS.length;
+  return JIRA_OPENER_SPARE_COLORS[h];
+}
+function jiraOpenerBadge(code){
+  if(!code)return'<span class="jt-opener jt-none" title="The Support Agent field is empty on this ticket">Unattributed</span>';
+  return`<span class="jt-opener" style="--jt-c:${jiraOpenerColor(code)}">${esc(code)}</span>`;
+}
+function jiraZoneDate(iso){
+  if(!iso)return'-';
+  const d=new Date(iso);if(Number.isNaN(d.getTime()))return'-';
+  try{return d.toLocaleString('en-GB',{timeZone:slaTimeZone,day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});}
+  catch(_){return d.toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});}
+}
+function jiraWorkHours(fromIso,toMs){
+  const from=Date.parse(fromIso||'');
+  return Number.isFinite(from)&&toMs>from?businessMsInRange(from,toMs)/3600000:null;
+}
+function jiraSlaCell(sla){
+  if(!sla)return'<span class="jt-muted">-</span>';
+  if(sla.breached)return'<span class="jt-sla-breached">Breached</span>';
+  if(sla.state==='met')return'<span class="jt-sla-met">Met</span>';
+  if(sla.state==='paused')return'<span class="jt-muted">Paused</span>';
+  if(Number.isFinite(sla.remainingMs))return esc(fmtHours(sla.remainingMs/3600000))+' left';
+  return'Running';
+}
+// A link only for a well-formed key on an http(s) Jira, so a Jira value can
+// never become a javascript: URL.
+function jiraBrowseLink(baseUrl,key){
+  const k=String(key||'');
+  if(!/^[A-Z][A-Z0-9]+-\d+$/.test(k))return esc(k);
+  if(!/^https?:\/\//i.test(String(baseUrl||'')))return`<span class="jt-key">${esc(k)}</span>`;
+  return`<a class="jt-key" href="${esc(baseUrl+encodeURIComponent(k))}" target="_blank" rel="noopener noreferrer">${esc(k)}</a>`;
+}
+let jiraTicketsData=null,jiraTicketsLoading=false,jiraTicketsLoadError='',jiraTicketsPollTimer=null;
+let jtOpenerFilter='all',jtStatusFilter='open',jtQuery='';
+function showJiraTicketsView(){
+  if(currentUserTeam()==='cs'){showBoardView();return;}
+  viewMode='jiraTickets';setBoardChromeVisible(false);hidePrimaryViews();
+  document.getElementById('jira-tickets-view').style.display='block';
+  setSideNavActive('jiraTickets');saveLastWorkspaceSession('jiraTickets');
+  // Always asks on opening: the server answers from its cache and only goes
+  // to Jira when the list is more than ten minutes old.
+  loadJiraTickets(false);
+}
+async function loadJiraTickets(force){
+  if(jiraTicketsLoading)return;
+  jiraTicketsLoading=true;jiraTicketsLoadError='';
+  renderJiraTicketsView();
+  try{
+    const res=await fetch(force?'/api/jira/support-tickets/sync':'/api/jira/support-tickets',{method:force?'POST':'GET',credentials:'include'});
+    const data=await res.json().catch(()=>({}));
+    if(res.status===429)throw new Error('Synced a moment ago - try again in a minute.');
+    if(!res.ok)throw new Error(data?.error||('HTTP '+res.status));
+    jiraTicketsData=data;
+  }catch(error){
+    jiraTicketsLoadError=String(error?.message||error);
+    // A failed request says nothing about a sync in progress; no re-polling on it.
+    if(jiraTicketsData)jiraTicketsData={...jiraTicketsData,syncing:false};
+  }finally{
+    jiraTicketsLoading=false;
+    if(viewMode==='jiraTickets')renderJiraTicketsView();
+    // The server answered before Jira did: look again in a few seconds,
+    // while the page is still open.
+    if(jiraTicketsData?.syncing){
+      clearTimeout(jiraTicketsPollTimer);
+      jiraTicketsPollTimer=setTimeout(()=>{if(viewMode==='jiraTickets')loadJiraTickets(false);},8000);
+    }
+  }
+}
+function renderJiraTicketsView(){
+  const data=jiraTicketsData;
+  const tickets=Array.isArray(data?.tickets)?data.tickets:[];
+  const isAdmin=!!data?.isAdmin;
+  document.getElementById('jt-scope-btn').hidden=!isAdmin;
+  const syncBtn=document.getElementById('jt-sync');
+  syncBtn.disabled=jiraTicketsLoading;
+  syncBtn.textContent=jiraTicketsLoading?'Syncing…':'Sync';
+  // Notices: why the list may be empty or out of date.
+  const notices=[];
+  if(jiraTicketsLoadError)notices.push(['',jiraTicketsLoadError]);
+  if(data&&data.connected===false)notices.push(['','Jira is not connected yet. An admin can connect it in the Jira settings.']);
+  if(data?.error)notices.push(['',data.error]);
+  if(data?.syncing&&!jiraTicketsLoading)notices.push(['jt-info','Jira is being read in the background - press Sync in a moment for the newest list.']);
+  if(data?.truncated)notices.push(['jt-info','Only the newest 2000 tickets are shown. An admin can narrow the scope.']);
+  document.getElementById('jt-notice').innerHTML=notices.map(([cls,text])=>`<div class="jt-notice ${cls}">${esc(text)}</div>`).join('');
+  // Opener filter, from the tickets that are there.
+  const openers=[...new Set(tickets.map(t=>t.opener||''))].sort((a,b)=>(a?0:1)-(b?0:1)||a.localeCompare(b));
+  const openerSel=document.getElementById('jt-opener-filter');
+  if(jtOpenerFilter!=='all'&&!openers.includes(jtOpenerFilter==='__none'?'':jtOpenerFilter))jtOpenerFilter='all';
+  // Rebuilt only when the openers change: this runs on every live board
+  // update, and replacing the options closes a dropdown somebody has open.
+  const openerOptions=['<option value="all">Everyone</option>',...openers.map(o=>o?`<option value="${esc(o)}">${esc(o)}</option>`:'<option value="__none">Unattributed</option>')].join('');
+  if(openerSel.dataset.options!==openerOptions){openerSel.innerHTML=openerOptions;openerSel.dataset.options=openerOptions;}
+  openerSel.value=jtOpenerFilter;
+  openerSel.hidden=!isAdmin&&openers.length<=1;
+  document.getElementById('jt-status-filter').value=jtStatusFilter;
+  // One chip per opener: open now / total. Clicking one filters to it.
+  document.getElementById('jt-chips').innerHTML=openers.map(o=>{
+    const mine=tickets.filter(t=>(t.opener||'')===o);
+    const open=mine.filter(t=>!t.done).length;
+    const value=o||'__none';
+    return`<button type="button" class="jt-chip${jtOpenerFilter===value?' active':''}" data-jt-opener="${esc(value)}">${jiraOpenerBadge(o)}<span class="jt-chip-num"><strong>${open}</strong> open · ${mine.length} total</span></button>`;
+  }).join('');
+  const q=jtQuery.trim().toLowerCase();
+  const rows=tickets.filter(t=>{
+    if(jtOpenerFilter!=='all'&&(t.opener||'__none')!==jtOpenerFilter)return false;
+    if(jtStatusFilter==='open'&&t.done)return false;
+    if(jtStatusFilter==='done'&&!t.done)return false;
+    if(q&&!(String(t.key).toLowerCase().includes(q)||String(t.summary||'').toLowerCase().includes(q)))return false;
+    return true;
+  });
+  const now=boardNow();
+  const openCount=tickets.filter(t=>!t.done).length;
+  const synced=data?.syncedAt?`last read from Jira ${jiraZoneDate(data.syncedAt)}`:'not read from Jira yet';
+  document.getElementById('jt-summary').textContent=data
+    ?`${tickets.length} ticket${tickets.length===1?'':'s'} · ${openCount} open · ${synced}${isAdmin?'':' · showing the tickets you opened'}`
+    :(jiraTicketsLoading?'Loading…':'Not loaded');
+  document.getElementById('jt-rows').innerHTML=rows.length?rows.map(t=>{
+    const resolvedMs=Date.parse(t.resolvedAt||'');
+    const ageHours=t.done?(Number.isFinite(resolvedMs)?jiraWorkHours(t.createdAt,resolvedMs):null):jiraWorkHours(t.createdAt,now);
+    const ageCell=t.done
+      ?`<span class="jt-muted">${esc(jiraZoneDate(t.resolvedAt))}</span>${ageHours!==null?`<br><span class="jt-muted">took ${esc(fmtHours(ageHours))}</span>`:''}`
+      :(ageHours!==null?esc(fmtHours(ageHours)):'-');
+    return`<tr>
+      <td>${jiraBrowseLink(data?.browseBaseUrl,t.key)}<div style="margin-top:2px;">${esc(t.summary||'')}</div></td>
+      <td>${jiraOpenerBadge(t.opener)}</td>
+      <td>${esc(t.status||'-')}</td>
+      <td>${esc(t.priority||'-')}</td>
+      <td style="white-space:nowrap;">${esc(jiraZoneDate(t.createdAt))}</td>
+      <td style="white-space:nowrap;">${ageCell}</td>
+      <td>${esc(t.assignee||'Unassigned')}</td>
+      <td style="white-space:nowrap;">${jiraSlaCell(t.sla)}</td>
+    </tr>`;
+  }).join('')
+    :`<tr><td colspan="8" style="padding:14px 12px;color:var(--muted);">${jiraTicketsLoading&&!data?'Loading tickets from Jira…':(tickets.length?'No ticket matches these filters.':'No Jira tickets yet.')}</td></tr>`;
+}
+async function editJiraTicketsScope(){
+  const current=jiraTicketsData?.jql||jiraTicketsData?.defaultJql||'';
+  const next=window.prompt('Which Jira tickets this page reads, as a JQL query. Leave empty for the default (every ticket with the Support Agent field filled in).',current);
+  if(next===null)return;
+  try{
+    const res=await fetch('/api/jira/support-tickets/scope',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({jql:next.trim()})});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(data?.error||(res.status===429?'Too many changes - wait a minute.':'HTTP '+res.status));
+    jiraTicketsData=data;jiraTicketsLoadError='';
+    showToast('Scope saved - tickets read again from Jira','ok');
+    kpiJiraLoadedKey='';
+  }catch(error){
+    showToast('Scope not saved: '+String(error?.message||error),'warn');
+  }
+  if(viewMode==='jiraTickets')renderJiraTicketsView();
+}
+/* The KPI section. Its own request, keyed on range and agent, so the
+   dashboard's checkpoint caching and its offline fallback never leave it
+   stale or broken - and a Jira outage only ever affects this one box. */
+let kpiJiraLoadedKey='',kpiJiraLoadedAt=0,kpiJiraInFlight=false,kpiJiraPending=false,kpiJiraFailedKey='',kpiJiraFailedAt=0;
+function kpiJiraSectionVisible(){
+  if(currentUserTeam()==='cs')return false;
+  if(kpiTeamFilter==='cs')return false;
+  // An admin narrowing the dashboard to one CS agent: that agent raises no
+  // Jira tickets here.
+  if(kpiAgentFilter&&kpiAgentFilter!=='all'&&isKnownCSAgent(String(kpiAgentFilter).toUpperCase()))return false;
+  return true;
+}
+async function loadKpiJiraSection(){
+  const section=document.getElementById('kpi-jira-section');
+  if(!section)return;
+  if(!kpiJiraSectionVisible()){section.hidden=true;return;}
+  section.hidden=false;
+  const agent=currentUserIsAdmin()?(kpiAgentFilter||'all'):'all';
+  const params=new URLSearchParams({range:kpiTimeFilter,agent,tzOffset:slaZoneTzOffset()});
+  const key=params.toString();
+  // The same range asked again within two minutes reuses what is on screen,
+  // and a range that just failed is not asked again on every board update.
+  if(key===kpiJiraLoadedKey&&Date.now()-kpiJiraLoadedAt<120000)return;
+  if(key===kpiJiraFailedKey&&Date.now()-kpiJiraFailedAt<60000){
+    // Whatever another range left on screen must not stand under this one.
+    if(kpiJiraLoadedKey!==key){
+      kpiJiraLoadedKey='';
+      document.getElementById('kpi-jira-cards').innerHTML='';
+      document.getElementById('kpi-jira-opener-rows').innerHTML='';
+      document.getElementById('kpi-jira-open-rows').innerHTML='';
+      document.getElementById('kpi-jira-note').textContent='Could not load the Jira tickets for this range - trying again shortly.';
+    }
+    return;
+  }
+  // A range picked while a request is out is loaded right after it.
+  if(kpiJiraInFlight){kpiJiraPending=true;return;}
+  kpiJiraInFlight=true;
+  try{
+    const res=await fetch('/api/jira/support-tickets/kpis?'+key,{credentials:'include'});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(data?.error||('HTTP '+res.status));
+    renderKpiJiraSection(data);
+    kpiJiraLoadedKey=key;kpiJiraLoadedAt=Date.now();kpiJiraFailedKey='';
+  }catch(error){
+    kpiJiraFailedKey=key;kpiJiraFailedAt=Date.now();kpiJiraLoadedKey='';
+    // Old figures under a new range would be wrong, so they go.
+    document.getElementById('kpi-jira-cards').innerHTML='';
+    document.getElementById('kpi-jira-opener-rows').innerHTML='';
+    document.getElementById('kpi-jira-open-rows').innerHTML='';
+    document.getElementById('kpi-jira-note').textContent='Could not load the Jira tickets ('+String(error?.message||error)+').';
+  }finally{
+    kpiJiraInFlight=false;
+    if(kpiJiraPending){kpiJiraPending=false;if(viewMode==='kpi')loadKpiJiraSection();}
+  }
+}
+function renderKpiJiraSection(data){
+  const note=document.getElementById('kpi-jira-note');
+  const cards=document.getElementById('kpi-jira-cards');
+  const openerBody=document.getElementById('kpi-jira-opener-rows');
+  const openBody=document.getElementById('kpi-jira-open-rows');
+  if(data?.connected===false||!data?.totals){
+    note.textContent=data?.connected===false?'Jira is not connected.':(data?.error||'No data.');
+    cards.innerHTML='';openerBody.innerHTML='';openBody.innerHTML='';
+    return;
+  }
+  const t=data.totals;
+  const synced=data.syncedAt?`Read from Jira ${jiraZoneDate(data.syncedAt)}`:'Not read from Jira yet';
+  note.textContent=`${data.range?.label||''} · ${synced}${data.error?' · '+data.error:''}`;
+  cards.innerHTML=[
+    kpiCard('Opened',t.opened,{hint:t.unattributed?`In this range · ${t.unattributed} unattributed`:'In this range',tone:t.unattributed?'warn':''}),
+    kpiCard('Resolved',t.resolved,{hint:'Closed in Jira in this range'}),
+    kpiCard('Open now',t.openNow,{hint:'Whatever the range'}),
+    kpiCard('Median resolve',t.medianResolveHours===null?'-':fmtHoursShort(t.medianResolveHours),{hint:t.avgResolveHours===null?'Working time':`Working time · avg ${fmtHours(t.avgResolveHours)}`}),
+    kpiCard('Jira SLA breached',t.slaKnown?t.breached:'-',{tone:t.breached>0?'bad':'',hint:t.slaKnown?`of ${t.slaKnown} opened with an SLA`:'No Jira SLA on these tickets'})
+  ].join('');
+  openerBody.innerHTML=(data.rows||[]).length?data.rows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
+      <td style="padding:8px 10px;">${jiraOpenerBadge(r.opener)}</td>
+      <td style="padding:8px 10px;">${r.opened}</td>
+      <td style="padding:8px 10px;">${r.resolved}</td>
+      <td style="padding:8px 10px;">${r.openNow}</td>
+      <td style="padding:8px 10px;${r.breached?'color:var(--red-600);font-weight:700;':''}">${r.breached}</td>
+      <td style="padding:8px 10px;">${r.medianResolveHours===null?'-':esc(fmtHours(r.medianResolveHours))}</td>
+    </tr>`).join('')
+    :'<tr><td colspan="6" style="padding:12px 10px;color:var(--legacy-666);">No Jira tickets for this filter.</td></tr>';
+  openBody.innerHTML=(data.openRows||[]).length?data.openRows.map(r=>`<tr style="border-bottom:1px solid var(--legacy-f0f0f0);">
+      <td class="kpi-cell-wide" style="padding:8px 10px;">${jiraBrowseLink(data.browseBaseUrl,r.key)} ${esc(r.summary||'')}</td>
+      <td style="padding:8px 10px;">${jiraOpenerBadge(r.opener)}</td>
+      <td style="padding:8px 10px;">${esc(r.status||'-')}</td>
+      <td style="padding:8px 10px;white-space:nowrap;">${r.ageHours===null?'-':esc(fmtHours(r.ageHours))}${r.sla?.breached?' <span class="jt-sla-breached">SLA</span>':''}</td>
+    </tr>`).join('')
+    :'<tr><td colspan="4" style="padding:12px 10px;color:var(--legacy-666);">Nothing open.</td></tr>';
+}
 function showQtDetectView(){
   // Belt and braces: the nav button is hidden for non-admins, but a restored
   // session or a stale localStorage entry could still land here.
@@ -14843,7 +15199,7 @@ function renderActiveView(){
     showToast('Could not redraw the board - see the browser console','warn');
   }
 }
-function renderActiveViewInner(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='mail')renderMailView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
+function renderActiveViewInner(){if(viewMode==='board')renderBoard();else if(viewMode==='spam')renderSpamView();else if(viewMode==='archive')renderArchiveView();else if(viewMode==='kpi')renderKpiView();else if(viewMode==='assignlog')renderAssignLogView();else if(viewMode==='jiraTickets')renderJiraTicketsView();else if(viewMode==='insights')renderInsightsView();else if(viewMode==='projects')renderProjectsView();else if(viewMode==='mail')renderMailView();else if(viewMode==='qtSeize')return;else renderCompaniesView();}
 
 // ---------------------------------------------------------------------------
 // Assignment Log
@@ -15316,6 +15672,8 @@ async function renderKpiView(opts){
   const params=new URLSearchParams({range:kpiTimeFilter,team:kpiTeamFilter,agent:kpiAgentFilter,company:activeCompany||'all',jiraOnly:activeJira?'true':'false',tzOffset:slaZoneTzOffset()});
   // The figures on screen stand until the next checkpoint: a board patch or a
   // return to this view does not pull again unless a filter changed.
+  // Not tied to the checkpoint caching below: it has its own key and freshness.
+  loadKpiJiraSection();
   if(!opts?.force&&kpiLastLoadedAt&&kpiLoadedKey===params.toString()&&boardNow()<kpiNextUpdateMs())return;
   if(!kpiLastLoadedAt)document.getElementById('kpi-range-label').textContent='Loading KPI stats...';
   if(kpiFetchInFlight)return;
@@ -15444,6 +15802,7 @@ function renderKpiViewLocal(){
     kpiTeamFilter=currentUserTeam()==='cs'?'cs':'support';
     kpiAgentFilter=enforcedAgentFilter();
   }
+  loadKpiJiraSection();
   const bounds=getKpiBounds(kpiTimeFilter);
   const companyForTicket=t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);return ce&&hsCache[ce]?.companyName?hsCache[ce].companyName:null;};
   const ticketMatchesTeam=t=>{
@@ -15864,6 +16223,18 @@ document.getElementById('archive-view-btn').addEventListener('click',()=>{if(vie
 document.getElementById('break-btn').addEventListener('click',toggleShiftBreak);
 document.getElementById('assignlog-view-btn').addEventListener('click',()=>{if(viewMode==='assignlog')showBoardView();else showAssignLogView();});
 document.getElementById('assignlog-refresh').addEventListener('click',()=>{assignLogRows=[];renderAssignLogView();});
+document.getElementById('jira-tickets-view-btn').addEventListener('click',()=>{if(viewMode==='jiraTickets')showBoardView();else showJiraTicketsView();});
+document.getElementById('jt-sync').addEventListener('click',()=>{kpiJiraLoadedKey='';loadJiraTickets(true);});
+document.getElementById('jt-scope-btn').addEventListener('click',editJiraTicketsScope);
+document.getElementById('jt-opener-filter').addEventListener('change',e=>{jtOpenerFilter=e.target.value||'all';renderJiraTicketsView();});
+document.getElementById('jt-status-filter').addEventListener('change',e=>{jtStatusFilter=e.target.value||'open';renderJiraTicketsView();});
+document.getElementById('jt-search').addEventListener('input',e=>{jtQuery=e.target.value||'';renderJiraTicketsView();});
+document.getElementById('jt-chips').addEventListener('click',e=>{
+  const chip=e.target.closest('[data-jt-opener]');if(!chip)return;
+  const value=chip.dataset.jtOpener;
+  jtOpenerFilter=jtOpenerFilter===value?'all':value;
+  renderJiraTicketsView();
+});
 document.getElementById('assignlog-reverts-only').addEventListener('click',e=>{
   assignLogRevertsOnly=!assignLogRevertsOnly;
   e.currentTarget.classList.toggle('active',assignLogRevertsOnly);

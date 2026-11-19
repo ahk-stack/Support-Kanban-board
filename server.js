@@ -6545,6 +6545,333 @@ app.get('/api/jira/issue/:key', requireAuth, async (req, res) => {
     return res.status(500).json({ error: String(error.message || error) });
   }
 });
+
+/* ---- Jira tickets raised by the support team ------------------------------
+
+   The support team raises Jira tickets through one shared Jira account, so
+   Jira's reporter no longer says who opened a ticket. A "Support Agent" option
+   field on the request does, and this is what reads it: every ticket the scope
+   JQL finds, with its opener, for the Jira Tickets page and the KPI section.
+
+   Jira stays the source of truth. The list is cached in memory (the app runs
+   as a single instance) and refreshed when it is older than ten minutes and
+   somebody asks, or when somebody presses Sync - nothing polls Jira while the
+   page is closed. Each refresh replaces the whole list, so a ticket deleted or
+   moved out of scope in Jira disappears here too.
+
+   The scope is a JQL query an admin can change from the page. The default
+   finds every ticket with the field filled in; a ticket the shared account
+   raised without picking an agent only shows up (as "Unattributed") once the
+   scope also covers it, e.g. by reporter or request type.
+
+   Uses /rest/api/2/search with startAt paging, which is what the self-hosted
+   Jira answers. Atlassian Cloud retired that endpoint; there the sync reports
+   an error rather than an empty list. */
+const JIRA_SUPPORT_AGENT_FIELD = String(process.env.JIRA_SUPPORT_AGENT_FIELD || 'customfield_11101').trim();
+const JIRA_SUPPORT_TEAM_ID_FIELD = String(process.env.JIRA_SUPPORT_TEAM_ID_FIELD || 'customfield_11100').trim();
+const JIRA_SUPPORT_SLA_FIELD = String(process.env.JIRA_SUPPORT_SLA_FIELD || 'customfield_10029').trim();
+const JIRA_SUPPORT_DEFAULT_JQL = `cf[${(JIRA_SUPPORT_AGENT_FIELD.match(/(\d+)$/) || [])[1] || '11101'}] is not EMPTY ORDER BY created DESC`;
+const JIRA_SUPPORT_SCOPE_PROVIDER = 'jira_support_tickets';
+const JIRA_SUPPORT_MAX_ISSUES = 2000;
+const JIRA_SUPPORT_PAGE_SIZE = 100;
+const JIRA_SUPPORT_STALE_MS = 10 * 60 * 1000;
+// How long a request waits for a sync before answering with what it has.
+const JIRA_SUPPORT_WAIT_MS = 25000;
+const jiraSupportCache = { tickets: [], syncedAt: 0, attemptedAt: 0, error: null, truncated: false, total: 0, jql: '', inFlight: null };
+
+async function getJiraSupportJql() {
+  const stored = await getStoredOAuthTokens(JIRA_SUPPORT_SCOPE_PROVIDER);
+  const saved = String(stored?.metadata?.jql || '').trim();
+  return saved || String(process.env.JIRA_SUPPORT_TICKETS_JQL || '').trim() || JIRA_SUPPORT_DEFAULT_JQL;
+}
+function jiraDateIso(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+// The opener as written on the ticket. Kept as-is (uppercased) even when it is
+// not a current trigram - a former agent or an "Other" option is still who
+// opened it; only the badge colour depends on the roster.
+function jiraSupportOpener(raw) {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const text = value && typeof value === 'object' ? (value.value ?? value.name ?? '') : (value ?? '');
+  return String(text).trim().toUpperCase().slice(0, 40);
+}
+// Jira Service Desk's own SLA clock for the ticket, when the field exists on
+// it: the running cycle if there is one, else the last completed one. Null
+// when the ticket has no SLA - shown as "-", never as "on track".
+function jiraSupportSla(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const ongoing = raw.ongoingCycle && typeof raw.ongoingCycle === 'object' ? raw.ongoingCycle : null;
+  const completed = Array.isArray(raw.completedCycles) ? raw.completedCycles : [];
+  const last = completed.length ? completed[completed.length - 1] : null;
+  if (ongoing) {
+    const remaining = Number(ongoing.remainingTime?.millis);
+    return {
+      state: ongoing.breached ? 'breached' : (ongoing.paused ? 'paused' : 'running'),
+      breached: !!ongoing.breached,
+      remainingMs: Number.isFinite(remaining) ? remaining : null
+    };
+  }
+  if (last) return { state: last.breached ? 'breached' : 'met', breached: !!last.breached, remainingMs: null };
+  return null;
+}
+function normalizeJiraSupportIssue(issue) {
+  const key = String(issue?.key || '').trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9]+-\d+$/.test(key)) return null;
+  const f = (issue.fields && typeof issue.fields === 'object') ? issue.fields : {};
+  const category = String(f.status?.statusCategory?.key || '').trim().toLowerCase();
+  const done = category === 'done';
+  const teamField = f[JIRA_SUPPORT_TEAM_ID_FIELD];
+  const teamRaw = teamField && typeof teamField === 'object' ? (teamField.value ?? null) : teamField;
+  return {
+    key,
+    summary: String(f.summary || '').slice(0, 500),
+    status: String(f.status?.name || ''),
+    statusCategory: category,
+    done,
+    priority: String(f.priority?.name || ''),
+    createdAt: jiraDateIso(f.created),
+    // A reopened ticket can keep its old resolution date; it only counts as
+    // resolved while Jira also files its status under Done.
+    resolvedAt: done ? (jiraDateIso(f.resolutiondate) || jiraDateIso(f.statuscategorychangedate) || jiraDateIso(f.updated)) : null,
+    updatedAt: jiraDateIso(f.updated),
+    assignee: String(f.assignee?.displayName || ''),
+    opener: jiraSupportOpener(f[JIRA_SUPPORT_AGENT_FIELD]),
+    teamId: teamRaw === null || teamRaw === undefined || teamRaw === '' ? null : String(teamRaw).replace(/\.0+$/, '').slice(0, 20),
+    project: String(f.project?.key || ''),
+    issueType: String(f.issuetype?.name || ''),
+    sla: jiraSupportSla(f[JIRA_SUPPORT_SLA_FIELD])
+  };
+}
+async function jiraSearchSupportTickets(config, jql, { limit = JIRA_SUPPORT_MAX_ISSUES } = {}) {
+  const fields = ['summary', 'status', 'priority', 'created', 'resolutiondate', 'statuscategorychangedate', 'updated', 'assignee', 'project', 'issuetype',
+    JIRA_SUPPORT_AGENT_FIELD, JIRA_SUPPORT_TEAM_ID_FIELD, JIRA_SUPPORT_SLA_FIELD].join(',');
+  const tickets = [];
+  // Offset paging over a list that can change while it is read: a ticket
+  // created mid-sync pushes every row down one, so the next page starts with
+  // the last one again. Each key is kept once.
+  const seen = new Set();
+  let startAt = 0;
+  let total = Infinity;
+  while (startAt < total && tickets.length < limit) {
+    const qs = new URLSearchParams({ jql, startAt: String(startAt), maxResults: String(Math.min(JIRA_SUPPORT_PAGE_SIZE, limit)), fields });
+    const page = await jiraApiRequest(config, `/rest/api/2/search?${qs.toString()}`);
+    if (!page || !Array.isArray(page.issues)) throw new Error('jira_search_unexpected_response');
+    const pageTotal = Number(page.total);
+    total = Number.isFinite(pageTotal) ? pageTotal : startAt + page.issues.length;
+    page.issues.forEach((issue) => {
+      const ticket = normalizeJiraSupportIssue(issue);
+      if (ticket && !seen.has(ticket.key)) { seen.add(ticket.key); tickets.push(ticket); }
+    });
+    if (!page.issues.length) break;
+    startAt += page.issues.length;
+  }
+  return { tickets: tickets.slice(0, limit), total: Number.isFinite(total) ? total : tickets.length, truncated: Number.isFinite(total) && total > limit };
+}
+// What the page says when a sync fails, in words an admin can act on.
+function jiraSupportErrorMessage(error) {
+  const msg = String(error?.message || error || '');
+  const status = Number((msg.match(/^jira_api_error_(\d+)/) || [])[1] || 0);
+  if (msg === 'jira_not_connected') return 'Jira is not connected. An admin can connect it in the Jira settings.';
+  if (status === 400) {
+    let detail = '';
+    try { detail = (JSON.parse(msg.replace(/^jira_api_error_400:/, '')).errorMessages || []).join(' '); } catch (_) {}
+    return `Jira rejected the ticket search${detail ? `: ${detail.slice(0, 200)}` : ''}. An admin can check the scope (JQL).`;
+  }
+  if (status === 401 || status === 403) return 'Jira refused the board\'s credentials. An admin may need to update them in the Jira settings.';
+  if (status === 404 || status === 410) return 'This Jira does not offer the search the board uses.';
+  if (/^jira_non_json_response_/.test(msg)) return 'Jira answered with a login page instead of data - the board\'s Jira credentials may have expired.';
+  if (jiraErrorIsTransient(error)) return 'Jira did not answer in time. Try Sync again in a moment.';
+  return `Could not load the tickets from Jira (${msg.slice(0, 120)}).`;
+}
+function syncJiraSupportTickets() {
+  if (jiraSupportCache.inFlight) return jiraSupportCache.inFlight;
+  jiraSupportCache.attemptedAt = Date.now();
+  jiraSupportCache.inFlight = (async () => {
+    try {
+      const config = await getJiraConfig();
+      if (!config.connected) throw new Error('jira_not_connected');
+      const jql = await getJiraSupportJql();
+      const result = await jiraSearchSupportTickets(config, jql);
+      jiraSupportCache.tickets = result.tickets;
+      jiraSupportCache.total = result.total;
+      jiraSupportCache.truncated = result.truncated;
+      jiraSupportCache.jql = jql;
+      jiraSupportCache.syncedAt = Date.now();
+      jiraSupportCache.error = null;
+      if (result.truncated) console.warn(`[jira-support] scope matches ${result.total} tickets; only the newest ${JIRA_SUPPORT_MAX_ISSUES} are loaded`);
+    } catch (error) {
+      // The last good list stays on screen; the error says why it is not newer.
+      jiraSupportCache.error = jiraSupportErrorMessage(error);
+      console.warn('[jira-support] sync failed:', String(error?.message || error).slice(0, 300));
+    } finally {
+      jiraSupportCache.inFlight = null;
+    }
+  })();
+  return jiraSupportCache.inFlight;
+}
+// Waits for a sync, but never longer than JIRA_SUPPORT_WAIT_MS: a slow Jira
+// answers with the list as it stands, still syncing.
+async function awaitJiraSupportSync(force) {
+  const now = Date.now();
+  const fresh = jiraSupportCache.syncedAt && now - jiraSupportCache.syncedAt <= JIRA_SUPPORT_STALE_MS;
+  // A Jira that just failed is not asked again on every page load: one try a
+  // minute, unless somebody presses Sync.
+  const recentlyFailed = jiraSupportCache.error && now - jiraSupportCache.attemptedAt < 60 * 1000;
+  if (!force && (fresh || recentlyFailed)) return;
+  const sync = syncJiraSupportTickets();
+  // Only the very first load (or a forced one) is worth waiting for; a stale
+  // list is shown at once and refreshed behind it.
+  if (!force && jiraSupportCache.syncedAt) return;
+  await Promise.race([sync, new Promise(resolve => setTimeout(resolve, JIRA_SUPPORT_WAIT_MS).unref?.())]);
+}
+/* Who sees which tickets. Admins (the head of support) see every ticket;
+   a support agent sees only the ones they opened - like the KPI dashboard, a
+   colleague's work is not theirs to read. CS is kept out by the route gate. */
+function jiraSupportTicketsForActor(req) {
+  if (actorTeam(req) === 'admin') return jiraSupportCache.tickets;
+  const me = actorAgentCode(req);
+  return jiraSupportCache.tickets.filter(t => t.opener === me);
+}
+function jiraSupportMeta(req, config) {
+  const isAdmin = actorTeam(req) === 'admin';
+  return {
+    connected: !!config.connected,
+    browseBaseUrl: config.browseBaseUrl || '',
+    syncedAt: jiraSupportCache.syncedAt ? new Date(jiraSupportCache.syncedAt).toISOString() : null,
+    syncing: !!jiraSupportCache.inFlight,
+    // The detailed reason can quote the scope query - admins get it, everyone
+    // else a plain "not up to date".
+    error: jiraSupportCache.error ? (isAdmin ? jiraSupportCache.error : 'The list could not be refreshed from Jira just now; it may be out of date.') : null,
+    truncated: jiraSupportCache.truncated,
+    isAdmin,
+    // The query itself only for admins - it is theirs to change.
+    ...(isAdmin ? { jql: jiraSupportCache.jql || null, defaultJql: JIRA_SUPPORT_DEFAULT_JQL, total: jiraSupportCache.total } : {})
+  };
+}
+// Per user, not per IP: the whole office can share one address.
+const jiraSupportLimiterKey = (req) => String(req.session?.userId || req.ip || '');
+const jiraSupportSyncLimiter = rateLimit({ windowMs: 60 * 1000, max: 6, standardHeaders: true, legacyHeaders: false, keyGenerator: jiraSupportLimiterKey,
+  message: { error: 'Synced a moment ago - try again in a minute.' } });
+const jiraSupportScopeLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false, keyGenerator: jiraSupportLimiterKey,
+  message: { error: 'Too many scope changes - wait a minute.' } });
+async function sendJiraSupportTickets(req, res, force) {
+  try {
+    const config = await getJiraConfig();
+    if (!config.connected) return res.json({ ...jiraSupportMeta(req, config), connected: false, tickets: [] });
+    await awaitJiraSupportSync(force);
+    return res.json({ ...jiraSupportMeta(req, config), tickets: jiraSupportTicketsForActor(req) });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+}
+app.get('/api/jira/support-tickets', requireSupportOrAdmin, (req, res) => sendJiraSupportTickets(req, res, false));
+app.post('/api/jira/support-tickets/sync', requireSupportOrAdmin, jiraSupportSyncLimiter, (req, res) => sendJiraSupportTickets(req, res, true));
+// The scope query. Tried against Jira before it is saved, so a typo is caught
+// here rather than turning into an empty page. Empty resets to the default.
+app.post('/api/jira/support-tickets/scope', requireAdmin, jiraSupportScopeLimiter, async (req, res) => {
+  try {
+    const jql = String(req.body?.jql || '').trim();
+    if (jql.length > 1000) return res.status(400).json({ error: 'The scope is too long (1000 characters at most).' });
+    const config = await getJiraConfig();
+    if (!config.connected) return res.status(409).json({ error: 'Jira is not connected.' });
+    if (jql) {
+      try {
+        await jiraSearchSupportTickets(config, jql, { limit: 1 });
+      } catch (error) {
+        return res.status(400).json({ error: jiraSupportErrorMessage(error) });
+      }
+    }
+    await setStoredOAuthTokens(JIRA_SUPPORT_SCOPE_PROVIDER, { metadata: { jql: jql || null, updatedBy: actorAgentCode(req), updatedAt: new Date().toISOString() } });
+    // The store swallows its own errors, so read it back rather than tell the
+    // admin it was saved when it was not.
+    const check = await getStoredOAuthTokens(JIRA_SUPPORT_SCOPE_PROVIDER);
+    if (String(check?.metadata?.jql || '') !== jql) return res.status(500).json({ error: 'The scope could not be saved. Try again.' });
+    // Wait for a running sync to finish so the forced one below reads the new scope.
+    if (jiraSupportCache.inFlight) await jiraSupportCache.inFlight.catch(() => {});
+    jiraSupportCache.syncedAt = 0;
+    await awaitJiraSupportSync(true);
+    return res.json({ ...jiraSupportMeta(req, config), tickets: jiraSupportTicketsForActor(req) });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+/* The KPI dashboard's Jira section, worked out here so the same scoping
+   applies as everywhere else on the dashboard.
+
+   Opened counts tickets created in the range; Resolved, tickets Jira closed in
+   the range; Open now is the queue as it stands, whatever the range. Resolve
+   time is working time (the board's 08:00-12:00 and 14:00-17:00, weekdays), so
+   it reads like every other time on the dashboard. */
+app.get('/api/jira/support-tickets/kpis', requireSupportOrAdmin, async (req, res) => {
+  try {
+    const config = await getJiraConfig();
+    const bounds = kpiDateBounds(req.query.range, req.query.tzOffset);
+    const range = { key: bounds.key, label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() };
+    if (!config.connected) return res.json({ ...jiraSupportMeta(req, config), connected: false, range, totals: null, rows: [], openRows: [] });
+    await awaitJiraSupportSync(false);
+    let tickets = jiraSupportTicketsForActor(req);
+    const agent = String(req.query.agent || 'all').trim().toUpperCase();
+    if (actorTeam(req) === 'admin' && agent && agent !== 'ALL') tickets = tickets.filter(t => t.opener === agent);
+    const now = Date.now();
+    const workHours = (fromIso, toMs) => {
+      const from = Date.parse(fromIso || '');
+      return Number.isFinite(from) && toMs > from ? businessMsInRange(from, toMs) / 3600000 : null;
+    };
+    const median = (list) => {
+      if (!list.length) return null;
+      const sorted = [...list].sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    };
+    const round1 = v => (v === null || v === undefined ? null : Math.round(v * 10) / 10);
+    const rows = new Map();
+    const rowFor = (opener) => {
+      const key = opener ? 'o:' + opener : 'none';
+      if (!rows.has(key)) rows.set(key, { opener: opener || null, opened: 0, resolved: 0, openNow: 0, breached: 0, resolveHours: [] });
+      return rows.get(key);
+    };
+    const totals = { opened: 0, resolved: 0, openNow: 0, breached: 0, slaKnown: 0, unattributed: 0 };
+    const allResolveHours = [];
+    tickets.forEach((t) => {
+      const openedInRange = isDateInBounds(t.createdAt, bounds);
+      const resolvedInRange = t.done && isDateInBounds(t.resolvedAt, bounds);
+      const openNow = !t.done;
+      if (!openedInRange && !resolvedInRange && !openNow) return;
+      const row = rowFor(t.opener);
+      if (openedInRange) {
+        row.opened++; totals.opened++;
+        if (!t.opener) totals.unattributed++;
+        // Jira's own SLA verdict, for the tickets opened in the range.
+        if (t.sla) {
+          totals.slaKnown++;
+          if (t.sla.breached) { totals.breached++; row.breached++; }
+        }
+      }
+      if (resolvedInRange) {
+        row.resolved++; totals.resolved++;
+        const hours = workHours(t.createdAt, Date.parse(t.resolvedAt));
+        if (hours !== null) { row.resolveHours.push(hours); allResolveHours.push(hours); }
+      }
+      if (openNow) { row.openNow++; totals.openNow++; }
+    });
+    totals.medianResolveHours = round1(median(allResolveHours));
+    totals.avgResolveHours = allResolveHours.length ? round1(allResolveHours.reduce((a, b) => a + b, 0) / allResolveHours.length) : null;
+    const rowList = [...rows.values()].map(r => ({
+      opener: r.opener, opened: r.opened, resolved: r.resolved, openNow: r.openNow, breached: r.breached,
+      medianResolveHours: round1(median(r.resolveHours))
+    })).sort((a, b) => (b.opened - a.opened) || (b.openNow - a.openNow) || String(a.opener || '~').localeCompare(String(b.opener || '~')));
+    // The open queue, oldest first - what the head of support chases.
+    const openRows = tickets.filter(t => !t.done)
+      .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
+      .slice(0, 25)
+      .map(t => ({ key: t.key, summary: t.summary, opener: t.opener || null, status: t.status, priority: t.priority, createdAt: t.createdAt, ageHours: round1(workHours(t.createdAt, now)), sla: t.sla }));
+    return res.json({ ...jiraSupportMeta(req, config), range, totals, rows: rowList, openRows });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
 app.get('/profile', requireAuth, (req, res) => {
   res.type('html').sendFile(path.join(VIEWS_DIR, 'profile.html'));
 });
