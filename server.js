@@ -6560,9 +6560,9 @@ app.get('/api/jira/issue/:key', requireAuth, async (req, res) => {
    moved out of scope in Jira disappears here too.
 
    The scope is a JQL query an admin can change from the page. The default
-   finds every ticket with the field filled in; a ticket the shared account
-   raised without picking an agent only shows up (as "Unattributed") once the
-   scope also covers it, e.g. by reporter or request type.
+   finds every ticket with the field filled in, plus every ticket the shared
+   account raised - one raised without picking an agent shows as
+   "Unattributed".
 
    Uses /rest/api/2/search with startAt paging, which is what the self-hosted
    Jira answers. Atlassian Cloud retired that endpoint; there the sync reports
@@ -6570,7 +6570,13 @@ app.get('/api/jira/issue/:key', requireAuth, async (req, res) => {
 const JIRA_SUPPORT_AGENT_FIELD = String(process.env.JIRA_SUPPORT_AGENT_FIELD || 'customfield_11101').trim();
 const JIRA_SUPPORT_TEAM_ID_FIELD = String(process.env.JIRA_SUPPORT_TEAM_ID_FIELD || 'customfield_11100').trim();
 const JIRA_SUPPORT_SLA_FIELD = String(process.env.JIRA_SUPPORT_SLA_FIELD || 'customfield_10029').trim();
-const JIRA_SUPPORT_DEFAULT_JQL = `cf[${(JIRA_SUPPORT_AGENT_FIELD.match(/(\d+)$/) || [])[1] || '11101'}] is not EMPTY ORDER BY created DESC`;
+// The shared Jira account the support team raises tickets with. Its tickets
+// are in scope even when nobody picked an agent, so they show as Unattributed
+// instead of being missed. Empty JIRA_SUPPORT_SHARED_REPORTER drops that part.
+const JIRA_SUPPORT_SHARED_REPORTER = String(process.env.JIRA_SUPPORT_SHARED_REPORTER ?? 'Helpdesk').trim().replace(/"/g, '');
+const JIRA_SUPPORT_DEFAULT_JQL = `cf[${(JIRA_SUPPORT_AGENT_FIELD.match(/(\d+)$/) || [])[1] || '11101'}] is not EMPTY`
+  + (JIRA_SUPPORT_SHARED_REPORTER ? ` OR reporter = "${JIRA_SUPPORT_SHARED_REPORTER}"` : '')
+  + ' ORDER BY created DESC';
 const JIRA_SUPPORT_SCOPE_PROVIDER = 'jira_support_tickets';
 const JIRA_SUPPORT_MAX_ISSUES = 2000;
 const JIRA_SUPPORT_PAGE_SIZE = 100;
