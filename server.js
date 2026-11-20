@@ -770,6 +770,19 @@ function normalizeTeam(team) {
   return value === 'cs' || value === 'support' || value === 'hidden' ? value : undefined;
 }
 const HIDDEN_TEAM = 'hidden';
+// Service accounts kept off every display. The Hidden team is the switch; the
+// name match is the fallback for the n8n digest token user, so it stays off
+// the board even while its team still says Support.
+const SERVICE_ACCOUNT_NAME_RE = /n8n|digest/i;
+const HIDDEN_AGENT_CODES = new Set();
+function isHiddenServiceUser(user) {
+  if (String(user?.team || '').trim().toLowerCase() === HIDDEN_TEAM) return true;
+  return [user?.username, user?.displayName, user?.email].some(v => SERVICE_ACCOUNT_NAME_RE.test(String(v || '')));
+}
+function isHiddenAgentCode(code) {
+  const value = String(code || '').trim().toUpperCase();
+  return !!value && (HIDDEN_AGENT_CODES.has(value) || SERVICE_ACCOUNT_NAME_RE.test(value));
+}
 // A user's agent code is their username when it is a trigram, otherwise the
 // local part of their email - the same order the board resolves it in.
 function userAgentCode(user) {
@@ -791,12 +804,12 @@ let agentRosterLoadedAt = 0;
 async function refreshAgentRoster() {
   let users;
   try {
-    users = await prisma.user.findMany({ where: { team: { in: ['cs', 'support', HIDDEN_TEAM] } }, orderBy: { username: 'asc' }, select: { username: true, email: true, team: true, isActive: true } });
+    users = await prisma.user.findMany({ orderBy: { username: 'asc' }, select: { username: true, displayName: true, email: true, team: true, isActive: true } });
   } catch (error) {
     console.warn('Agent roster: could not read users, keeping the current roster:', error?.message || error);
     return false;
   }
-  if (!users.some(user => user.team !== HIDDEN_TEAM)) return false;
+  if (!users.some(user => (user.team === 'cs' || user.team === 'support') && !isHiddenServiceUser(user))) return false;
   const next = { support: new Set(), cs: new Set() };
   const inactive = { support: new Set(), cs: new Set() };
   // Hidden accounts are on no roster and are not "former" agents either: a
@@ -805,7 +818,8 @@ async function refreshAgentRoster() {
   for (const user of users) {
     const code = userAgentCode(user);
     if (!code) continue;
-    if (user.team === HIDDEN_TEAM) { hidden.add(code); continue; }
+    if (isHiddenServiceUser(user)) { hidden.add(code); continue; }
+    if (user.team !== 'cs' && user.team !== 'support') continue;
     (user.isActive === false ? inactive : next)[user.team].add(code);
   }
   for (const kind of ['support', 'cs']) {
@@ -818,6 +832,8 @@ async function refreshAgentRoster() {
     live.clear();
     next[kind].forEach(code => live.add(code));
   }
+  HIDDEN_AGENT_CODES.clear();
+  hidden.forEach(code => HIDDEN_AGENT_CODES.add(code));
   agentRosterLoadedAt = Date.now();
   return true;
 }
@@ -826,6 +842,9 @@ function agentRosterPayload() {
     support: [...SUPPORT_AGENT_CODES],
     cs: [...CS_AGENT_CODES],
     former: { support: [...FORMER_AGENT_CODES.support], cs: [...FORMER_AGENT_CODES.cs] },
+    // Service accounts' codes, so the board can keep them out of lists it
+    // builds from ticket data rather than from the roster.
+    hidden: [...HIDDEN_AGENT_CODES],
     loadedAt: agentRosterLoadedAt || null
   };
 }
@@ -1280,6 +1299,7 @@ function jiraIssueSummary(issue) {
     key: String(issue.key || '').trim(),
     summary: fields.summary || '',
     status: fields.status?.name || '',
+    statusCategory: String(fields.status?.statusCategory?.key || '').trim().toLowerCase(),
     assignee: fields.assignee?.displayName || fields.assignee?.emailAddress || 'Unassigned',
     reporter: fields.reporter?.displayName || fields.reporter?.emailAddress || 'Unknown',
     reporterEmail: fields.reporter?.emailAddress || '',
@@ -2617,6 +2637,104 @@ async function reconcileTicketNumbersWithDatabase() {
   return state;
 }
 
+/* My Alerts read marks, per agent: { TRIGRAM: { alertKey: readAt } }. The
+   first read wins, so the time in an agent's alerts history does not move. */
+const ALERT_READS_PER_AGENT_MAX = 4000;
+const JIRA_ALERTS_MAX = 1000;
+function mergeAlertReads(current, incoming) {
+  const asMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+  const out = {};
+  for (const source of [asMap(current), asMap(incoming)]) {
+    for (const [agent, reads] of Object.entries(source)) {
+      const code = String(agent || '').trim().toUpperCase();
+      if (!code) continue;
+      const mine = out[code] || (out[code] = {});
+      for (const [key, at] of Object.entries(asMap(reads))) {
+        const ts = Number(at) || 0;
+        if (ts <= 0) continue;
+        if (!mine[key] || ts < mine[key]) mine[key] = ts;
+      }
+    }
+  }
+  for (const [code, reads] of Object.entries(out)) {
+    const keys = Object.keys(reads);
+    if (keys.length <= ALERT_READS_PER_AGENT_MAX) continue;
+    out[code] = Object.fromEntries(keys.map(k => [k, reads[k]]).sort((a, b) => b[1] - a[1]).slice(0, ALERT_READS_PER_AGENT_MAX));
+  }
+  return out;
+}
+function mergeJiraAlerts(current, incoming) {
+  const byKey = new Map();
+  for (const list of [current, incoming]) {
+    (Array.isArray(list) ? list : []).forEach((alert) => {
+      const key = String(alert?.key || '');
+      if (key && !byKey.has(key)) byKey.set(key, alert);
+    });
+  }
+  return [...byKey.values()].sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0)).slice(-JIRA_ALERTS_MAX);
+}
+/* The "Jira says this is resolved" note is posted by whichever open board sees
+   the change first. Two boards seeing it at the same moment would both post
+   it; the marker it carries lets the second copy be dropped here. */
+function dedupeJiraSystemNotes(ticketComments) {
+  if (!ticketComments || typeof ticketComments !== 'object') return;
+  for (const [ticketId, list] of Object.entries(ticketComments)) {
+    if (!Array.isArray(list) || !list.some(c => c && c.jiraEvent)) continue;
+    const seen = new Set();
+    ticketComments[ticketId] = list.filter((c) => {
+      if (!c || !c.jiraEvent) return true;
+      if (seen.has(c.jiraEvent)) return false;
+      seen.add(c.jiraEvent);
+      return true;
+    });
+  }
+}
+/* An agent's alerts history: the My Alerts entries addressed to them that they
+   have read, built from the stored board the same way the board builds the
+   live list (see getAlertFeed in index.html). Reads made before read marks
+   were kept per agent sit in the old shared sets and count as read. */
+function buildAlertHistory(state, agent) {
+  const me = String(agent || '').trim().toUpperCase();
+  if (!me) return [];
+  const asMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+  const reads = asMap(asMap(state.alertReads)[me]);
+  const legacy = new Set([
+    ...(Array.isArray(state.readMentions) ? state.readMentions : []),
+    ...(Array.isArray(state.readJiraAlerts) ? state.readJiraAlerts : [])
+  ].map(String));
+  const tickets = new Map((Array.isArray(state.allTickets) ? state.allTickets : []).filter(t => t && t.id).map(t => [String(t.id), t]));
+  const numbers = asMap(state.ticketNumbers);
+  const ticketInfo = (id) => {
+    const n = Number(numbers[id] || 0);
+    return { ticketId: String(id), ticketNumber: n ? `#${String(n).padStart(4, '0')}` : '', subject: String(tickets.get(String(id))?.email?.subject || '') };
+  };
+  const toTs = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : (Date.parse(v) || 0); };
+  const items = [];
+  const push = (key, ts, item) => {
+    const readAt = Number(reads[key] || 0) || (legacy.has(key) ? ts : 0);
+    if (!readAt) return;
+    items.push({ key, ts, readAt, ...item });
+  };
+  for (const [ticketId, list] of Object.entries(asMap(state.ticketComments))) {
+    (Array.isArray(list) ? list : []).forEach((c, ci) => {
+      // Jira's own notes reach the agent as a Jira alert, not as a mention.
+      if (!c || c.jiraEvent) return;
+      const tags = (Array.isArray(c.tags) ? c.tags : []).map(t => String(t || '').trim().toUpperCase());
+      if (!tags.includes(me)) return;
+      push(`${ticketId}:${ci}`, toTs(c.ts || c.createdAt), { type: 'mention', ...ticketInfo(ticketId), who: String(c.author || ''), text: String(c.text || c.comment || '').slice(0, 400) });
+    });
+  }
+  (Array.isArray(state.jiraAlerts) ? state.jiraAlerts : []).forEach((a) => {
+    if (!a || String(a.recipient || '').trim().toUpperCase() !== me) return;
+    push(String(a.key || ''), toTs(a.ts), { type: a.kind === 'jira_resolved' ? 'jira_resolved' : 'jira', ...ticketInfo(a.ticketId), who: String(a.jiraKey || 'Jira'), title: String(a.title || ''), text: String(a.message || '').slice(0, 400) });
+  });
+  for (const [ticketId, entry] of Object.entries(asMap(state.ticketSendBackAlerts))) {
+    if (!entry || !(Number(entry.at) > 0) || String(entry.to || '').trim().toUpperCase() !== me) continue;
+    push(`sendback:${ticketId}:${Number(entry.at)}`, Number(entry.at), { type: 'sendback', ...ticketInfo(ticketId), who: String(entry.by || 'CS'), text: String(entry.note || '').slice(0, 400) });
+  }
+  return items.sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 300);
+}
+
 async function safeWriteState(state, actor = null) {
   const nextState = (state && typeof state === 'object') ? state : {};
   const currentState = safeReadState();
@@ -2862,6 +2980,20 @@ async function safeWriteState(state, actor = null) {
     return out;
   })();
 
+  // My Alerts: every tab writes back the whole list and its own read marks, so
+  // these are unioned rather than taken from whichever tab saved last - one
+  // agent reading an alert must not un-read another's, and a tab that has not
+  // heard about a new Jira alert must not erase it.
+  nextState.alertReads = mergeAlertReads(currentState.alertReads, nextState.alertReads);
+  nextState.jiraAlerts = mergeJiraAlerts(currentState.jiraAlerts, nextState.jiraAlerts);
+  ['readMentions', 'readJiraAlerts'].forEach((field) => {
+    nextState[field] = [...new Set([
+      ...(Array.isArray(currentState[field]) ? currentState[field] : []),
+      ...(Array.isArray(nextState[field]) ? nextState[field] : [])
+    ].map(String))];
+  });
+  if (!isStale) dedupeJiraSystemNotes(nextState.ticketComments);
+
   // Every ticket stays in the saved board, resolved or not. Resolved tickets
   // used to be cut from it once CS confirmed them or 72 hours had passed; the
   // board only hides those (isResolvedTicketHidden in index.html), and "My
@@ -2882,7 +3014,7 @@ async function safeWriteState(state, actor = null) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketCSTouchedAt', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketReopenRequests', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf', 'ticketVelmaBug', 'ticketSlaResetAt'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketCSTouchedAt', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketReopenRequests', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf', 'ticketVelmaBug', 'ticketSlaResetAt', 'alertReads', 'jiraAlerts', 'readMentions', 'readJiraAlerts'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -3471,6 +3603,13 @@ async function claimResolvedTeamsAlert({ ticketDbId, externalId, csAgent, catego
   if (claimedRows <= 0) return null;
   return { ticketId: externalId, csOwner: csOwnerForAlert, ticketNumber, subject, companyName, jiraKey: jiraTicketKey, assignee: assignedAgent };
 }
+
+// The Received Mail view pages through a whole window of the helpdesk
+// mailbox. 250 per page keeps each Graph response small (bodyPreview is the
+// bulk of it); the cap is well above three months of helpdesk mail and stops
+// a runaway window from holding the request open indefinitely.
+const MAIL_WINDOW_PAGE_SIZE = 250;
+const MAIL_WINDOW_MAX_MESSAGES = 8000;
 
 function mapMessage(msg) {
   const recipients = [
@@ -4182,7 +4321,7 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
       const at = safeDateForDb(c.ts);
       const row = c.edited && at ? existingCommentsByTs.get(at.getTime()) : null;
       if (row) {
-        if (row.comment !== c.text) editedComments.push({ id: row.id, text: c.text });
+        if (row.comment !== c.text) editedComments.push({ id: row.id, text: c.text, previous: row.comment });
       } else if (!existingCommentTexts.has(c.text)) {
         newComments.push(c);
       }
@@ -4316,7 +4455,7 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
         userId: req.session?.userId || null,
         before: existingTicket,
         after: ticket,
-        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'csAgent', 'hubspotTicketId', 'jiraTicketKey', 'body'],
+        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'csAgent', 'hubspotTicketId', 'jiraTicketKey', 'duplicateOfExternalId', 'body'],
         fieldMetadata: assignMeta ? {
           assignedAgent: { actor: assignMeta.by || null, source: assignMeta.source || null }
         } : {}
@@ -4337,6 +4476,16 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
     }
     for (const comment of editedComments) {
       await prisma.ticketComment.update({ where: { id: comment.id }, data: { comment: comment.text } });
+      // The row is overwritten in place, so without this the audit had no
+      // trace that a note ever said something else.
+      await createTicketAuditEvent({
+        ticketId: ticket.id,
+        userId: req?.session?.userId || null,
+        eventType: 'comment_edited',
+        oldValue: String(comment.previous || '').slice(0, 500),
+        newValue: comment.text.slice(0, 500),
+        metadata: { commentId: comment.id, source: 'board' }
+      });
     }
 
     count += 1;
@@ -4827,7 +4976,7 @@ app.get('/api/shift/state', requireAuth, (req, res) => {
   sweepIdleShifts();
   const me = shiftAgentFromRequest(req, req.query?.agent);
   const agents = {};
-  Object.keys(shiftStore.agents).forEach((code) => { agents[code] = shiftSnapshotFor(code); });
+  Object.keys(shiftStore.agents).forEach((code) => { if (!isHiddenAgentCode(code)) agents[code] = shiftSnapshotFor(code); });
   // slaTimeZone: the zone the SLA's working hours are read in, so every board
   // counts 08:00-12:00 / 14:00-17:00 the same way the server does.
   return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now(), slaTimeZone: process.env.TZ || null, leave: activeAgentLeave() });
@@ -4961,10 +5110,11 @@ app.get('/api/support-agents/names', requireAuth, async (req, res) => {
   try {
     const users = await prisma.user.findMany({
       where: { isActive: true },
-      select: { username: true, displayName: true, email: true }
+      select: { username: true, displayName: true, email: true, team: true }
     });
     const agents = {};
     users.forEach((user) => {
+      if (isHiddenServiceUser(user)) return;
       const candidates = [user.username, String(user.email || '').split('@')[0]]
         .map(v => String(v || '').trim().toUpperCase());
       const code = candidates.find(c => SUPPORT_AGENT_CODES.has(c));
@@ -4979,6 +5129,25 @@ app.get('/api/support-agents/names', requireAuth, async (req, res) => {
 
 app.get('/auth/me', requireAuth, (req, res) => {
   res.json({ user: { id: req.session.userId, username: req.session.username, role: req.session.role, avatarUrl: avatarUrlForUserId(req.session.userId) }, roster: agentRosterPayload() });
+});
+// The signed-in agent's read My Alerts, for the Alerts history on the profile
+// page. An admin may look at someone else's by passing ?agent=.
+app.get('/api/alerts/history', requireAuth, async (req, res) => {
+  // The agent code the board files alerts under: the username when it is a
+  // trigram, otherwise the email's local part (userAgentCode).
+  let self = String(req.session.username || '').trim().toUpperCase();
+  try {
+    const me = await prisma.user.findUnique({ where: { id: Number(req.session.userId) || 0 }, select: { username: true, email: true } });
+    if (me) self = userAgentCode(me);
+  } catch (_) { /* fall back to the session username */ }
+  const asked = String(req.query.agent || '').trim().toUpperCase();
+  const agent = asked && (asked === self || isAdminRole(normalizeRole(req.session.role))) ? asked : self;
+  try {
+    res.json({ agent, alerts: buildAlertHistory(safeReadState(), agent) });
+  } catch (error) {
+    console.error('Alerts history failed:', error);
+    res.status(500).json({ error: 'alerts_history_failed' });
+  }
 });
 // The CS and Support rosters, for the board to refresh its dropdowns without
 // a reload when an admin changes someone in Manage Users.
@@ -6545,6 +6714,497 @@ app.get('/api/jira/issue/:key', requireAuth, async (req, res) => {
     return res.status(500).json({ error: String(error.message || error) });
   }
 });
+
+/* ---- Jira tickets raised by the support team ------------------------------
+
+   The support team raises Jira tickets through one shared Jira account, so
+   Jira's reporter no longer says who opened a ticket. A "Support Agent" option
+   field on the request does, and this is what reads it: every ticket the scope
+   JQL finds, with its opener, for the Jira Tickets page and the KPI section.
+
+   Jira stays the source of truth. The list is cached in memory (the app runs
+   as a single instance) and refreshed when it is older than ten minutes and
+   somebody asks, or when somebody presses Sync - nothing polls Jira while the
+   page is closed. Each refresh replaces the whole list, so a ticket deleted or
+   moved out of scope in Jira disappears here too.
+
+   The scope is a JQL query an admin can change from the page. The default
+   finds every ticket with the field filled in, plus every ticket the shared
+   account raised - one raised without picking an agent shows as
+   "Unattributed".
+
+   Uses /rest/api/2/search with startAt paging, which is what the self-hosted
+   Jira answers. Atlassian Cloud retired that endpoint; there the sync reports
+   an error rather than an empty list. */
+const JIRA_SUPPORT_AGENT_FIELD = String(process.env.JIRA_SUPPORT_AGENT_FIELD || 'customfield_11101').trim();
+const JIRA_SUPPORT_TEAM_ID_FIELD = String(process.env.JIRA_SUPPORT_TEAM_ID_FIELD || 'customfield_11100').trim();
+const JIRA_SUPPORT_SLA_FIELD = String(process.env.JIRA_SUPPORT_SLA_FIELD || 'customfield_10029').trim();
+// The shared Jira account the support team raises tickets with. Its tickets
+// are in scope even when nobody picked an agent, so they show as Unattributed
+// instead of being missed. Empty JIRA_SUPPORT_SHARED_REPORTER drops that part.
+const JIRA_SUPPORT_SHARED_REPORTER = String(process.env.JIRA_SUPPORT_SHARED_REPORTER ?? 'Helpdesk').trim().replace(/"/g, '');
+const JIRA_SUPPORT_DEFAULT_JQL = `cf[${(JIRA_SUPPORT_AGENT_FIELD.match(/(\d+)$/) || [])[1] || '11101'}] is not EMPTY`
+  + (JIRA_SUPPORT_SHARED_REPORTER ? ` OR reporter = "${JIRA_SUPPORT_SHARED_REPORTER}"` : '')
+  + ' ORDER BY created DESC';
+const JIRA_SUPPORT_SCOPE_PROVIDER = 'jira_support_tickets';
+const JIRA_SUPPORT_MAX_ISSUES = 2000;
+const JIRA_SUPPORT_PAGE_SIZE = 100;
+const JIRA_SUPPORT_STALE_MS = 10 * 60 * 1000;
+// How long a request waits for a sync before answering with what it has.
+const JIRA_SUPPORT_WAIT_MS = 25000;
+const jiraSupportCache = { tickets: [], syncedAt: 0, attemptedAt: 0, error: null, truncated: false, total: 0, jql: '', inFlight: null };
+// Jira projects whose linked issues are shown on an open ticket (the dev
+// tickets a support request turned into), with their status and sprint.
+const JIRA_SUPPORT_LINKED_PROJECTS = String(process.env.JIRA_SUPPORT_LINKED_PROJECTS ?? 'QT')
+  .split(',').map(p => p.trim().toUpperCase()).filter(p => /^[A-Z][A-Z0-9]+$/.test(p));
+const JIRA_SPRINT_FIELD = String(process.env.JIRA_SPRINT_FIELD || 'customfield_10008').trim();
+// Linked issues by key. Kept across syncs: one that cannot be read this time
+// keeps what was known, rather than turning into "no sprint".
+const jiraLinkedCache = new Map();
+// Under the list's own ten minutes, so each refresh of the list re-reads them.
+const JIRA_LINKED_TTL_MS = 8 * 60 * 1000;
+const JIRA_LINKED_MAX_PER_SYNC = 200;
+
+async function getJiraSupportJql() {
+  const stored = await getStoredOAuthTokens(JIRA_SUPPORT_SCOPE_PROVIDER);
+  const saved = String(stored?.metadata?.jql || '').trim();
+  return saved || String(process.env.JIRA_SUPPORT_TICKETS_JQL || '').trim() || JIRA_SUPPORT_DEFAULT_JQL;
+}
+function jiraDateIso(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+// The opener as written on the ticket. Kept as-is (uppercased) even when it is
+// not a current trigram - a former agent or an "Other" option is still who
+// opened it; only the badge colour depends on the roster.
+function jiraSupportOpener(raw) {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const text = value && typeof value === 'object' ? (value.value ?? value.name ?? '') : (value ?? '');
+  return String(text).trim().toUpperCase().slice(0, 40);
+}
+// Jira Service Desk's own SLA clock for the ticket, when the field exists on
+// it: the running cycle if there is one, else the last completed one. Null
+// when the ticket has no SLA - shown as "-", never as "on track".
+function jiraSupportSla(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const ongoing = raw.ongoingCycle && typeof raw.ongoingCycle === 'object' ? raw.ongoingCycle : null;
+  const completed = Array.isArray(raw.completedCycles) ? raw.completedCycles : [];
+  const last = completed.length ? completed[completed.length - 1] : null;
+  if (ongoing) {
+    const remaining = Number(ongoing.remainingTime?.millis);
+    return {
+      state: ongoing.breached ? 'breached' : (ongoing.paused ? 'paused' : 'running'),
+      breached: !!ongoing.breached,
+      remainingMs: Number.isFinite(remaining) ? remaining : null
+    };
+  }
+  if (last) return { state: last.breached ? 'breached' : 'met', breached: !!last.breached, remainingMs: null };
+  return null;
+}
+function normalizeJiraSupportIssue(issue) {
+  const key = String(issue?.key || '').trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9]+-\d+$/.test(key)) return null;
+  const f = (issue.fields && typeof issue.fields === 'object') ? issue.fields : {};
+  const category = String(f.status?.statusCategory?.key || '').trim().toLowerCase();
+  const done = category === 'done';
+  const teamField = f[JIRA_SUPPORT_TEAM_ID_FIELD];
+  const teamRaw = teamField && typeof teamField === 'object' ? (teamField.value ?? null) : teamField;
+  return {
+    key,
+    summary: String(f.summary || '').slice(0, 500),
+    status: String(f.status?.name || ''),
+    statusCategory: category,
+    done,
+    priority: String(f.priority?.name || ''),
+    createdAt: jiraDateIso(f.created),
+    // A reopened ticket can keep its old resolution date; it only counts as
+    // resolved while Jira also files its status under Done.
+    resolvedAt: done ? (jiraDateIso(f.resolutiondate) || jiraDateIso(f.statuscategorychangedate) || jiraDateIso(f.updated)) : null,
+    updatedAt: jiraDateIso(f.updated),
+    assignee: String(f.assignee?.displayName || ''),
+    opener: jiraSupportOpener(f[JIRA_SUPPORT_AGENT_FIELD]),
+    teamId: teamRaw === null || teamRaw === undefined || teamRaw === '' ? null : String(teamRaw).replace(/\.0+$/, '').slice(0, 20),
+    project: String(f.project?.key || ''),
+    issueType: String(f.issuetype?.name || ''),
+    sla: jiraSupportSla(f[JIRA_SUPPORT_SLA_FIELD]),
+    links: jiraSupportLinks(f.issuelinks)
+  };
+}
+// The ticket's links into the dev projects, as Jira's link list gives them:
+// key, link type and the linked issue's status. Its sprint comes from a
+// separate lookup (lookupJiraLinkedIssues). A link to an issue the board's
+// Jira account cannot browse is left out by Jira itself.
+function jiraSupportLinks(issuelinks) {
+  if (!Array.isArray(issuelinks) || !JIRA_SUPPORT_LINKED_PROJECTS.length) return [];
+  const out = new Map();
+  issuelinks.forEach((link) => {
+    const ref = link?.outwardIssue || link?.inwardIssue;
+    const key = String(ref?.key || '').trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9]+-\d+$/.test(key) || out.has(key)) return;
+    if (!JIRA_SUPPORT_LINKED_PROJECTS.includes(key.split('-')[0])) return;
+    out.set(key, {
+      key,
+      type: String((link.outwardIssue ? link.type?.outward : link.type?.inward) || link.type?.name || 'linked').slice(0, 40),
+      summary: String(ref.fields?.summary || '').slice(0, 300),
+      status: String(ref.fields?.status?.name || ''),
+      statusCategory: String(ref.fields?.status?.statusCategory?.key || '').toLowerCase()
+    });
+  });
+  return [...out.values()];
+}
+// A sprint as Jira Software's agile API gives it, or as the Sprint custom
+// field's legacy text ("...Sprint@1a[id=5,rapidViewId=2,state=ACTIVE,
+// name=Sprint 217,startDate=...]"). Names can hold commas, so the name is
+// cut at the next known key rather than at the next comma.
+function jiraParseSprint(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') {
+    const state = String(raw.state || '').toLowerCase();
+    return { id: Number(raw.id) || null, name: String(raw.name || '').slice(0, 60), state: ['active', 'future', 'closed'].includes(state) ? state : '', startDate: jiraDateIso(raw.startDate), endDate: jiraDateIso(raw.endDate) };
+  }
+  const text = String(raw);
+  const pick = (re) => { const m = text.match(re); return m && m[1] !== '<null>' ? m[1] : null; };
+  const state = String(pick(/state=(\w+)/) || '').toLowerCase();
+  return {
+    id: Number(pick(/[[,]id=(\d+)/)) || null,
+    name: String(pick(/name=(.*?),(?:startDate|endDate|completeDate|activatedDate|sequence|goal|autoStartStop|synced|incompleteIssuesDestinationId)=/) || pick(/name=([^,\]]*)/) || '').slice(0, 60),
+    state: ['active', 'future', 'closed'].includes(state) ? state : '',
+    startDate: jiraDateIso(pick(/startDate=([^,\]]+)/)),
+    endDate: jiraDateIso(pick(/endDate=([^,\]]+)/))
+  };
+}
+// Which sprint says where the issue is planned: the running one, else the
+// next future one. A closed sprint only on an issue that is not done means it
+// was carried over and is not planned anywhere - reported as such.
+function jiraPlannedSprint(sprints) {
+  const list = (Array.isArray(sprints) ? sprints : []).filter(Boolean);
+  const active = list.filter(s => s.state === 'active').sort((a, b) => String(b.startDate || '').localeCompare(String(a.startDate || '')) || (a.id || 0) - (b.id || 0));
+  if (active.length) return { ...active[0], planned: true };
+  const future = list.filter(s => s.state === 'future').sort((a, b) => (a.startDate ? 0 : 1) - (b.startDate ? 0 : 1) || String(a.startDate || '').localeCompare(String(b.startDate || '')) || (a.id || 0) - (b.id || 0));
+  if (future.length) return { ...future[0], planned: true };
+  const closed = list.filter(s => s.state === 'closed').sort((a, b) => String(b.endDate || '').localeCompare(String(a.endDate || '')) || (b.id || 0) - (a.id || 0));
+  if (closed.length) return { ...closed[0], planned: false };
+  return null;
+}
+async function fetchJiraLinkedIssue(config, key) {
+  // Jira Software's issue endpoint returns the sprint as an object (plus the
+  // closed ones); a Jira without it falls back to the core API and the Sprint
+  // custom field.
+  try {
+    const issue = await jiraApiRequest(config, `/rest/agile/1.0/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,sprint,closedSprints`);
+    const f = issue?.fields || {};
+    const sprints = [f.sprint, ...(Array.isArray(f.closedSprints) ? f.closedSprints : [])].map(jiraParseSprint);
+    return { f, sprint: jiraPlannedSprint(sprints) };
+  } catch (error) {
+    const status = Number((String(error?.message || '').match(/^jira_api_error_(\d+)/) || [])[1] || 0);
+    if (![400, 403, 404].includes(status) && !/^jira_non_json_response_/.test(String(error?.message || ''))) throw error;
+  }
+  const issue = await jiraApiRequest(config, `/rest/api/2/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,${encodeURIComponent(JIRA_SPRINT_FIELD)}`);
+  const f = issue?.fields || {};
+  const raw = f[JIRA_SPRINT_FIELD];
+  return { f, sprint: jiraPlannedSprint((Array.isArray(raw) ? raw : (raw ? [raw] : [])).map(jiraParseSprint)) };
+}
+/* Status, assignee and sprint of the dev issues linked to OPEN tickets - a
+   closed ticket's links are history. One request per issue, four at a time:
+   a batched "key in (...)" search fails as a whole on a single deleted or
+   hidden key. Cached for ten minutes; a lookup that fails keeps the last
+   known answer. Never throws - the ticket list does not depend on it. */
+async function lookupJiraLinkedIssues(config, tickets, force = false) {
+  const wanted = [];
+  const seen = new Set();
+  // Newest tickets first, so a cap drops the oldest links.
+  [...tickets].filter(t => !t.done).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+    .forEach(t => (t.links || []).forEach((l) => {
+      if (seen.has(l.key) || l.statusCategory === 'done') return;
+      seen.add(l.key);
+      const cached = jiraLinkedCache.get(l.key);
+      // Sync pressed: read them all again - somebody may just have moved one.
+      if (force || !cached || Date.now() - cached.fetchedAt > JIRA_LINKED_TTL_MS) wanted.push(l.key);
+    }));
+  // Forget issues no open ticket links to any more.
+  for (const key of jiraLinkedCache.keys()) if (!seen.has(key)) jiraLinkedCache.delete(key);
+  if (wanted.length > JIRA_LINKED_MAX_PER_SYNC) console.warn(`[jira-support] ${wanted.length} linked issues to look up; only ${JIRA_LINKED_MAX_PER_SYNC} this time`);
+  const queue = wanted.slice(0, JIRA_LINKED_MAX_PER_SYNC);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+    while (next < queue.length) {
+      const key = queue[next++];
+      try {
+        const { f, sprint } = await fetchJiraLinkedIssue(config, key);
+        jiraLinkedCache.set(key, {
+          fetchedAt: Date.now(),
+          data: {
+            key,
+            summary: String(f.summary || '').slice(0, 300),
+            status: String(f.status?.name || ''),
+            statusCategory: String(f.status?.statusCategory?.key || '').toLowerCase(),
+            assignee: String(f.assignee?.displayName || ''),
+            sprint,
+            sprintKnown: true
+          }
+        });
+      } catch (error) {
+        console.warn(`[jira-support] linked issue ${key} not read:`, String(error?.message || error).slice(0, 160));
+      }
+    }
+  }));
+}
+// What the page shows for each link: the looked-up issue when there is one,
+// else what the ticket's own link list said, with the sprint marked unknown.
+function jiraLinkedForTicket(ticket) {
+  return (ticket.links || []).map((l) => {
+    // Status always from the ticket's own link list (read with the tickets,
+    // so never older than they are); assignee and sprint from the lookup. A
+    // dev issue that is done needs no sprint.
+    if (l.statusCategory === 'done') return { ...l, assignee: '', sprint: null, sprintKnown: true };
+    const cached = jiraLinkedCache.get(l.key)?.data;
+    return cached
+      ? { ...l, assignee: cached.assignee, sprint: cached.sprint, sprintKnown: true }
+      : { ...l, assignee: '', sprint: null, sprintKnown: false };
+  });
+}
+async function jiraSearchSupportTickets(config, jql, { limit = JIRA_SUPPORT_MAX_ISSUES } = {}) {
+  const fields = ['summary', 'status', 'priority', 'created', 'resolutiondate', 'statuscategorychangedate', 'updated', 'assignee', 'project', 'issuetype',
+    'issuelinks', JIRA_SUPPORT_AGENT_FIELD, JIRA_SUPPORT_TEAM_ID_FIELD, JIRA_SUPPORT_SLA_FIELD].join(',');
+  const tickets = [];
+  // Offset paging over a list that can change while it is read: a ticket
+  // created mid-sync pushes every row down one, so the next page starts with
+  // the last one again. Each key is kept once.
+  const seen = new Set();
+  let startAt = 0;
+  let total = Infinity;
+  while (startAt < total && tickets.length < limit) {
+    const qs = new URLSearchParams({ jql, startAt: String(startAt), maxResults: String(Math.min(JIRA_SUPPORT_PAGE_SIZE, limit)), fields });
+    const page = await jiraApiRequest(config, `/rest/api/2/search?${qs.toString()}`);
+    if (!page || !Array.isArray(page.issues)) throw new Error('jira_search_unexpected_response');
+    const pageTotal = Number(page.total);
+    total = Number.isFinite(pageTotal) ? pageTotal : startAt + page.issues.length;
+    page.issues.forEach((issue) => {
+      const ticket = normalizeJiraSupportIssue(issue);
+      if (ticket && !seen.has(ticket.key)) { seen.add(ticket.key); tickets.push(ticket); }
+    });
+    if (!page.issues.length) break;
+    startAt += page.issues.length;
+  }
+  return { tickets: tickets.slice(0, limit), total: Number.isFinite(total) ? total : tickets.length, truncated: Number.isFinite(total) && total > limit };
+}
+// What the page says when a sync fails, in words an admin can act on.
+function jiraSupportErrorMessage(error) {
+  const msg = String(error?.message || error || '');
+  const status = Number((msg.match(/^jira_api_error_(\d+)/) || [])[1] || 0);
+  if (msg === 'jira_not_connected') return 'Jira is not connected. An admin can connect it in the Jira settings.';
+  if (status === 400) {
+    let detail = '';
+    try { detail = (JSON.parse(msg.replace(/^jira_api_error_400:/, '')).errorMessages || []).join(' '); } catch (_) {}
+    return `Jira rejected the ticket search${detail ? `: ${detail.slice(0, 200)}` : ''}. An admin can check the scope (JQL).`;
+  }
+  if (status === 401 || status === 403) return 'Jira refused the board\'s credentials. An admin may need to update them in the Jira settings.';
+  if (status === 404 || status === 410) return 'This Jira does not offer the search the board uses.';
+  if (/^jira_non_json_response_/.test(msg)) return 'Jira answered with a login page instead of data - the board\'s Jira credentials may have expired.';
+  if (jiraErrorIsTransient(error)) return 'Jira did not answer in time. Try Sync again in a moment.';
+  return `Could not load the tickets from Jira (${msg.slice(0, 120)}).`;
+}
+function syncJiraSupportTickets(force = false) {
+  if (jiraSupportCache.inFlight) return jiraSupportCache.inFlight;
+  jiraSupportCache.attemptedAt = Date.now();
+  jiraSupportCache.inFlight = (async () => {
+    try {
+      const config = await getJiraConfig();
+      if (!config.connected) throw new Error('jira_not_connected');
+      const jql = await getJiraSupportJql();
+      const result = await jiraSearchSupportTickets(config, jql);
+      jiraSupportCache.tickets = result.tickets;
+      jiraSupportCache.total = result.total;
+      jiraSupportCache.truncated = result.truncated;
+      jiraSupportCache.jql = jql;
+      jiraSupportCache.syncedAt = Date.now();
+      jiraSupportCache.error = null;
+      // Sync stays "in flight" until the links are read too, so a page that
+      // got the tickets first polls again and picks the sprints up.
+      await lookupJiraLinkedIssues(config, result.tickets, force).catch(() => {});
+      if (result.truncated) console.warn(`[jira-support] scope matches ${result.total} tickets; only the newest ${JIRA_SUPPORT_MAX_ISSUES} are loaded`);
+    } catch (error) {
+      // The last good list stays on screen; the error says why it is not newer.
+      jiraSupportCache.error = jiraSupportErrorMessage(error);
+      console.warn('[jira-support] sync failed:', String(error?.message || error).slice(0, 300));
+    } finally {
+      jiraSupportCache.inFlight = null;
+    }
+  })();
+  return jiraSupportCache.inFlight;
+}
+// Waits for a sync, but never longer than JIRA_SUPPORT_WAIT_MS: a slow Jira
+// answers with the list as it stands, still syncing.
+async function awaitJiraSupportSync(force) {
+  const now = Date.now();
+  const fresh = jiraSupportCache.syncedAt && now - jiraSupportCache.syncedAt <= JIRA_SUPPORT_STALE_MS;
+  // A Jira that just failed is not asked again on every page load: one try a
+  // minute, unless somebody presses Sync.
+  const recentlyFailed = jiraSupportCache.error && now - jiraSupportCache.attemptedAt < 60 * 1000;
+  if (!force && (fresh || recentlyFailed)) return;
+  // Sync pressed while a background refresh runs: that one may be using cached
+  // sprints, so let it finish and read everything again.
+  if (force && jiraSupportCache.inFlight) {
+    await Promise.race([jiraSupportCache.inFlight, new Promise(resolve => setTimeout(resolve, JIRA_SUPPORT_WAIT_MS).unref?.())]);
+    if (jiraSupportCache.inFlight) return;
+  }
+  const sync = syncJiraSupportTickets(!!force);
+  // Only the very first load (or a forced one) is worth waiting for; a stale
+  // list is shown at once and refreshed behind it.
+  if (!force && jiraSupportCache.syncedAt) return;
+  await Promise.race([sync, new Promise(resolve => setTimeout(resolve, JIRA_SUPPORT_WAIT_MS).unref?.())]);
+}
+/* Who sees which tickets. Admins (the head of support) see every ticket;
+   a support agent sees only the ones they opened - like the KPI dashboard, a
+   colleague's work is not theirs to read. CS is kept out by the route gate. */
+function jiraSupportTicketsForActor(req) {
+  if (actorTeam(req) === 'admin') return jiraSupportCache.tickets;
+  const me = actorAgentCode(req);
+  return jiraSupportCache.tickets.filter(t => t.opener === me);
+}
+function jiraSupportMeta(req, config) {
+  const isAdmin = actorTeam(req) === 'admin';
+  return {
+    connected: !!config.connected,
+    browseBaseUrl: config.browseBaseUrl || '',
+    syncedAt: jiraSupportCache.syncedAt ? new Date(jiraSupportCache.syncedAt).toISOString() : null,
+    syncing: !!jiraSupportCache.inFlight,
+    // The detailed reason can quote the scope query - admins get it, everyone
+    // else a plain "not up to date".
+    error: jiraSupportCache.error ? (isAdmin ? jiraSupportCache.error : 'The list could not be refreshed from Jira just now; it may be out of date.') : null,
+    truncated: jiraSupportCache.truncated,
+    isAdmin,
+    // The query itself only for admins - it is theirs to change.
+    ...(isAdmin ? { jql: jiraSupportCache.jql || null, defaultJql: JIRA_SUPPORT_DEFAULT_JQL, total: jiraSupportCache.total } : {})
+  };
+}
+// Per user, not per IP: the whole office can share one address.
+const jiraSupportLimiterKey = (req) => String(req.session?.userId || req.ip || '');
+const jiraSupportSyncLimiter = rateLimit({ windowMs: 60 * 1000, max: 6, standardHeaders: true, legacyHeaders: false, keyGenerator: jiraSupportLimiterKey,
+  message: { error: 'Synced a moment ago - try again in a minute.' } });
+const jiraSupportScopeLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false, keyGenerator: jiraSupportLimiterKey,
+  message: { error: 'Too many scope changes - wait a minute.' } });
+async function sendJiraSupportTickets(req, res, force) {
+  try {
+    const config = await getJiraConfig();
+    if (!config.connected) return res.json({ ...jiraSupportMeta(req, config), connected: false, tickets: [] });
+    await awaitJiraSupportSync(force);
+    return res.json({ ...jiraSupportMeta(req, config), tickets: jiraSupportListTickets(req) });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+}
+// The page's list: each open ticket with its linked dev issues filled in.
+function jiraSupportListTickets(req) {
+  return jiraSupportTicketsForActor(req).map(({ links, ...t }) => ({ ...t, linked: t.done ? [] : jiraLinkedForTicket({ links }) }));
+}
+app.get('/api/jira/support-tickets', requireSupportOrAdmin, (req, res) => sendJiraSupportTickets(req, res, false));
+app.post('/api/jira/support-tickets/sync', requireSupportOrAdmin, jiraSupportSyncLimiter, (req, res) => sendJiraSupportTickets(req, res, true));
+// The scope query. Tried against Jira before it is saved, so a typo is caught
+// here rather than turning into an empty page. Empty resets to the default.
+app.post('/api/jira/support-tickets/scope', requireAdmin, jiraSupportScopeLimiter, async (req, res) => {
+  try {
+    const jql = String(req.body?.jql || '').trim();
+    if (jql.length > 1000) return res.status(400).json({ error: 'The scope is too long (1000 characters at most).' });
+    const config = await getJiraConfig();
+    if (!config.connected) return res.status(409).json({ error: 'Jira is not connected.' });
+    if (jql) {
+      try {
+        await jiraSearchSupportTickets(config, jql, { limit: 1 });
+      } catch (error) {
+        return res.status(400).json({ error: jiraSupportErrorMessage(error) });
+      }
+    }
+    await setStoredOAuthTokens(JIRA_SUPPORT_SCOPE_PROVIDER, { metadata: { jql: jql || null, updatedBy: actorAgentCode(req), updatedAt: new Date().toISOString() } });
+    // The store swallows its own errors, so read it back rather than tell the
+    // admin it was saved when it was not.
+    const check = await getStoredOAuthTokens(JIRA_SUPPORT_SCOPE_PROVIDER);
+    if (String(check?.metadata?.jql || '') !== jql) return res.status(500).json({ error: 'The scope could not be saved. Try again.' });
+    // Wait for a running sync to finish so the forced one below reads the new scope.
+    if (jiraSupportCache.inFlight) await jiraSupportCache.inFlight.catch(() => {});
+    jiraSupportCache.syncedAt = 0;
+    await awaitJiraSupportSync(true);
+    return res.json({ ...jiraSupportMeta(req, config), tickets: jiraSupportListTickets(req) });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
+/* The KPI dashboard's Jira section, worked out here so the same scoping
+   applies as everywhere else on the dashboard.
+
+   Opened counts tickets created in the range; Resolved, tickets Jira closed in
+   the range; Open now is the queue as it stands, whatever the range. Resolve
+   time is working time (the board's 08:00-12:00 and 14:00-17:00, weekdays), so
+   it reads like every other time on the dashboard. */
+app.get('/api/jira/support-tickets/kpis', requireSupportOrAdmin, async (req, res) => {
+  try {
+    const config = await getJiraConfig();
+    const bounds = kpiDateBounds(req.query.range, req.query.tzOffset);
+    const range = { key: bounds.key, label: bounds.label, start: bounds.start.toISOString(), end: bounds.end.toISOString() };
+    if (!config.connected) return res.json({ ...jiraSupportMeta(req, config), connected: false, range, totals: null, rows: [], openRows: [] });
+    await awaitJiraSupportSync(false);
+    let tickets = jiraSupportTicketsForActor(req);
+    const agent = String(req.query.agent || 'all').trim().toUpperCase();
+    if (actorTeam(req) === 'admin' && agent && agent !== 'ALL') tickets = tickets.filter(t => t.opener === agent);
+    const now = Date.now();
+    const workHours = (fromIso, toMs) => {
+      const from = Date.parse(fromIso || '');
+      return Number.isFinite(from) && toMs > from ? businessMsInRange(from, toMs) / 3600000 : null;
+    };
+    const median = (list) => {
+      if (!list.length) return null;
+      const sorted = [...list].sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    };
+    const round1 = v => (v === null || v === undefined ? null : Math.round(v * 10) / 10);
+    const rows = new Map();
+    const rowFor = (opener) => {
+      const key = opener ? 'o:' + opener : 'none';
+      if (!rows.has(key)) rows.set(key, { opener: opener || null, opened: 0, resolved: 0, openNow: 0, breached: 0, resolveHours: [] });
+      return rows.get(key);
+    };
+    const totals = { opened: 0, resolved: 0, openNow: 0, breached: 0, slaKnown: 0, unattributed: 0 };
+    const allResolveHours = [];
+    tickets.forEach((t) => {
+      const openedInRange = isDateInBounds(t.createdAt, bounds);
+      const resolvedInRange = t.done && isDateInBounds(t.resolvedAt, bounds);
+      const openNow = !t.done;
+      if (!openedInRange && !resolvedInRange && !openNow) return;
+      const row = rowFor(t.opener);
+      if (openedInRange) {
+        row.opened++; totals.opened++;
+        if (!t.opener) totals.unattributed++;
+        // Jira's own SLA verdict, for the tickets opened in the range.
+        if (t.sla) {
+          totals.slaKnown++;
+          if (t.sla.breached) { totals.breached++; row.breached++; }
+        }
+      }
+      if (resolvedInRange) {
+        row.resolved++; totals.resolved++;
+        const hours = workHours(t.createdAt, Date.parse(t.resolvedAt));
+        if (hours !== null) { row.resolveHours.push(hours); allResolveHours.push(hours); }
+      }
+      if (openNow) { row.openNow++; totals.openNow++; }
+    });
+    totals.medianResolveHours = round1(median(allResolveHours));
+    totals.avgResolveHours = allResolveHours.length ? round1(allResolveHours.reduce((a, b) => a + b, 0) / allResolveHours.length) : null;
+    const rowList = [...rows.values()].map(r => ({
+      opener: r.opener, opened: r.opened, resolved: r.resolved, openNow: r.openNow, breached: r.breached,
+      medianResolveHours: round1(median(r.resolveHours))
+    })).sort((a, b) => (b.opened - a.opened) || (b.openNow - a.openNow) || String(a.opener || '~').localeCompare(String(b.opener || '~')));
+    // The open queue, oldest first - what the head of support chases.
+    const openRows = tickets.filter(t => !t.done)
+      .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')))
+      .slice(0, 25)
+      .map(t => ({ key: t.key, summary: t.summary, opener: t.opener || null, status: t.status, priority: t.priority, createdAt: t.createdAt, ageHours: round1(workHours(t.createdAt, now)), sla: t.sla }));
+    return res.json({ ...jiraSupportMeta(req, config), range, totals, rows: rowList, openRows });
+  } catch (error) {
+    return res.status(500).json({ error: String(error.message || error) });
+  }
+});
 app.get('/profile', requireAuth, (req, res) => {
   res.type('html').sendFile(path.join(VIEWS_DIR, 'profile.html'));
 });
@@ -7399,7 +8059,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       ...Array.from(SUPPORT_AGENT_CODES),
       ...Array.from(CS_AGENT_CODES),
       ...tickets.flatMap(t => [t.assignedAgent, t.csAgent]).filter(Boolean).map(v => String(v).trim().toUpperCase())
-    ])).sort((a, b) => a.localeCompare(b));
+    ])).filter(code => !isHiddenAgentCode(code)).sort((a, b) => a.localeCompare(b));
 
     // The whole life of the board, for admins, under the same filters as the
     // cards. Counted off the very tickets the cards are counted off
@@ -7514,8 +8174,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       categoryRows: sortRows(categoryCounts).map(([category, count]) => ({ category, count })),
       priorityRows: sortRows(priorityCounts).map(([priority, count]) => ({ priority, count })),
       companyRows: sortRows(companyCounts).map(([company, count]) => ({ company, count })),
-      csRows: sortRows(csCounts).map(([agent, count]) => ({ agent, count })),
+      csRows: sortRows(csCounts).filter(([agent]) => !isHiddenAgentCode(agent)).map(([agent, count]) => ({ agent, count })),
       agentRows: Object.values(agentRows)
+        .filter(row => !isHiddenAgentCode(row.agent))
         .map(({ resolveHours, ...row }) => ({
           ...row,
           avgResolveShiftHours: avgOf(resolveHours),
@@ -8476,7 +9137,8 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
 
     for (const past of history) {
       const agent = String(past.assignedAgent || '').trim().toUpperCase();
-      if (!agent) continue;
+      // Never suggest a service account, whatever an old ticket says.
+      if (!agent || isHiddenAgentCode(agent)) continue;
       if (!agents.has(agent)) agents.set(agent, { agent, sameCompany: 0, sameSender: 0, sameCategory: 0, similarSubject: 0, total: 0, lastAt: null, examples: [] });
       const row = agents.get(agent);
       row.total++;
@@ -9923,6 +10585,8 @@ function buildAgentActivity(events, { includeSync = false, wholeBoard = true } =
   }
 
   const shape = (kind) => [...buckets[kind].values()]
+    // A service account is not an agent to report on.
+    .filter(a => !isHiddenAgentCode(a.code))
     .map(a => ({
       code: a.code,
       kind: a.kind,
@@ -10005,6 +10669,964 @@ app.get('/api/audit/agent-activity', requireSupportOrAdmin, async (req, res) => 
   } catch (error) {
     console.error('Read agent activity audit failed:', error);
     return res.status(500).json({ error: 'read_agent_activity_failed' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Audit trail
+//
+// The page used to read one capped slice of TicketEvent (the newest 500 rows,
+// or 30 days / 5000 rows grouped by agent, 40 rows a ticket). That was only
+// ever part of a ticket's life, for three reasons this section deals with:
+//
+// - Notes were never in the log: they are TicketComment rows, which nothing
+//   read. They are merged in here as timeline items.
+// - Everything the board keeps only in its state (archive, snooze, CS confirm
+//   or send-back, re-opens, re-open requests) was never logged at all. Those
+//   are now logged going forward (auditBoardStateTransitions), and for the
+//   past they are reconstructed from the state and the Ticket row, marked as
+//   reconstructed so nobody mistakes an inference for a record.
+// - The reads were windows. Every read here is a filter plus a cursor or an
+//   offset, so the whole history is reachable a page at a time.
+// ---------------------------------------------------------------------------
+const AUDIT_STAGE_KEYS = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
+const AUDIT_STAGE_LABELS = { new: 'New', inp: 'In Progress', wus: 'Waiting on Us', dft: 'Due for Test', wct: 'Waiting on Contact', res: 'Resolved' };
+const AUDIT_KINDS = {
+  created: 'Created',
+  stage: 'Stage moves',
+  assign: 'Support assignment',
+  cs: 'CS owner',
+  priority: 'Priority',
+  category: 'Category',
+  note: 'Notes',
+  reply: 'Replies',
+  jira: 'Jira',
+  link: 'Links',
+  sla: 'SLA',
+  snooze: 'Snooze',
+  archive: 'Archive',
+  resolution: 'Resolution review',
+  reopen: 'Re-opens',
+  duplicate: 'Duplicates',
+  sync: 'Mail sync'
+};
+const AUDIT_EVENT_INFO = {
+  ticket_created: { kind: 'created', label: 'Ticket created' },
+  ticket_received: { kind: 'created', label: 'Email received' },
+  ticket_status_changed: { kind: 'stage', label: 'Stage moved' },
+  ticket_assignedAgent_changed: { kind: 'assign', label: 'Support agent changed' },
+  ticket_csAgent_changed: { kind: 'cs', label: 'CS owner changed' },
+  ticket_priority_changed: { kind: 'priority', label: 'Priority changed' },
+  ticket_category_changed: { kind: 'category', label: 'Category changed' },
+  note_added: { kind: 'note', label: 'Note added' },
+  comment_added: { kind: 'note', label: 'Note added' },
+  comment_edited: { kind: 'note', label: 'Note edited' },
+  email_reply_sent: { kind: 'reply', label: 'Reply sent' },
+  outlook_draft_created: { kind: 'reply', label: 'Outlook draft created' },
+  reply_proposed: { kind: 'reply', label: 'Reply drafted' },
+  customer_replied: { kind: 'reply', label: 'New message in the thread' },
+  ticket_jira_linked: { kind: 'jira', label: 'Jira linked' },
+  ticket_jira_unlinked: { kind: 'jira', label: 'Jira unlinked' },
+  ticket_jiraTicketKey_changed: { kind: 'jira', label: 'Jira link changed' },
+  ticket_hubspotTicketId_changed: { kind: 'link', label: 'HubSpot link changed' },
+  ticket_velma_bug_linked: { kind: 'link', label: 'Velma bug linked' },
+  ticket_velma_bug_unlinked: { kind: 'link', label: 'Velma bug unlinked' },
+  ticket_velma_bug_done: { kind: 'sla', label: 'Velma bug fixed' },
+  ticket_velma_bug_reopened: { kind: 'sla', label: 'Velma bug re-opened' },
+  ticket_sla_hold: { kind: 'sla', label: 'SLA put on hold' },
+  ticket_sla_released: { kind: 'sla', label: 'SLA hold released' },
+  sla_reset: { kind: 'sla', label: 'SLA clock restarted' },
+  ticket_snoozed: { kind: 'snooze', label: 'Snoozed' },
+  ticket_unsnoozed: { kind: 'snooze', label: 'Woken up' },
+  ticket_snooze_expired: { kind: 'snooze', label: 'Snooze ended' },
+  ticket_archived: { kind: 'archive', label: 'Archived' },
+  ticket_restored: { kind: 'archive', label: 'Restored from archive' },
+  ticket_removed_from_board: { kind: 'archive', label: 'Removed from the board' },
+  ticket_resolution_confirmed: { kind: 'resolution', label: 'Resolution confirmed by CS' },
+  ticket_sent_back: { kind: 'resolution', label: 'Sent back by CS' },
+  ticket_reopen_requested: { kind: 'reopen', label: 'Re-open requested' },
+  ticket_reopen_decided: { kind: 'reopen', label: 'Re-open request decided' },
+  ticket_reopened: { kind: 'reopen', label: 'Re-opened by a client reply' },
+  ticket_marked_duplicate: { kind: 'duplicate', label: 'Marked as duplicate' },
+  ticket_unmarked_duplicate: { kind: 'duplicate', label: 'Duplicate mark removed' },
+  ticket_duplicateOfExternalId_changed: { kind: 'duplicate', label: 'Duplicate link changed' },
+  ticket_subject_changed: { kind: 'sync', label: 'Subject updated (mail sync)' },
+  ticket_senderEmail_changed: { kind: 'sync', label: 'Sender updated (mail sync)' },
+  ticket_companyName_changed: { kind: 'sync', label: 'Company updated (mail sync)' },
+  ticket_body_changed: { kind: 'sync', label: 'Body updated (mail sync)' }
+};
+// Written alongside a TicketComment row, which is what the audit reads for
+// notes; reading both would list every MCP note twice.
+const AUDIT_SHADOWED_EVENTS = ['comment_added', 'reply_proposed'];
+const AUDIT_SYNC_EVENTS = Object.keys(AUDIT_EVENT_INFO).filter(t => AUDIT_EVENT_INFO[t].kind === 'sync');
+
+function auditEventInfo(type) {
+  return AUDIT_EVENT_INFO[type] || { kind: 'other', label: String(type || 'event').replace(/^ticket_/, '').replace(/_/g, ' ') };
+}
+function auditClip(value, n = 400) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  return text.length > n ? `${text.slice(0, n - 1)}…` : text;
+}
+function auditStageOf(status) {
+  return status ? normalizeDbStatusForBoard(status) : null;
+}
+
+// The board state, read at most once per change of the file: a timeline open
+// should not re-parse a multi-megabyte JSON file each time.
+let auditStateCache = { key: '', state: {} };
+function readStateForAudit() {
+  try {
+    const stat = fs.statSync(DATA_PATH);
+    const key = `${stat.mtimeMs}:${stat.size}`;
+    if (auditStateCache.key !== key) auditStateCache = { key, state: safeReadState() };
+    return auditStateCache.state || {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+const AUDIT_USER_SELECT = { id: true, username: true, displayName: true, email: true, role: true, team: true };
+const AUDIT_TICKET_SELECT = {
+  id: true, externalId: true, displayNumber: true, subject: true, senderName: true, senderEmail: true, companyName: true,
+  status: true, priority: true, category: true, assignedAgent: true, csAgent: true, source: true,
+  hubspotTicketId: true, jiraTicketKey: true, velmaBugId: true, slaHoldAt: true, slaHoldBy: true,
+  createdAt: true, updatedAt: true, resolvedAt: true, slaResetAt: true,
+  duplicateOfExternalId: true, duplicateMarkedAt: true, duplicateMarkedBy: true
+};
+const AUDIT_TICKET_BRIEF_SELECT = {
+  id: true, externalId: true, displayNumber: true, subject: true, companyName: true, status: true,
+  priority: true, assignedAgent: true, csAgent: true, jiraTicketKey: true
+};
+
+const auditBoardIdCache = new WeakMap();
+function auditBoardTicketIds(state) {
+  if (!auditBoardIdCache.has(state)) auditBoardIdCache.set(state, new Set(state.allTickets.map(t => String(t && t.id))));
+  return auditBoardIdCache.get(state);
+}
+// What the board says about a ticket that no Ticket column holds.
+function auditBoardExtras(state, externalId) {
+  const ext = String(externalId || '');
+  const get = key => boardAuditMap(state, key)[ext];
+  const snooze = get('ticketSnooze');
+  const velma = get('ticketVelmaBug');
+  const rawStage = get('ticketState');
+  return {
+    stage: rawStage ? normalizeDbStatusForBoard(normalizeBoardStatusForDb(rawStage)) : null,
+    stageTouchedAt: boardAuditIso(get('ticketStageTouchedAt')),
+    assigneeTouchedAt: boardAuditIso(get('ticketAssigneeTouchedAt')),
+    assigneeBy: get('ticketAssigneeBy') || null,
+    csTouchedAt: boardAuditIso(get('ticketCSTouchedAt')),
+    createdBy: get('ticketCreatedBy') || null,
+    subtype: get('ticketSubtype') || null,
+    archived: get('ticketArchived') || null,
+    snooze: snooze && boardAuditTs(snooze.until) > Date.now() ? snooze : null,
+    lastSnooze: snooze || null,
+    slaHold: get('ticketSlaHold') || null,
+    resolution: get('ticketResolutionMeta') || null,
+    sendBack: get('ticketSendBackAlerts') || null,
+    reopenedAt: boardAuditIso(get('ticketReopenedAt')),
+    hasNewReply: !!get('ticketHasNewReply'),
+    velmaBug: velma && typeof velma === 'object' ? { id: velma.id || null, row: velma.row || null, status: velma.status || null } : null,
+    onBoard: Array.isArray(state.allTickets) ? auditBoardTicketIds(state).has(ext) : null
+  };
+}
+
+function auditActorFor(event) {
+  const meta = event.metadata && typeof event.metadata === 'object' ? event.metadata : {};
+  if (meta.actor) return String(meta.actor).toUpperCase();
+  if (event.user) return userAgentCode(event.user) || null;
+  return null;
+}
+
+function auditItemFromEvent(e) {
+  const meta = e.metadata && typeof e.metadata === 'object' ? e.metadata : {};
+  const info = auditEventInfo(e.eventType);
+  const item = {
+    id: `e${e.id}`,
+    at: new Date(e.createdAt).toISOString(),
+    type: e.eventType,
+    kind: info.kind,
+    label: info.label,
+    from: auditClip(e.oldValue),
+    to: auditClip(e.newValue),
+    actor: auditActorFor(e),
+    account: e.user ? (e.user.displayName || e.user.username) : null,
+    source: meta.source || meta.via || null,
+    reconstructed: false,
+    meta: {}
+  };
+  // The time the board says it happened, when that differs from when the
+  // save carrying it reached the server.
+  if (meta.at) item.happenedAt = meta.at;
+  for (const key of ['note', 'reason', 'to', 'from', 'row', 'status', 'mailbox', 'threaded', 'cc', 'slaResetAt', 'commentId']) {
+    if (meta[key] !== undefined && meta[key] !== null && meta[key] !== '') item.meta[key] = meta[key];
+  }
+  if (e.eventType === 'email_reply_sent' && Array.isArray(meta.to)) item.meta.recipients = meta.to.slice(0, 10);
+  if (e.eventType === 'ticket_status_changed') {
+    item.fromStage = auditStageOf(e.oldValue);
+    item.toStage = auditStageOf(e.newValue);
+  } else if (e.eventType === 'ticket_created') {
+    item.toStage = auditStageOf(e.newValue) || 'new';
+  }
+  if (info.kind === 'sync' || e.eventType === 'comment_edited') {
+    item.from = auditClip(e.oldValue, 160);
+    item.to = auditClip(e.newValue, 160);
+  }
+  return item;
+}
+
+function auditCommentAuthors(state, externalId) {
+  const list = boardAuditMap(state, 'ticketComments')[String(externalId || '')];
+  const byTs = new Map();
+  if (Array.isArray(list)) {
+    list.forEach((c) => {
+      const ts = boardAuditTs(c && (c.ts || c.createdAt));
+      if (ts) byTs.set(ts, c);
+    });
+  }
+  return byTs;
+}
+
+function auditItemFromComment(c, boardComment = null) {
+  const tags = Array.isArray(c.tags) ? c.tags : [];
+  const proposed = tags.includes(PROPOSED_REPLY_TAG);
+  const info = auditEventInfo(proposed ? 'reply_proposed' : 'note_added');
+  return {
+    id: `c${c.id}`,
+    at: new Date(c.createdAt).toISOString(),
+    type: proposed ? 'reply_proposed' : 'note_added',
+    kind: info.kind,
+    label: info.label,
+    text: auditClip(c.comment, 1200),
+    tags: tags.filter(t => t !== PROPOSED_REPLY_TAG),
+    actor: (boardComment && boardComment.author ? String(boardComment.author).toUpperCase() : null) || (c.user ? userAgentCode(c.user) : null),
+    account: c.user ? (c.user.displayName || c.user.username) : null,
+    edited: !!(boardComment && boardComment.editedAt),
+    source: c.user && c.user.team === HIDDEN_TEAM ? 'service' : null,
+    reconstructed: false,
+    meta: {}
+  };
+}
+
+/* One ticket's whole life, oldest first: the recorded events, the notes, and
+   whatever the Ticket row and the board state prove happened but nobody wrote
+   down at the time. A reconstructed item only fills a gap - when a recorded
+   event already says the same thing it is left out. */
+function buildTicketTimeline(ticket, events, comments, state) {
+  const ext = String(ticket.externalId || '');
+  const board = auditBoardExtras(state, ext);
+  const createdMs = new Date(ticket.createdAt).getTime();
+  const nowMs = Date.now();
+  const items = [];
+
+  events.filter(e => !AUDIT_SHADOWED_EVENTS.includes(e.eventType)).forEach(e => items.push(auditItemFromEvent(e)));
+  const authors = auditCommentAuthors(state, ext);
+  comments.forEach(c => items.push(auditItemFromComment(c, authors.get(new Date(c.createdAt).getTime()) || null)));
+
+  const recorded = items.slice();
+  const atMs = item => new Date(item.happenedAt || item.at).getTime();
+  const hasType = (types, nearMs = null, windowMs = 10 * 60 * 1000) => recorded.some(i => types.includes(i.type) && (nearMs === null || Math.abs(atMs(i) - nearMs) <= windowMs));
+  const recon = (type, when, fields = {}) => {
+    const ms = boardAuditTs(when);
+    if (!ms) return null;
+    const info = auditEventInfo(type);
+    const item = { id: `r-${type}-${ms}`, at: new Date(ms).toISOString(), type, kind: info.kind, label: info.label, from: null, to: null, actor: null, account: null, source: 'reconstructed', reconstructed: true, meta: {}, ...fields };
+    items.push(item);
+    return item;
+  };
+
+  // Creation, and when the email actually arrived if the row was written later.
+  const createdEvent = recorded.find(i => i.type === 'ticket_created');
+  // Set only for a ticket an agent typed in by hand.
+  const creator = typeof board.createdBy === 'string' && board.createdBy ? board.createdBy.toUpperCase().slice(0, 40) : null;
+  if (createdEvent && creator && !createdEvent.actor) createdEvent.actor = creator;
+  if (!createdEvent) {
+    recon('ticket_created', createdMs, { toStage: 'new', actor: creator, meta: { channel: creator ? 'manual' : (ticket.source || null) } });
+  } else if (atMs(createdEvent) - createdMs > 5 * 60 * 1000) {
+    recon('ticket_received', createdMs, { meta: { channel: ticket.source || null, from: ticket.senderEmail || null } });
+  }
+
+  // Stage: if the log never saw the ticket reach the stage it is in now, the
+  // move happened anyway - it is dated by when the card last changed column.
+  const currentStage = board.stage || auditStageOf(ticket.status) || 'new';
+  const stageEvents = recorded.filter(i => i.kind === 'stage').sort((a, b) => atMs(a) - atMs(b));
+  const lastStageEvent = stageEvents[stageEvents.length - 1];
+  const lastKnownStage = lastStageEvent ? lastStageEvent.toStage : (createdEvent && createdEvent.toStage) || 'new';
+  if (lastKnownStage !== currentStage) {
+    const lowerBound = lastStageEvent ? atMs(lastStageEvent) : createdMs;
+    const candidates = [board.stageTouchedAt, currentStage === 'res' ? (ticket.resolvedAt || (board.resolution && board.resolution.resolvedAt)) : null, ticket.updatedAt];
+    const when = candidates.map(boardAuditTs).find(ms => ms && ms >= lowerBound) || lowerBound + 1;
+    recon('ticket_status_changed', when, {
+      fromStage: lastKnownStage,
+      toStage: currentStage,
+      actor: currentStage === 'res' && board.resolution && board.resolution.resolvedBy ? String(board.resolution.resolvedBy).toUpperCase() : null
+    });
+  }
+
+  // Assignment: same idea for the current Support agent and CS owner.
+  const reconAssignment = (type, current, touchedAt, by) => {
+    if (!current) return;
+    const own = recorded.filter(i => i.type === type).sort((a, b) => atMs(a) - atMs(b));
+    const last = own[own.length - 1];
+    if (last && String(last.to || '').toUpperCase() === String(current).toUpperCase()) return;
+    const lowerBound = last ? atMs(last) : Math.max(createdMs, createdEvent ? atMs(createdEvent) : createdMs);
+    const when = [touchedAt].map(boardAuditTs).find(ms => ms && ms >= lowerBound) || lowerBound + 1;
+    recon(type, when, { from: last ? last.to : null, to: String(current).toUpperCase(), actor: by ? String(by.by || '').toUpperCase() || null : null, meta: by && by.source ? { mode: by.source } : {} });
+  };
+  reconAssignment('ticket_assignedAgent_changed', ticket.assignedAgent, board.assigneeTouchedAt, board.assigneeBy);
+  reconAssignment('ticket_csAgent_changed', ticket.csAgent, board.csTouchedAt, null);
+
+  // Board-only history that predates it being logged.
+  const res = board.resolution || {};
+  if (res.confirmedAt && !hasType(['ticket_resolution_confirmed'], boardAuditTs(res.confirmedAt))) {
+    recon('ticket_resolution_confirmed', res.confirmedAt, { actor: res.confirmedBy ? String(res.confirmedBy).toUpperCase() : null });
+  }
+  if (res.sentBackAt && !hasType(['ticket_sent_back'], boardAuditTs(res.sentBackAt))) {
+    recon('ticket_sent_back', res.sentBackAt, { actor: res.sentBackBy ? String(res.sentBackBy).toUpperCase() : null, to: auditClip(res.sendBackNote, 300), meta: board.sendBack && board.sendBack.to ? { to: board.sendBack.to } : {} });
+  }
+  if (board.archived && board.archived.archivedAt && !hasType(['ticket_archived'], boardAuditTs(board.archived.archivedAt))) {
+    recon('ticket_archived', board.archived.archivedAt, { actor: board.archived.archivedBy ? String(board.archived.archivedBy).toUpperCase() : null, to: board.archived.reason || null, meta: { reason: board.archived.reason || null } });
+  }
+  const snooze = board.lastSnooze;
+  if (snooze && snooze.at && !hasType(['ticket_snoozed'], boardAuditTs(snooze.at))) {
+    recon('ticket_snoozed', snooze.at, { actor: snooze.by ? String(snooze.by).toUpperCase() : null, to: boardAuditIso(snooze.until), meta: snooze.note ? { note: auditClip(snooze.note, 300) } : {} });
+  }
+  if (ticket.slaHoldAt && !hasType(['ticket_sla_hold'], new Date(ticket.slaHoldAt).getTime())) {
+    recon('ticket_sla_hold', ticket.slaHoldAt, { actor: ticket.slaHoldBy || null });
+  }
+  if (board.reopenedAt && !hasType(['ticket_reopened'], boardAuditTs(board.reopenedAt))) {
+    recon('ticket_reopened', board.reopenedAt, { source: 'customer_reply' });
+  }
+  Object.values(boardAuditMap(state, 'ticketReopenRequests')).forEach((r) => {
+    if (!r || String(r.ticketId) !== ext) return;
+    if (r.at && !hasType(['ticket_reopen_requested'], boardAuditTs(r.at))) recon('ticket_reopen_requested', r.at, { to: r.from || null, meta: { from: r.from || null } });
+    if (r.status && r.status !== 'pending' && r.decidedAt && !hasType(['ticket_reopen_decided'], boardAuditTs(r.decidedAt))) {
+      recon('ticket_reopen_decided', r.decidedAt, { from: 'pending', to: r.status, actor: r.decidedBy ? String(r.decidedBy).toUpperCase() : null });
+    }
+  });
+  if (ticket.duplicateMarkedAt && !hasType(['ticket_marked_duplicate', 'ticket_duplicateOfExternalId_changed'], new Date(ticket.duplicateMarkedAt).getTime())) {
+    recon('ticket_marked_duplicate', ticket.duplicateMarkedAt, { to: ticket.duplicateOfExternalId || null, actor: ticket.duplicateMarkedBy || null });
+  }
+  if (ticket.slaResetAt) {
+    const ms = new Date(ticket.slaResetAt).getTime();
+    if (ms > createdMs + 60 * 1000 && !hasType(['customer_replied', 'ticket_sla_released', 'ticket_velma_bug_done', 'sla_reset'], ms, 5 * 60 * 1000)) {
+      recon('sla_reset', ms, { meta: { note: 'Last restart of the response clock - usually a new message in the thread.' } });
+    }
+  }
+  authors.forEach((c, ts) => {
+    const edited = boardAuditTs(c && c.editedAt);
+    if (edited && !hasType(['comment_edited'], edited, 60 * 1000)) recon('comment_edited', edited, { actor: c.author ? String(c.author).toUpperCase() : null, to: auditClip(c.text, 160), meta: { noteFrom: new Date(ts).toISOString() } });
+  });
+
+  // Oldest first; creation always leads a tie.
+  const order = item => (item.type === 'ticket_received' ? 0 : item.type === 'ticket_created' ? 1 : 2);
+  items.sort((a, b) => atMs(a) - atMs(b) || order(a) - order(b));
+
+  // Time in each stage, from the moves in order.
+  const segments = [];
+  const firstCreated = items.find(i => i.type === 'ticket_created');
+  let cur = { stage: (firstCreated && firstCreated.toStage) || 'new', enteredAt: createdMs, by: firstCreated ? firstCreated.actor : null, reconstructed: false };
+  items.forEach((item) => {
+    if (item.kind !== 'stage' || !item.toStage) return;
+    const t = Math.max(atMs(item), cur.enteredAt);
+    if (item.toStage === cur.stage) return;
+    item.dwellMs = t - cur.enteredAt;
+    item.fromStage = item.fromStage || cur.stage;
+    segments.push({ ...cur, leftAt: t, durationMs: t - cur.enteredAt });
+    cur = { stage: item.toStage, enteredAt: t, by: item.actor || null, reconstructed: !!item.reconstructed };
+  });
+  segments.push({ ...cur, leftAt: null, durationMs: nowMs - cur.enteredAt, ongoing: true });
+  const stageTotals = {};
+  segments.forEach((s) => { stageTotals[s.stage] = (stageTotals[s.stage] || 0) + (s.stage === 'res' && s.ongoing ? 0 : s.durationMs); });
+
+  // SLA hold time: each hold paired with the release after it.
+  let holdMs = 0;
+  let heldSince = null;
+  items.forEach((i) => {
+    if (i.type === 'ticket_sla_hold' && heldSince === null) heldSince = atMs(i);
+    if ((i.type === 'ticket_sla_released' || i.type === 'ticket_velma_bug_done') && heldSince !== null) { holdMs += atMs(i) - heldSince; heldSince = null; }
+  });
+  if (heldSince !== null) holdMs += nowMs - heldSince;
+
+  const firstOf = pred => items.find(pred);
+  const firstReply = firstOf(i => i.type === 'email_reply_sent');
+  const firstMove = firstOf(i => i.kind === 'stage' && i.fromStage === 'new' && i.toStage && i.toStage !== 'new');
+  const resolvedMs = ticket.resolvedAt ? new Date(ticket.resolvedAt).getTime() : null;
+  const stats = {
+    recorded: items.filter(i => !i.reconstructed).length,
+    reconstructed: items.filter(i => i.reconstructed).length,
+    moves: items.filter(i => i.kind === 'stage').length,
+    reassignments: items.filter(i => i.kind === 'assign' || i.kind === 'cs').length,
+    notes: items.filter(i => i.type === 'note_added').length,
+    repliesSent: items.filter(i => i.type === 'email_reply_sent').length,
+    clientReplies: items.filter(i => i.type === 'customer_replied').length,
+    reopens: items.filter(i => i.type === 'ticket_reopened' || (i.kind === 'stage' && i.fromStage === 'res')).length,
+    sendBacks: items.filter(i => i.type === 'ticket_sent_back').length,
+    ageMs: nowMs - createdMs,
+    firstReplyMs: firstReply ? atMs(firstReply) - createdMs : null,
+    firstMoveMs: firstMove ? atMs(firstMove) - createdMs : null,
+    resolutionMs: resolvedMs && currentStage === 'res' ? resolvedMs - createdMs : null,
+    holdMs,
+    stageTotals,
+    actors: [...new Set(items.map(i => i.actor).filter(Boolean))]
+  };
+  return { board, items, segments, stats };
+}
+
+function auditTicketSummary(ticket, state, counts = null) {
+  const board = auditBoardExtras(state, ticket.externalId);
+  return {
+    id: ticket.id,
+    externalId: ticket.externalId,
+    number: ticket.displayNumber || null,
+    subject: ticket.subject || '',
+    senderName: ticket.senderName || null,
+    senderEmail: ticket.senderEmail || null,
+    companyName: ticket.companyName || null,
+    status: ticket.status,
+    stage: board.stage || auditStageOf(ticket.status) || 'new',
+    priority: ticket.priority || null,
+    category: ticket.category || null,
+    subtype: board.subtype,
+    assignedAgent: ticket.assignedAgent || null,
+    csAgent: ticket.csAgent || null,
+    source: ticket.source || null,
+    jiraTicketKey: ticket.jiraTicketKey || null,
+    hubspotTicketId: ticket.hubspotTicketId || null,
+    velmaBugId: ticket.velmaBugId || null,
+    duplicateOf: ticket.duplicateOfExternalId || null,
+    slaHoldAt: ticket.slaHoldAt || null,
+    slaResetAt: ticket.slaResetAt || null,
+    createdAt: ticket.createdAt,
+    updatedAt: ticket.updatedAt,
+    resolvedAt: ticket.resolvedAt || null,
+    archived: !!board.archived,
+    archivedReason: board.archived ? board.archived.reason || null : null,
+    snoozedUntil: board.snooze ? boardAuditIso(board.snooze.until) : null,
+    reopened: !!board.reopenedAt,
+    hasNewReply: board.hasNewReply,
+    onBoard: board.onBoard,
+    stageSince: board.stageTouchedAt,
+    ...(counts || {})
+  };
+}
+
+// Accepts the database id, "#42" (the number agents use) or the board's own id.
+async function findAuditTicket(ref) {
+  const raw = String(ref || '').trim();
+  if (!raw) return null;
+  const hash = raw.match(/^#\s*(\d{1,9})$/) || raw.match(/^n(\d{1,9})$/i);
+  if (hash) return prisma.ticket.findUnique({ where: { displayNumber: Number(hash[1]) }, select: AUDIT_TICKET_SELECT });
+  if (/^\d{1,9}$/.test(raw)) {
+    const byId = await prisma.ticket.findUnique({ where: { id: Number(raw) }, select: AUDIT_TICKET_SELECT });
+    if (byId) return byId;
+  }
+  return prisma.ticket.findUnique({ where: { externalId: raw }, select: AUDIT_TICKET_SELECT });
+}
+
+function auditDateParam(value, endOfDay = false) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(text) ? new Date(`${text}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}`) : new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+function auditListParam(value) {
+  return String(value || '').split(',').map(v => v.trim()).filter(Boolean);
+}
+function auditCode(value) {
+  const code = String(value || '').trim().toUpperCase();
+  return /^[A-Z0-9._-]{1,40}$/.test(code) ? code : null;
+}
+
+// The ticket-side filters every audit read shares: the caller's scope, then
+// search, agent, priority and category.
+function auditTicketFilters(req) {
+  const and = [];
+  const scope = auditTicketWhereForActor(req);
+  if (scope) and.push(scope);
+  const q = String(req.query.q || '').trim().slice(0, 120);
+  if (q) {
+    const or = [
+      { subject: { contains: q, mode: 'insensitive' } },
+      { companyName: { contains: q, mode: 'insensitive' } },
+      { senderEmail: { contains: q, mode: 'insensitive' } },
+      { senderName: { contains: q, mode: 'insensitive' } },
+      { jiraTicketKey: { contains: q, mode: 'insensitive' } },
+      { externalId: q }
+    ];
+    const num = q.replace(/^#\s*/, '');
+    if (/^\d{1,9}$/.test(num)) or.push({ displayNumber: Number(num) });
+    and.push({ OR: or });
+  }
+  const agent = auditCode(req.query.agent);
+  if (agent) {
+    const role = String(req.query.agentRole || '');
+    if (role === 'support') and.push({ assignedAgent: agent });
+    else if (role === 'cs') and.push({ csAgent: agent });
+    else and.push({ OR: [{ assignedAgent: agent }, { csAgent: agent }] });
+  }
+  const priorities = auditListParam(req.query.priority);
+  if (priorities.length) and.push({ priority: { in: priorities } });
+  const category = String(req.query.category || '').trim();
+  if (category) and.push({ category });
+  return and;
+}
+
+const AUDIT_STATUS_BY_STAGE = { inp: 'In Progress', wus: 'Waiting on Us', dft: 'Due for Test', wct: 'Waiting on Contact' };
+function auditStageWhere(stage) {
+  if (stage === 'res') return { status: { in: ['Resolved', 'Closed', 'resolved', 'closed'] } };
+  if (AUDIT_STATUS_BY_STAGE[stage]) return { status: AUDIT_STATUS_BY_STAGE[stage] };
+  // New is everything else, so a row with an unexpected status still shows up.
+  return { status: { notIn: [...Object.values(AUDIT_STATUS_BY_STAGE), 'Resolved', 'Closed', 'resolved', 'closed'] } };
+}
+
+// The agents the filters offer: everyone on a roster, past or present, but
+// never a hidden service account.
+async function auditAgentRoster() {
+  let hidden = new Set();
+  try {
+    const users = await prisma.user.findMany({ where: { team: HIDDEN_TEAM }, select: { username: true, email: true } });
+    hidden = new Set(users.map(userAgentCode));
+  } catch (_error) {}
+  const clean = list => [...new Set(list)].filter(code => code && !hidden.has(code)).sort();
+  return {
+    support: clean([...SUPPORT_AGENT_CODES]),
+    cs: clean([...CS_AGENT_CODES]),
+    former: clean([...FORMER_AGENT_CODES.support, ...FORMER_AGENT_CODES.cs]),
+    hidden
+  };
+}
+
+// Users whose agent code is `code`, for "who did it" filters on rows that
+// only carry a userId.
+async function auditUserIdsForCode(code) {
+  const users = await prisma.user.findMany({ select: { id: true, username: true, email: true } });
+  return users.filter(u => userAgentCode(u) === code).map(u => u.id);
+}
+
+// Event and note filters for the activity stream, its stats and the export.
+async function auditStreamWheres(req, { before = null, defaultFrom = null } = {}) {
+  const ticketAnd = auditTicketFilters(req);
+  const ticketId = Number(req.query.ticketId || 0);
+  if (Number.isInteger(ticketId) && ticketId > 0) ticketAnd.push({ id: ticketId });
+  const stage = String(req.query.stage || '');
+  if (AUDIT_STAGE_KEYS.includes(stage)) ticketAnd.push(auditStageWhere(stage));
+  const ticketWhere = ticketAnd.length ? { ticket: { AND: ticketAnd } } : {};
+
+  const createdAt = {};
+  const from = auditDateParam(req.query.from) || defaultFrom;
+  const to = auditDateParam(req.query.to, true);
+  if (from) createdAt.gte = from;
+  if (to) createdAt.lte = to;
+  if (before) createdAt.lt = before;
+  const timeWhere = Object.keys(createdAt).length ? { createdAt } : {};
+
+  const kinds = auditListParam(req.query.kinds).filter(k => AUDIT_KINDS[k] || k === 'other');
+  const types = auditListParam(req.query.types);
+  const includeSync = String(req.query.includeSync || '') === '1' || kinds.includes('sync');
+  const eventTypeWhere = {};
+  const wanted = new Set(types);
+  kinds.forEach(k => Object.keys(AUDIT_EVENT_INFO).forEach(t => { if (AUDIT_EVENT_INFO[t].kind === k) wanted.add(t); }));
+  const excluded = [...AUDIT_SHADOWED_EVENTS, ...(includeSync ? [] : AUDIT_SYNC_EVENTS)];
+  if (wanted.size || kinds.includes('other')) {
+    if (kinds.includes('other')) {
+      eventTypeWhere.OR = [{ eventType: { in: [...wanted].filter(t => !excluded.includes(t)) } }, { eventType: { notIn: Object.keys(AUDIT_EVENT_INFO) } }];
+    } else {
+      eventTypeWhere.eventType = { in: [...wanted].filter(t => !excluded.includes(t)) };
+    }
+  } else {
+    eventTypeWhere.eventType = { notIn: excluded };
+  }
+
+  const actor = auditCode(req.query.actor);
+  const actorIds = actor ? await auditUserIdsForCode(actor) : [];
+  const eventAnd = [ticketWhere, timeWhere, eventTypeWhere];
+  // Who did it: the agent the board named, or else the login that saved it.
+  if (actor) eventAnd.push({ OR: [{ metadata: { path: ['actor'], equals: actor } }, ...(actorIds.length ? [{ userId: { in: actorIds } }] : [])] });
+
+  // Notes come from TicketComment; they are in the stream unless a type
+  // filter leaves them out.
+  const wantNotes = !(wanted.size || kinds.length) || kinds.includes('note') || wanted.has('note_added');
+  const wantProposed = !(wanted.size || kinds.length) || kinds.includes('reply') || wanted.has('reply_proposed');
+  let commentWhere = null;
+  if (wantNotes || wantProposed) {
+    const tagWhere = wantNotes && wantProposed ? {} : wantProposed ? { tags: { has: PROPOSED_REPLY_TAG } } : { NOT: { tags: { has: PROPOSED_REPLY_TAG } } };
+    const commentAnd = [ticketWhere, timeWhere, tagWhere];
+    if (actor) commentAnd.push(actorIds.length ? { userId: { in: actorIds } } : { id: -1 });
+    commentWhere = { AND: commentAnd };
+  }
+  return { eventWhere: { AND: eventAnd }, commentWhere };
+}
+
+function auditStreamItem(item, ticket) {
+  return {
+    ...item,
+    ticket: ticket ? {
+      id: ticket.id,
+      number: ticket.displayNumber || null,
+      externalId: ticket.externalId || null,
+      subject: ticket.subject || '',
+      companyName: ticket.companyName || null,
+      stage: auditStageOf(ticket.status),
+      priority: ticket.priority || null,
+      assignedAgent: ticket.assignedAgent || null,
+      csAgent: ticket.csAgent || null,
+      jiraTicketKey: ticket.jiraTicketKey || null
+    } : null
+  };
+}
+
+// One page of the merged stream, newest first, older than `before`.
+async function auditStreamPage(req, before, limit) {
+  const { eventWhere, commentWhere } = await auditStreamWheres(req, { before });
+  const [events, comments] = await Promise.all([
+    prisma.ticketEvent.findMany({
+      where: eventWhere,
+      take: limit + 1,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      include: { ticket: { select: AUDIT_TICKET_BRIEF_SELECT }, user: { select: AUDIT_USER_SELECT } }
+    }),
+    commentWhere ? prisma.ticketComment.findMany({
+      where: commentWhere,
+      take: limit + 1,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      include: { ticket: { select: AUDIT_TICKET_BRIEF_SELECT }, user: { select: AUDIT_USER_SELECT } }
+    }) : Promise.resolve([])
+  ]);
+  const state = comments.length ? readStateForAudit() : null;
+  const authorCache = new Map();
+  const authorFor = (c) => {
+    const ext = c.ticket ? c.ticket.externalId : null;
+    if (!ext) return null;
+    if (!authorCache.has(ext)) authorCache.set(ext, auditCommentAuthors(state, ext));
+    return authorCache.get(ext).get(new Date(c.createdAt).getTime()) || null;
+  };
+  // Oldest-first dedupe of the double-written rows, then back to newest first.
+  const deduped = dedupeTicketEvents([...events].sort((a, b) => a.ticketId - b.ticketId || new Date(a.createdAt) - new Date(b.createdAt)));
+  const merged = [
+    ...deduped.map(e => auditStreamItem(auditItemFromEvent(e), e.ticket)),
+    ...comments.map(c => auditStreamItem(auditItemFromComment(c, authorFor(c)), c.ticket))
+  ].sort((a, b) => new Date(b.at) - new Date(a.at));
+  const rawCount = events.length + comments.length;
+  const page = merged.slice(0, limit);
+  const hasMore = rawCount > page.length;
+  return { items: page, hasMore, nextBefore: hasMore && page.length ? page[page.length - 1].at : null };
+}
+
+app.get('/api/audit/meta', requireSupportOrAdmin, async (req, res) => {
+  try {
+    const roster = await auditAgentRoster();
+    const scope = auditTicketWhereForActor(req);
+    const [tickets, events, notes, firstEvent] = await Promise.all([
+      prisma.ticket.count({ where: scope || {} }),
+      prisma.ticketEvent.count({ where: scope ? { ticket: scope } : {} }),
+      prisma.ticketComment.count({ where: scope ? { ticket: scope } : {} }),
+      prisma.ticketEvent.findFirst({ where: scope ? { ticket: scope } : {}, orderBy: { createdAt: 'asc' }, select: { createdAt: true } })
+    ]);
+    return res.json({
+      me: { code: actorAgentCode(req), team: actorTeam(req) },
+      scope: scope ? 'own_tickets' : 'all',
+      stages: AUDIT_STAGE_KEYS.map(key => ({ key, label: AUDIT_STAGE_LABELS[key] })),
+      kinds: Object.entries(AUDIT_KINDS).map(([key, label]) => ({ key, label })),
+      eventTypes: Object.entries(AUDIT_EVENT_INFO).map(([type, info]) => ({ type, ...info })),
+      agents: { support: roster.support, cs: roster.cs, former: roster.former },
+      categories: (await prisma.ticket.groupBy({ by: ['category'], where: scope || {}, _count: { _all: true } }).catch(() => []))
+        .filter(r => r.category).map(r => r.category).sort(),
+      totals: { tickets, events, notes, loggingSince: firstEvent ? firstEvent.createdAt : null }
+    });
+  } catch (error) {
+    console.error('Read audit meta failed:', error);
+    return res.status(500).json({ error: 'read_audit_meta_failed' });
+  }
+});
+
+/* The board, as the audit sees it: every ticket - resolved, archived and
+   taken-off-the-board ones included - in the column it is in now, with how
+   much history each one has. A column is paged on its own (stage + offset),
+   so a Resolved column of thousands loads 30 at a time. */
+app.get('/api/audit/board', requireSupportOrAdmin, async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  const onlyStage = AUDIT_STAGE_KEYS.includes(String(req.query.stage || '')) ? String(req.query.stage) : null;
+  try {
+    const state = readStateForAudit();
+    const and = auditTicketFilters(req);
+    const from = auditDateParam(req.query.from);
+    const to = auditDateParam(req.query.to, true);
+    if (from || to) {
+      const range = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+      and.push({ OR: [{ createdAt: range }, { events: { some: { createdAt: range } } }, { comments: { some: { createdAt: range } } }] });
+    }
+    const archived = String(req.query.archived || 'all');
+    if (archived === 'hide' || archived === 'only') {
+      const ids = Object.entries(boardAuditMap(state, 'ticketArchived')).filter(([, v]) => v).map(([k]) => k);
+      and.push(archived === 'only' ? { externalId: { in: ids } } : { OR: [{ externalId: null }, { externalId: { notIn: ids } }] });
+    }
+    const stages = onlyStage ? [onlyStage] : AUDIT_STAGE_KEYS;
+    const columns = {};
+    await Promise.all(stages.map(async (stage) => {
+      const where = { AND: [...and, auditStageWhere(stage)] };
+      const [total, rows] = await Promise.all([
+        prisma.ticket.count({ where }),
+        prisma.ticket.findMany({
+          where,
+          select: { ...AUDIT_TICKET_SELECT, _count: { select: { events: true, comments: true } } },
+          orderBy: stage === 'res' ? [{ resolvedAt: { sort: 'desc', nulls: 'last' } }, { id: 'desc' }] : [{ updatedAt: 'desc' }, { id: 'desc' }],
+          skip: onlyStage ? offset : 0,
+          take: limit
+        })
+      ]);
+      columns[stage] = { total, offset: onlyStage ? offset : 0, rows };
+    }));
+
+    const allIds = Object.values(columns).flatMap(c => c.rows.map(r => r.id));
+    const grouped = allIds.length ? await prisma.ticketEvent.groupBy({
+      by: ['ticketId', 'eventType'],
+      where: { ticketId: { in: allIds } },
+      _count: { _all: true },
+      _max: { createdAt: true }
+    }) : [];
+    const perTicket = new Map();
+    grouped.forEach((g) => {
+      const t = perTicket.get(g.ticketId) || { moves: 0, reassignments: 0, lastEventAt: null, lastEventType: null };
+      if (g.eventType === 'ticket_status_changed') t.moves += g._count._all;
+      if (g.eventType === 'ticket_assignedAgent_changed' || g.eventType === 'ticket_csAgent_changed') t.reassignments += g._count._all;
+      if (g._max.createdAt && (!t.lastEventAt || g._max.createdAt > t.lastEventAt)) { t.lastEventAt = g._max.createdAt; t.lastEventType = g.eventType; }
+      perTicket.set(g.ticketId, t);
+    });
+
+    const out = {};
+    Object.entries(columns).forEach(([stage, col]) => {
+      out[stage] = {
+        total: col.total,
+        offset: col.offset,
+        tickets: col.rows.map((row) => {
+          const { _count, ...ticket } = row;
+          const extra = perTicket.get(row.id) || { moves: 0, reassignments: 0, lastEventAt: null, lastEventType: null };
+          return auditTicketSummary(ticket, state, {
+            eventCount: _count.events,
+            noteCount: _count.comments,
+            moves: extra.moves,
+            reassignments: extra.reassignments,
+            lastEventAt: extra.lastEventAt,
+            lastEventLabel: extra.lastEventType ? auditEventInfo(extra.lastEventType).label : null
+          });
+        })
+      };
+    });
+    return res.json({ generatedAt: new Date().toISOString(), scope: auditTicketWhereForActor(req) ? 'own_tickets' : 'all', columns: out });
+  } catch (error) {
+    console.error('Read audit board failed:', error);
+    return res.status(500).json({ error: 'read_audit_board_failed' });
+  }
+});
+
+app.get('/api/audit/timeline/:ref', requireSupportOrAdmin, async (req, res) => {
+  try {
+    const ticket = await findAuditTicket(req.params.ref);
+    const scope = auditTicketWhereForActor(req);
+    // 404 rather than 403 for someone else's ticket, as /api/tickets/:id/audit.
+    if (!ticket || (scope && String(ticket.assignedAgent || '').toUpperCase() !== scope.assignedAgent)) {
+      return res.status(404).json({ error: 'ticket_not_found' });
+    }
+    const [events, comments] = await Promise.all([
+      prisma.ticketEvent.findMany({ where: { ticketId: ticket.id }, include: { user: { select: AUDIT_USER_SELECT } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
+      prisma.ticketComment.findMany({ where: { ticketId: ticket.id }, include: { user: { select: AUDIT_USER_SELECT } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+    ]);
+    const state = readStateForAudit();
+    const timeline = buildTicketTimeline(ticket, dedupeTicketEvents(events), comments, state);
+    let duplicateOf = null;
+    if (ticket.duplicateOfExternalId) {
+      duplicateOf = await prisma.ticket.findUnique({ where: { externalId: ticket.duplicateOfExternalId }, select: { id: true, displayNumber: true, subject: true } }).catch(() => null);
+    }
+    return res.json({
+      generatedAt: new Date().toISOString(),
+      ticket: auditTicketSummary(ticket, state),
+      duplicateOf,
+      board: {
+        stageSince: timeline.board.stageTouchedAt,
+        archived: timeline.board.archived,
+        snooze: timeline.board.snooze,
+        slaHold: timeline.board.slaHold,
+        resolution: timeline.board.resolution,
+        reopenedAt: timeline.board.reopenedAt,
+        velmaBug: timeline.board.velmaBug,
+        onBoard: timeline.board.onBoard
+      },
+      items: timeline.items,
+      segments: timeline.segments,
+      stats: timeline.stats
+    });
+  } catch (error) {
+    console.error('Read audit timeline failed:', error);
+    return res.status(500).json({ error: 'read_audit_timeline_failed' });
+  }
+});
+
+app.get('/api/audit/stream', requireSupportOrAdmin, async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 60, 1), 200);
+  const before = auditDateParam(req.query.before);
+  try {
+    const page = await auditStreamPage(req, before, limit);
+    return res.json({ generatedAt: new Date().toISOString(), scope: auditTicketWhereForActor(req) ? 'own_tickets' : 'all', ...page });
+  } catch (error) {
+    console.error('Read audit stream failed:', error);
+    return res.status(500).json({ error: 'read_audit_stream_failed' });
+  }
+});
+
+/* Figures for whatever the filters select: counts by kind, a day-by-day
+   histogram, the busiest people, and how long tickets sat in each stage
+   before they were moved on. */
+const AUDIT_STATS_EVENT_CAP = 40000;
+app.get('/api/audit/stats', requireSupportOrAdmin, async (req, res) => {
+  try {
+    // Default window: the last 30 days, so an unfiltered open stays cheap.
+    const defaultFrom = !req.query.from && !req.query.to && !req.query.ticketId ? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) : null;
+    const { eventWhere, commentWhere } = await auditStreamWheres(req, { defaultFrom });
+    const [events, notes] = await Promise.all([
+      prisma.ticketEvent.findMany({
+        where: eventWhere,
+        take: AUDIT_STATS_EVENT_CAP,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: { id: true, ticketId: true, eventType: true, oldValue: true, newValue: true, metadata: true, createdAt: true, user: { select: { username: true, email: true } } }
+      }),
+      commentWhere ? prisma.ticketComment.findMany({ where: commentWhere, take: AUDIT_STATS_EVENT_CAP, select: { ticketId: true, createdAt: true, tags: true, user: { select: { username: true, email: true } } } }) : Promise.resolve([])
+    ]);
+    const list = dedupeTicketEvents([...events].sort((a, b) => a.ticketId - b.ticketId || new Date(a.createdAt) - new Date(b.createdAt)));
+    const byKind = {};
+    const byDay = {};
+    const byActor = {};
+    const tickets = new Set();
+    const bump = (map, key, n = 1) => { map[key] = (map[key] || 0) + n; };
+    const roster = await auditAgentRoster();
+    list.forEach((e) => {
+      const kind = auditEventInfo(e.eventType).kind;
+      bump(byKind, kind);
+      bump(byDay, new Date(e.createdAt).toISOString().slice(0, 10));
+      tickets.add(e.ticketId);
+      const actor = auditActorFor(e);
+      if (actor && !roster.hidden.has(actor)) bump(byActor, actor);
+    });
+    notes.forEach((c) => {
+      const proposed = Array.isArray(c.tags) && c.tags.includes(PROPOSED_REPLY_TAG);
+      bump(byKind, proposed ? 'reply' : 'note');
+      bump(byDay, new Date(c.createdAt).toISOString().slice(0, 10));
+      tickets.add(c.ticketId);
+      const actor = c.user ? userAgentCode(c.user) : null;
+      if (actor && !roster.hidden.has(actor)) bump(byActor, actor);
+    });
+
+    // Dwell: for each move in the window, how long the ticket had been in the
+    // stage it left - since its previous move, or since it was created.
+    const moves = list.filter(e => e.eventType === 'ticket_status_changed');
+    const moveTicketIds = [...new Set(moves.map(e => e.ticketId))].slice(0, 5000);
+    const dwell = {};
+    if (moveTicketIds.length) {
+      const [history, created] = await Promise.all([
+        prisma.ticketEvent.findMany({
+          where: { ticketId: { in: moveTicketIds }, eventType: 'ticket_status_changed' },
+          select: { ticketId: true, oldValue: true, newValue: true, createdAt: true },
+          orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }],
+          take: 100000
+        }),
+        prisma.ticket.findMany({ where: { id: { in: moveTicketIds } }, select: { id: true, createdAt: true } })
+      ]);
+      const createdAt = new Map(created.map(t => [t.id, new Date(t.createdAt).getTime()]));
+      const inWindow = new Set(moves.map(e => `${e.ticketId}:${new Date(e.createdAt).getTime()}`));
+      const lastAt = new Map();
+      dedupeTicketEvents(history).forEach((e) => {
+        const t = new Date(e.createdAt).getTime();
+        const since = lastAt.has(e.ticketId) ? lastAt.get(e.ticketId) : createdAt.get(e.ticketId);
+        lastAt.set(e.ticketId, t);
+        if (!inWindow.has(`${e.ticketId}:${t}`) || !since || t < since) return;
+        const stage = auditStageOf(e.oldValue) || 'new';
+        (dwell[stage] = dwell[stage] || []).push(t - since);
+      });
+    }
+    const dwellStats = {};
+    Object.entries(dwell).forEach(([stage, values]) => {
+      const sorted = values.sort((a, b) => a - b);
+      dwellStats[stage] = {
+        count: sorted.length,
+        avgMs: Math.round(sorted.reduce((s, v) => s + v, 0) / sorted.length),
+        medianMs: sorted[Math.floor(sorted.length / 2)]
+      };
+    });
+
+    return res.json({
+      generatedAt: new Date().toISOString(),
+      from: req.query.from || (defaultFrom ? defaultFrom.toISOString() : null),
+      to: req.query.to || null,
+      truncated: events.length >= AUDIT_STATS_EVENT_CAP,
+      totals: {
+        items: list.length + notes.length,
+        events: list.length,
+        notes: notes.length,
+        tickets: tickets.size,
+        moves: byKind.stage || 0,
+        reassignments: (byKind.assign || 0) + (byKind.cs || 0),
+        replies: byKind.reply || 0,
+        reopens: list.filter(e => e.eventType === 'ticket_reopened').length,
+        sendBacks: list.filter(e => e.eventType === 'ticket_sent_back').length
+      },
+      byKind,
+      byDay,
+      topActors: Object.entries(byActor).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([code, count]) => ({ code, count })),
+      dwell: dwellStats
+    });
+  } catch (error) {
+    console.error('Read audit stats failed:', error);
+    return res.status(500).json({ error: 'read_audit_stats_failed' });
+  }
+});
+
+// The stream as CSV, every page of it, for whatever the filters select.
+const AUDIT_EXPORT_ROW_CAP = 100000;
+function auditCsvCell(value) {
+  let text = value === null || value === undefined ? '' : String(value);
+  // A cell starting with = + - @ is a formula to a spreadsheet.
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+app.get('/api/audit/export.csv', requireSupportOrAdmin, async (req, res) => {
+  try {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="ticket-audit-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.write('﻿');
+    res.write(['When', 'Ticket', 'Ticket id', 'Subject', 'Company', 'Event', 'Kind', 'From', 'To', 'Note text', 'By', 'Account', 'Source'].join(',') + '\r\n');
+    let before = null;
+    let rows = 0;
+    for (;;) {
+      const page = await auditStreamPage(req, before, 200);
+      for (const item of page.items) {
+        const t = item.ticket || {};
+        res.write([
+          item.at,
+          t.number ? `#${String(t.number).padStart(4, '0')}` : '',
+          t.id || '',
+          t.subject || '',
+          t.companyName || '',
+          item.label,
+          item.kind,
+          item.fromStage ? AUDIT_STAGE_LABELS[item.fromStage] : item.from,
+          item.toStage ? AUDIT_STAGE_LABELS[item.toStage] : item.to,
+          item.text || (item.meta && item.meta.note) || '',
+          item.actor || '',
+          item.account || '',
+          item.source || ''
+        ].map(auditCsvCell).join(',') + '\r\n');
+        rows += 1;
+      }
+      if (!page.hasMore || !page.nextBefore || rows >= AUDIT_EXPORT_ROW_CAP) break;
+      before = new Date(page.nextBefore);
+    }
+    return res.end();
+  } catch (error) {
+    console.error('Audit export failed:', error);
+    if (!res.headersSent) return res.status(500).json({ error: 'audit_export_failed' });
+    return res.end();
   }
 });
 
@@ -11399,6 +13021,128 @@ app.get('/api/events', requireAuth, (req, res) => {
   });
 });
 
+/* Board-only history.
+
+   Half of what happens to a ticket never reaches a Ticket column: archiving,
+   snoozing, a CS agent confirming or sending back a resolution, a client reply
+   re-opening it, a re-open request and its decision, the card being taken off
+   the board. Those live only in the board state, and the state keeps the
+   latest value, so each one overwrote the last and the audit log - which only
+   ever saw Ticket columns change - had no record that any of it happened.
+
+   Diffing the stored state before and after each save is what catches them:
+   it is the merged result, so a stale tab's rejected value is not recorded as
+   a change, and it runs once per save, so a transition is written once. */
+const BOARD_AUDIT_BULK_CAP = 150;
+function boardAuditMap(state, key) {
+  const value = state && state[key];
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+function boardAuditTs(value) {
+  if (value === null || value === undefined || value === '') return 0;
+  const n = Number(value);
+  if (Number.isFinite(n) && n > 0) return n;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+function boardAuditIso(value) {
+  const ts = boardAuditTs(value);
+  return ts ? new Date(ts).toISOString() : null;
+}
+async function auditBoardStateTransitions(before, after, req) {
+  if (!before || !after || typeof before !== 'object' || typeof after !== 'object') return 0;
+  const sessionActor = String(req?.session?.username || '').trim().toUpperCase() || null;
+  const userId = req?.session?.userId || null;
+  const pending = [];
+  const push = (externalId, eventType, oldValue, newValue, metadata = {}) => {
+    if (!externalId) return;
+    pending.push({ externalId: String(externalId), eventType, oldValue: oldValue ?? null, newValue: newValue ?? null, metadata });
+  };
+  const forEachChanged = (key, fn) => {
+    const prev = boardAuditMap(before, key);
+    const next = boardAuditMap(after, key);
+    const ids = [];
+    for (const id of new Set([...Object.keys(prev), ...Object.keys(next)])) {
+      if (JSON.stringify(prev[id] ?? null) !== JSON.stringify(next[id] ?? null)) ids.push(id);
+    }
+    // Hundreds of tickets changing one field in one save is a migration, a
+    // first load or a stale tab replaying old state - not people's actions.
+    if (ids.length > BOARD_AUDIT_BULK_CAP) return;
+    ids.forEach(id => fn(id, prev[id], next[id]));
+  };
+  const clip = (text, n = 300) => {
+    const value = String(text ?? '').trim();
+    return value ? value.slice(0, n) : null;
+  };
+
+  forEachChanged('ticketArchived', (id, p, n) => {
+    if (!p && n) push(id, 'ticket_archived', null, n.reason || 'manual', { actor: n.archivedBy || sessionActor, at: boardAuditIso(n.archivedAt), reason: n.reason || null });
+    else if (p && !n) {
+      const reopened = boardAuditTs(boardAuditMap(after, 'ticketReopenedAt')[id]) > boardAuditTs(boardAuditMap(before, 'ticketReopenedAt')[id]);
+      push(id, 'ticket_restored', p.reason || null, null, { actor: reopened ? null : sessionActor, source: reopened ? 'customer_reply' : 'board' });
+    }
+  });
+  forEachChanged('ticketSnooze', (id, p, n) => {
+    if (n && n.until && (!p || boardAuditTs(p.at) !== boardAuditTs(n.at) || boardAuditTs(p.until) !== boardAuditTs(n.until))) {
+      push(id, 'ticket_snoozed', p && p.until ? boardAuditIso(p.until) : null, boardAuditIso(n.until), { actor: n.by || sessionActor, note: clip(n.note), at: boardAuditIso(n.at) });
+    } else if (p && p.until && !(n && n.until)) {
+      const expired = boardAuditTs(p.until) <= Date.now() + 1000;
+      push(id, expired ? 'ticket_snooze_expired' : 'ticket_unsnoozed', boardAuditIso(p.until), null, { actor: expired ? null : sessionActor });
+    }
+  });
+  forEachChanged('ticketResolutionMeta', (id, p, n) => {
+    const prev = p || {};
+    const next = n || {};
+    if (next.confirmedAt && boardAuditTs(next.confirmedAt) !== boardAuditTs(prev.confirmedAt)) {
+      push(id, 'ticket_resolution_confirmed', null, next.confirmedBy || null, { actor: next.confirmedBy || sessionActor, at: boardAuditIso(next.confirmedAt) });
+    }
+    if (next.sentBackAt && boardAuditTs(next.sentBackAt) !== boardAuditTs(prev.sentBackAt)) {
+      const alert = boardAuditMap(after, 'ticketSendBackAlerts')[id];
+      push(id, 'ticket_sent_back', null, clip(next.sendBackNote), { actor: next.sentBackBy || sessionActor, at: boardAuditIso(next.sentBackAt), to: alert && alert.to ? String(alert.to) : null });
+    }
+  });
+  forEachChanged('ticketReopenRequests', (key, p, n) => {
+    if (!n || !n.ticketId) return;
+    if (!p && n.status === 'pending') {
+      push(n.ticketId, 'ticket_reopen_requested', null, n.from || null, { actor: null, from: n.from || null, at: boardAuditIso(n.at), source: 'customer_reply' });
+    } else if (n.status && n.status !== 'pending' && (!p || p.status !== n.status)) {
+      push(n.ticketId, 'ticket_reopen_decided', (p && p.status) || 'pending', n.status, { actor: n.decidedBy || sessionActor, from: n.from || null, at: boardAuditIso(n.decidedAt) });
+    }
+  });
+  forEachChanged('ticketReopenedAt', (id, p, n) => {
+    if (boardAuditTs(n) > boardAuditTs(p)) push(id, 'ticket_reopened', boardAuditIso(p), boardAuditIso(n), { actor: null, source: 'customer_reply' });
+  });
+  forEachChanged('ticketHasNewReply', (id, p, n) => {
+    if (n && !p) push(id, 'customer_replied', null, null, { actor: null, source: 'mail' });
+  });
+  const { removed } = diffBoardTickets(before, after);
+  if (removed.length && removed.length <= BOARD_AUDIT_BULK_CAP) {
+    removed.forEach(id => push(id, 'ticket_removed_from_board', null, null, { actor: sessionActor }));
+  }
+
+  if (!pending.length) return 0;
+  const rows = await prisma.ticket.findMany({
+    where: { externalId: { in: [...new Set(pending.map(p => p.externalId))] } },
+    select: { id: true, externalId: true }
+  });
+  const idByExternal = new Map(rows.map(r => [r.externalId, r.id]));
+  let written = 0;
+  for (const p of pending) {
+    const ticketId = idByExternal.get(p.externalId);
+    if (!ticketId) continue;
+    const created = await createTicketAuditEvent({
+      ticketId,
+      userId,
+      eventType: p.eventType,
+      oldValue: p.oldValue,
+      newValue: p.newValue,
+      metadata: { source: 'board', ...p.metadata }
+    });
+    if (created) written += 1;
+  }
+  return written;
+}
+
 app.get('/api/state', requireAuth, async (req, res) => {
   try {
     const state = await hydrateStateFromDatabase(safeReadState());
@@ -11483,6 +13227,13 @@ app.post('/api/state', requireAuth, async (req, res) => {
   }
 
   res.json({ ok: !!result.saved, ...resultSummary, ticketDb, liveRev });
+
+  // After the response: the history is not something the saving tab waits on.
+  if (result.saved) {
+    void auditBoardStateTransitions(beforeState, result.state || safeReadState(), req).catch((error) => {
+      console.warn('Board history audit failed:', error?.message || error);
+    });
+  }
 });
 
 app.post('/api/hubspot/companies/:companyId/custom-property', requireAuth, async (req, res) => {
@@ -13375,11 +15126,33 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       // there answered the request before the check was ever reached.
       const mailbox = resolveReadableMailbox(args?.mailboxOwnerEmail);
       if (!mailbox) return res.status(403).json({ isError: true, error: 'mailbox_not_allowed' });
-      const token = await graphDelegatedToken(req);
-      const top = Math.min(Math.max(Number(args?.limit || 20), 1), 200);
       const select = '$select=id,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,webLink,conversationId,internetMessageId';
       const orderBy = '$orderby=receivedDateTime desc';
       const filter = args?.afterDateTime ? `&$filter=receivedDateTime ge ${new Date(args.afterDateTime).toISOString()}` : '';
+      // allPages: the Received Mail view reads a whole window (up to three
+      // months), which is far more than one Graph page. It follows nextLink up
+      // to a hard cap and says when the cap cut the window short. The poller
+      // does not ask for this and keeps its single page of `limit`.
+      if (args?.allPages) {
+        const cap = Math.min(Math.max(Number(args?.limit) || MAIL_WINDOW_MAX_MESSAGES, 1), MAIL_WINDOW_MAX_MESSAGES);
+        const out = [];
+        let next = `/users/${encodeURIComponent(mailbox)}/messages?$top=${Math.min(cap, MAIL_WINDOW_PAGE_SIZE)}&${select}&${orderBy}${filter}`;
+        while (next && out.length < cap) {
+          const data = await graphGetResilient(next, req);
+          for (const msg of (data?.value || [])) {
+            if (out.length >= cap) break;
+            out.push(mapMessage(msg));
+          }
+          // graphGet takes a path under /v1.0; nextLink is absolute.
+          const link = String(data?.['@odata.nextLink'] || '');
+          next = link.startsWith('https://graph.microsoft.com/v1.0')
+            ? link.slice('https://graph.microsoft.com/v1.0'.length)
+            : '';
+        }
+        return res.json({ isError: false, structuredContent: out, truncated: !!next });
+      }
+      const token = await graphDelegatedToken(req);
+      const top = Math.min(Math.max(Number(args?.limit || 20), 1), 200);
       const data = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages?$top=${top}&${select}&${orderBy}${filter}`, token);
       return res.json({ isError: false, structuredContent: (data.value || []).map(mapMessage) });
     }

@@ -5,484 +5,1021 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=q-logo-tab-v3" />
   <link rel="shortcut icon" type="image/svg+xml" href="/favicon.svg?v=q-logo-tab-v3" />
-  <title>Ticket Activity by Agent</title>
+  <title>Ticket Audit · Support Kanban</title>
+  <script>
+    // Same theme rule as the board, applied before the first paint.
+    (function () {
+      try {
+        var saved = localStorage.getItem('theme');
+        var theme = saved === 'dark' || saved === 'light' ? saved : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        if (theme === 'dark') document.documentElement.dataset.theme = 'dark';
+      } catch (_) {}
+    })();
+  </script>
   <style>
+    @import url('https://fonts.googleapis.com/css2?family=Caladea:wght@700&family=Inter:wght@400;500;600;700;800;900&display=swap');
+
+    /* The board's own tokens, so this page reads as part of it. */
+    :root {
+      color-scheme: light;
+      --bg: #f3f4fb; --bg-soft: #eceefa; --surface: #ffffff; --surface-soft: #f8f9fe; --surface-muted: #f1f2fa;
+      --text: #13152c; --text-soft: #353a5c; --muted: #565c80; --muted-light: #737a9c;
+      --border: #e3e5f2; --border-strong: #cdd1e6;
+      --primary: #5b4cf5; --primary-dark: #4636d9; --primary-soft: #efedff;
+      --accent-a: #6d5efc; --accent-b: #a855f7; --accent-c: #ec4899;
+      --accent-grad: linear-gradient(135deg, var(--accent-a) 0%, var(--accent-b) 62%, var(--accent-c) 130%);
+      --accent-glow: 0 8px 22px rgba(109, 94, 252, .32);
+      --focus-ring: 0 0 0 3px rgba(91, 76, 245, .22);
+      --st-new: #7c5cff; --st-inp: #f59e0b; --st-wus: #3b82f6; --st-dft: #06b6d4; --st-wct: #ec4899; --st-res: #10b981;
+      --ag-0: #6d28d9; --ag-1: #1d4ed8; --ag-2: #047857; --ag-3: #b45309; --ag-4: #be185d; --ag-5: #0e7490; --ag-6: #7c3aed; --ag-7: #15803d;
+      --ag-8: #c2410c; --ag-9: #1e40af; --ag-10: #7e22ce; --ag-11: #0369a1; --ag-12: #9333ea; --ag-13: #15803d; --ag-14: #b91c1c; --ag-15: #0891b2;
+      --ag-16: #4f46e5; --ag-17: #dc2626; --ag-18: #059669; --ag-19: #d97706; --ag-20: #7c3aed; --ag-21: #0f766e;
+      --success: #16a34a; --success-soft: #dcfce7; --warning: #d97706; --warning-soft: #fef3c7;
+      --danger: #dc2626; --danger-soft: #fee2e2; --info: #2563eb; --info-soft: #dbeafe; --purple: #7c3aed; --purple-soft: #ede9fe;
+      --shadow-xs: 0 1px 2px rgba(25, 22, 70, 0.06);
+      --shadow-sm: 0 1px 2px rgba(25, 22, 70, 0.04), 0 4px 14px rgba(25, 22, 70, 0.06);
+      --shadow: 0 2px 6px rgba(25, 22, 70, 0.05), 0 14px 34px rgba(25, 22, 70, 0.11);
+      --shadow-lg: 0 24px 70px rgba(18, 14, 60, 0.22);
+      --k-created: var(--st-new); --k-stage: var(--primary); --k-assign: #2563eb; --k-cs: #db2777; --k-priority: #d97706;
+      --k-category: #0891b2; --k-note: #7c3aed; --k-reply: #059669; --k-jira: #1d4ed8; --k-link: #475569; --k-sla: #ea580c;
+      --k-snooze: #6366f1; --k-archive: #64748b; --k-resolution: #10b981; --k-reopen: #dc2626; --k-duplicate: #a855f7;
+      --k-sync: #94a3b8; --k-other: #94a3b8;
+    }
+    [data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #090a16; --bg-soft: #0e1022; --surface: #161931; --surface-soft: #121429; --surface-muted: #0d0f20;
+      --text: #eef0ff; --text-soft: #c9cce8; --muted: #a0a5c8; --muted-light: #8287ab;
+      --border: #272b4b; --border-strong: #383d66;
+      --primary: #8d82ff; --primary-dark: #b3abff; --primary-soft: #262158;
+      --focus-ring: 0 0 0 3px rgba(141, 130, 255, .32); --accent-glow: 0 8px 24px rgba(109, 94, 252, .38);
+      --st-new: #9a80ff; --st-inp: #fbbf24; --st-wus: #60a5fa; --st-dft: #22d3ee; --st-wct: #f472b6; --st-res: #34d399;
+      --success: #4ade80; --success-soft: #0f2a1d; --warning: #fbbf24; --warning-soft: #33250b;
+      --danger: #f87171; --danger-soft: #3a1620; --info: #60a5fa; --info-soft: #142449; --purple: #a78bfa; --purple-soft: #2a1f57;
+      --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35), 0 6px 16px rgba(0, 0, 0, 0.35);
+      --shadow: 0 2px 6px rgba(0, 0, 0, 0.35), 0 16px 38px rgba(0, 0, 0, 0.5);
+      --shadow-lg: 0 24px 70px rgba(0, 0, 0, 0.6);
+      --k-assign: #60a5fa; --k-cs: #f472b6; --k-priority: #fbbf24; --k-category: #22d3ee; --k-note: #a78bfa; --k-reply: #34d399;
+      --k-jira: #93c5fd; --k-link: #94a3b8; --k-sla: #fb923c; --k-snooze: #818cf8; --k-archive: #94a3b8; --k-resolution: #34d399;
+      --k-reopen: #f87171; --k-duplicate: #c084fc; --k-sync: #6c7197; --k-other: #6c7197;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
     body {
-      margin: 0;
-      font-family: Inter, Arial, sans-serif;
-      background: #f5f7fb;
-      color: #0f172a;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      background-image: radial-gradient(1200px 500px at 10% -10%, color-mix(in srgb, var(--accent-a) 9%, transparent), transparent 60%),
+                        radial-gradient(900px 420px at 100% 0%, color-mix(in srgb, var(--accent-c) 6%, transparent), transparent 60%);
+      background-attachment: fixed;
+      color: var(--text);
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
     }
+    button, input, select { font: inherit; color: inherit; }
+    a { color: var(--primary); }
 
-    header {
-      background: #0f172a;
-      color: white;
-      padding: 18px 24px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
+    /* ---- Header ------------------------------------------------------------ */
+    .app-header {
+      position: sticky; top: 0; z-index: 30;
+      display: flex; align-items: center; gap: 14px;
+      padding: 12px clamp(12px, 2vw, 26px);
+      background: color-mix(in srgb, var(--surface) 82%, transparent);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border);
     }
+    .brand { display: flex; align-items: center; gap: 11px; text-decoration: none; color: var(--text); }
+    .brand-mark { width: 34px; height: 34px; border-radius: 11px; background: var(--accent-grad); box-shadow: var(--accent-glow); display: grid; place-items: center; color: #fff; }
+    .brand-title { font-family: Caladea, Inter, sans-serif; font-size: 21px; font-weight: 700; letter-spacing: -.01em; line-height: 1; }
+    .brand-sub { font-size: 11.5px; color: var(--muted); font-weight: 600; margin-top: 3px; }
+    .header-spacer { flex: 1; }
+    .tabs { display: flex; gap: 4px; padding: 4px; background: var(--surface-muted); border: 1px solid var(--border); border-radius: 12px; }
+    .tab { border: 0; background: transparent; padding: 7px 13px; border-radius: 9px; font-weight: 700; font-size: 13px; color: var(--muted); cursor: pointer; display: inline-flex; gap: 7px; align-items: center; }
+    .tab:hover { color: var(--text); }
+    .tab[aria-selected="true"] { background: var(--accent-grad); color: #fff; box-shadow: var(--accent-glow); }
+    .btn { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--text-soft); font-weight: 650; font-size: 13px; cursor: pointer; text-decoration: none; white-space: nowrap; }
+    .btn:hover { border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); color: var(--text); }
+    .btn:focus-visible, .tab:focus-visible, .chip-btn:focus-visible, .a-card:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+    .btn.primary { background: var(--accent-grad); border: 0; color: #fff; box-shadow: var(--accent-glow); }
+    .btn.icon { width: 34px; padding: 0; justify-content: center; }
+    .btn svg, .tab svg { width: 15px; height: 15px; }
 
-    header a {
-      color: white;
-      text-decoration: none;
-      border: 1px solid rgba(255,255,255,.2);
-      padding: 8px 12px;
-      border-radius: 10px;
-    }
+    main { padding: 16px clamp(12px, 2vw, 26px) 40px; }
 
-    main {
-      padding: 24px;
-      max-width: 1320px;
-      margin: 0 auto;
+    /* ---- Filters ------------------------------------------------------------ */
+    .filters {
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;
+      padding: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-xs);
     }
+    .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .field > span { font-size: 10.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted-light); }
+    .input, .select {
+      height: 34px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface-soft); color: var(--text); font-size: 13px; min-width: 0;
+    }
+    .input:focus, .select:focus { outline: none; border-color: var(--primary); box-shadow: var(--focus-ring); }
+    .search-wrap { position: relative; flex: 1 1 260px; }
+    .search-wrap .input { width: 100%; padding-left: 32px; }
+    .search-wrap svg { position: absolute; left: 10px; bottom: 9px; width: 15px; height: 15px; color: var(--muted-light); pointer-events: none; }
+    .kbd { font-size: 10.5px; font-weight: 700; padding: 1px 5px; border-radius: 5px; border: 1px solid var(--border-strong); color: var(--muted-light); background: var(--surface-muted); }
+    .search-wrap .kbd { position: absolute; right: 8px; bottom: 8px; }
+    .kind-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .chip-btn {
+      --k: var(--k-other);
+      display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 999px; cursor: pointer;
+      border: 1px solid color-mix(in srgb, var(--k) 30%, var(--border)); background: var(--surface); color: var(--text-soft); font-size: 12px; font-weight: 650;
+    }
+    .chip-btn::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--k); }
+    .chip-btn[aria-pressed="true"] { background: color-mix(in srgb, var(--k) 16%, var(--surface)); border-color: color-mix(in srgb, var(--k) 60%, transparent); color: var(--text); }
+    .chip-btn .n { font-variant-numeric: tabular-nums; color: var(--muted-light); font-weight: 700; }
+    .toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; color: var(--text-soft); height: 34px; cursor: pointer; user-select: none; }
+    .toggle input { accent-color: var(--primary); width: 15px; height: 15px; }
 
-    .card {
-      background: white;
-      border: 1px solid #e2e8f0;
-      border-radius: 18px;
-      box-shadow: 0 12px 34px rgba(15,23,42,.08);
-      overflow: hidden;
-      margin-bottom: 18px;
+    /* ---- Stats strip ---------------------------------------------------------- */
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 14px 0; }
+    .stat {
+      position: relative; overflow: hidden; padding: 12px 14px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-xs);
     }
+    .stat::after { content: ""; position: absolute; inset: auto -20px -30px auto; width: 90px; height: 90px; border-radius: 50%; background: color-mix(in srgb, var(--tone, var(--primary)) 10%, transparent); pointer-events: none; }
+    .stat-label { font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted-light); }
+    .stat-value { font-size: 25px; font-weight: 800; letter-spacing: -.02em; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .stat-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+    .stat.wide { grid-column: span 2; }
+    .spark { display: flex; align-items: flex-end; gap: 2px; height: 40px; margin-top: 8px; }
+    .spark i { flex: 1; min-width: 2px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--accent-b), var(--accent-a)); opacity: .85; }
+    .spark i:hover { opacity: 1; }
+    .dwell-row { display: grid; grid-template-columns: 120px 1fr 64px; align-items: center; gap: 8px; font-size: 12px; margin-top: 5px; }
+    .dwell-row b { font-weight: 650; color: var(--text-soft); display: flex; gap: 6px; align-items: center; }
+    .dwell-bar { height: 7px; border-radius: 99px; background: var(--surface-muted); overflow: hidden; }
+    .dwell-bar i { display: block; height: 100%; border-radius: 99px; background: var(--stage); }
+    .dwell-row em { font-style: normal; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .actor-stack { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .actor-pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px 2px 2px; border-radius: 999px; background: var(--surface-muted); border: 1px solid var(--border); font-size: 11.5px; font-weight: 700; cursor: pointer; }
+    .actor-pill .n { color: var(--muted-light); font-variant-numeric: tabular-nums; }
 
-    .toolbar {
-      padding: 16px;
-      border-bottom: 1px solid #e2e8f0;
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: flex-end;
-      flex-wrap: wrap;
-    }
+    .notice { padding: 10px 14px; border-radius: 12px; background: var(--info-soft); color: var(--text-soft); font-size: 12.5px; margin-bottom: 12px; border: 1px solid color-mix(in srgb, var(--info) 25%, transparent); }
+    .error { padding: 16px; border-radius: 14px; background: var(--danger-soft); color: var(--danger); font-weight: 600; }
 
-    .controls { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-    .control { display: flex; flex-direction: column; gap: 4px; }
-    .control label {
-      font-size: 10px;
-      font-weight: 800;
-      text-transform: uppercase;
-      letter-spacing: .05em;
-      color: #64748b;
+    /* ---- Board view: the kanban, column for column ---------------------------- */
+    .board { display: grid; grid-template-columns: repeat(6, minmax(260px, 1fr)); gap: 12px; overflow-x: auto; padding: 2px 0 8px; align-items: start; }
+    .col-new { --stage: var(--st-new); } .col-inp { --stage: var(--st-inp); } .col-wus { --stage: var(--st-wus); }
+    .col-dft { --stage: var(--st-dft); } .col-wct { --stage: var(--st-wct); } .col-res { --stage: var(--st-res); }
+    .column {
+      position: relative; border-radius: 18px; min-width: 0;
+      background: color-mix(in srgb, var(--stage) 5%, var(--surface-soft));
+      border: 1px solid color-mix(in srgb, var(--stage) 16%, var(--border));
+      box-shadow: var(--shadow-xs);
     }
-    select, input[type="search"] {
-      font: inherit;
-      font-size: 13px;
-      padding: 7px 10px;
-      border: 1px solid #cbd5e1;
-      border-radius: 10px;
-      background: white;
-      color: #0f172a;
+    [data-theme="dark"] .column { background: color-mix(in srgb, var(--stage) 6%, var(--surface-soft)); }
+    .column::before {
+      content: ""; position: absolute; left: 14px; right: 14px; top: -1px; height: 3px; border-radius: 0 0 4px 4px;
+      background: linear-gradient(90deg, var(--stage), color-mix(in srgb, var(--stage) 25%, transparent));
     }
-    input[type="search"] { min-width: 210px; }
-    .check { flex-direction: row; align-items: center; gap: 6px; padding-bottom: 8px; }
-    .check label { text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 600; color: #334155; }
+    .col-header { display: flex; align-items: center; gap: 9px; padding: 14px 14px 10px; font-size: 13.5px; font-weight: 700; }
+    .col-header::before { content: ""; flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--stage); box-shadow: 0 0 0 4px color-mix(in srgb, var(--stage) 18%, transparent); }
+    .col-badge {
+      margin-left: auto; min-width: 26px; text-align: center; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums;
+      color: color-mix(in srgb, var(--stage) 72%, var(--text)); background: color-mix(in srgb, var(--stage) 15%, var(--surface)); border: 1px solid color-mix(in srgb, var(--stage) 22%, transparent);
+    }
+    [data-theme="dark"] .col-badge { color: color-mix(in srgb, var(--stage) 55%, #fff); }
+    .col-body { display: flex; flex-direction: column; gap: 10px; padding: 2px 10px 12px; max-height: calc(100vh - 330px); min-height: 120px; overflow-y: auto; scrollbar-width: thin; }
+    .empty { padding: 26px 14px; border-radius: 14px; border: 1.5px dashed color-mix(in srgb, var(--stage, var(--primary)) 28%, var(--border)); color: var(--muted-light); font-size: 13px; font-weight: 500; text-align: center; }
+    .more-btn { border: 1px dashed color-mix(in srgb, var(--stage) 40%, var(--border)); background: transparent; color: var(--muted); border-radius: 12px; padding: 9px; font-weight: 700; font-size: 12.5px; cursor: pointer; }
+    .more-btn:hover { background: color-mix(in srgb, var(--stage) 10%, transparent); color: var(--text); }
 
-    button {
-      border: 0;
-      background: #4f46e5;
-      color: white;
-      padding: 10px 14px;
-      border-radius: 10px;
-      font-weight: 800;
-      cursor: pointer;
+    .a-card {
+      position: relative; cursor: pointer; text-align: left; width: 100%;
+      background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--border-strong); border-radius: 14px;
+      padding: 11px 12px 10px; box-shadow: var(--shadow-xs); transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease;
     }
+    [data-theme="dark"] .a-card { background: color-mix(in srgb, var(--surface) 96%, #fff); }
+    .a-card:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--stage, var(--primary)) 32%, var(--border)); box-shadow: 0 12px 28px color-mix(in srgb, var(--stage, var(--primary)) 16%, transparent), 0 2px 6px rgba(25, 22, 70, .06); }
+    .a-card.p-High { border-left-color: #ef4444; } .a-card.p-Medium { border-left-color: #f59e0b; } .a-card.p-Low { border-left-color: #10b981; }
+    .a-card.is-archived { opacity: .78; }
+    .a-card.active { box-shadow: 0 0 0 2px var(--primary), var(--shadow); }
+    .card-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 7px; }
+    .ticket-no { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--muted); background: var(--surface-muted); border: 1px solid var(--border); white-space: nowrap; }
+    .card-subject { font-size: 13.5px; font-weight: 650; line-height: 1.35; color: var(--text); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+    .card-company { font-size: 12px; color: var(--muted); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .card-foot { display: flex; align-items: center; gap: 8px; margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--muted); }
+    .card-foot .metric { display: inline-flex; gap: 4px; align-items: center; font-weight: 650; font-variant-numeric: tabular-nums; }
+    .card-foot svg { width: 13px; height: 13px; }
+    .card-foot .when { margin-left: auto; white-space: nowrap; }
+    .card-people { display: flex; align-items: center; gap: 4px; }
 
-    /* Every wide table scrolls sideways inside its own card rather than pushing
-       the page wider. The track is kept permanently visible: WebKit hides
-       overlay scrollbars until they are used, and on a table that is only
-       slightly too wide that reads as "there is nothing more to see". */
-    .scroll-x {
-      overflow-x: auto;
-      overflow-y: hidden;
-      -webkit-overflow-scrolling: touch;
-      scrollbar-width: thin;
-      scrollbar-color: #94a3b8 #eef2f7;
-      padding-bottom: 2px;
-    }
-    .scroll-x::-webkit-scrollbar { height: 12px; }
-    .scroll-x::-webkit-scrollbar-track { background: #eef2f7; border-radius: 999px; }
-    .scroll-x::-webkit-scrollbar-thumb {
-      background: #94a3b8;
-      border-radius: 999px;
-      border: 3px solid transparent;
-      background-clip: padding-box;
-    }
-    .scroll-x::-webkit-scrollbar-thumb:hover { background: #64748b; background-clip: padding-box; }
+    .tag { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 7px; border-radius: 999px; font-size: 10.5px; font-weight: 750; letter-spacing: .01em; white-space: nowrap; border: 1px solid transparent; font-family: inherit; }
+    .tag.gray { background: var(--surface-muted); color: var(--muted); border-color: var(--border); }
+    .tag.blue { background: var(--info-soft); color: var(--info); }
+    .tag.violet { background: var(--purple-soft); color: var(--purple); }
+    .tag.amber { background: var(--warning-soft); color: var(--warning); }
+    .tag.red { background: var(--danger-soft); color: var(--danger); }
+    .tag.recon { background: transparent; color: var(--muted); border: 1px dashed var(--border-strong); }
+    .pb-High { color: #dc2626; } .pb-Medium { color: #b45309; } .pb-Low { color: #047857; }
+    [data-theme="dark"] .pb-High { color: #fca5a5; } [data-theme="dark"] .pb-Medium { color: #fcd34d; } [data-theme="dark"] .pb-Low { color: #6ee7b7; }
 
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      /* A width:100% table shrinks to its container and would never overflow,
-         so the wrapper above would have nothing to scroll. This is the floor
-         that hands the overflow to it. */
-      min-width: 940px;
+    .avatar {
+      display: inline-grid; place-items: center; flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%;
+      background: var(--av, var(--muted-light)); color: #fff; font-size: 9.5px; font-weight: 800; letter-spacing: .02em;
+      box-shadow: 0 0 0 2px var(--surface);
     }
+    .avatar.sm { width: 20px; height: 20px; font-size: 8.5px; }
+    .avatar.lg { width: 32px; height: 32px; font-size: 11px; }
+    .avatar.none { background: var(--surface-muted); color: var(--muted-light); box-shadow: 0 0 0 1px var(--border) inset; }
+    .avatar.cs { border-radius: 8px; }
+    .stage-pill { --stage: var(--muted-light); display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700; color: color-mix(in srgb, var(--stage) 75%, var(--text)); background: color-mix(in srgb, var(--stage) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--stage) 28%, transparent); white-space: nowrap; }
+    .stage-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--stage); }
+    .stage-pill.unknown { border-style: dashed; }
+    .arrow { color: var(--muted-light); font-weight: 700; }
 
-    th, td {
-      padding: 11px 14px;
-      border-bottom: 1px solid #e2e8f0;
-      text-align: left;
-      font-size: 13px;
-      vertical-align: top;
-    }
+    /* ---- Activity stream ------------------------------------------------------ */
+    .stream { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow-xs); overflow: hidden; }
+    .day-head { position: sticky; top: 59px; z-index: 2; padding: 9px 16px; font-size: 11.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); background: color-mix(in srgb, var(--surface-soft) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); }
+    .s-row { display: grid; grid-template-columns: 62px 30px minmax(150px, 280px) 1fr auto; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); cursor: pointer; }
+    .s-row:hover { background: var(--surface-soft); }
+    .s-time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 600; }
+    .s-ticket { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+    .s-ticket .subj { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .s-what { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
+    .s-what .lbl { font-weight: 700; }
+    .s-what .txt { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 520px; }
+    .s-who { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--text-soft); }
+    .k-icon { --k: var(--k-other); width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; color: var(--k); background: color-mix(in srgb, var(--k) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--k) 26%, transparent); }
+    .k-icon svg { width: 15px; height: 15px; }
+    .loader { padding: 22px; text-align: center; color: var(--muted); font-size: 13px; }
+    .spinner { display: inline-block; width: 18px; height: 18px; border-radius: 50%; border: 2.5px solid color-mix(in srgb, var(--primary) 18%, transparent); border-top-color: var(--primary); animation: spin .8s linear infinite; vertical-align: middle; margin-right: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
-    th {
-      background: #f8fafc;
-      color: #64748b;
-      text-transform: uppercase;
-      font-size: 11px;
-      letter-spacing: .04em;
-      white-space: nowrap;
-    }
+    /* ---- By agent ------------------------------------------------------------- */
+    .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+    .agent-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-xs); overflow: hidden; }
+    .agent-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); background: linear-gradient(90deg, color-mix(in srgb, var(--av) 10%, var(--surface)), var(--surface)); }
+    .agent-head b { font-size: 14px; }
+    .agent-head .sub { font-size: 11.5px; color: var(--muted); }
+    .agent-head .big { margin-left: auto; text-align: right; font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .agent-head .big small { display: block; font-size: 10.5px; color: var(--muted-light); font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+    .agent-list { max-height: 280px; overflow-y: auto; }
+    .agent-t { display: flex; gap: 8px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 12.5px; }
+    .agent-t:hover { background: var(--surface-soft); }
+    .agent-t .subj { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .agent-t .n { color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 700; }
+    .section-title { font-size: 13px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 18px 2px 10px; }
 
-    tbody tr:hover { background: #fbfdff; }
+    /* ---- Ticket drawer + timeline -------------------------------------------- */
+    .scrim { position: fixed; inset: 0; background: rgba(9, 10, 22, .42); backdrop-filter: blur(2px); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 40; }
+    .scrim.open { opacity: 1; pointer-events: auto; }
+    .drawer {
+      position: fixed; top: 0; right: 0; bottom: 0; z-index: 41; width: min(820px, 100vw);
+      background: var(--bg); border-left: 1px solid var(--border); box-shadow: var(--shadow-lg);
+      transform: translateX(102%); transition: transform .24s cubic-bezier(.2, .8, .2, 1); display: flex; flex-direction: column;
+    }
+    .drawer.open { transform: none; }
+    .d-head { padding: 16px 20px 14px; background: var(--surface); border-bottom: 1px solid var(--border); position: relative; }
+    .d-head::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: linear-gradient(90deg, var(--stage, var(--primary)), color-mix(in srgb, var(--stage, var(--primary)) 20%, transparent)); }
+    .d-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .d-title { font-size: 19px; font-weight: 800; letter-spacing: -.01em; line-height: 1.3; margin: 10px 0 4px; word-break: break-word; }
+    .d-sub { font-size: 12.5px; color: var(--muted); }
+    .d-people { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; align-items: center; font-size: 12px; }
+    .d-person { display: flex; align-items: center; gap: 7px; }
+    .d-person small { display: block; font-size: 10px; font-weight: 800; color: var(--muted-light); text-transform: uppercase; letter-spacing: .06em; }
+    .d-person b { font-size: 13px; }
+    .d-body { flex: 1; overflow-y: auto; padding: 16px 20px 40px; scrollbar-width: thin; }
+    .journey { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 12px 14px; box-shadow: var(--shadow-xs); }
+    .journey-bar { display: flex; height: 16px; border-radius: 999px; overflow: hidden; background: var(--surface-muted); margin: 10px 0 8px; gap: 2px; }
+    .journey-bar i { --stage: var(--muted-light); display: block; min-width: 6px; background: var(--stage); position: relative; }
+    .journey-bar i.recon { background: repeating-linear-gradient(135deg, var(--stage) 0 6px, color-mix(in srgb, var(--stage) 55%, transparent) 6px 10px); }
+    .journey-bar i.ongoing::after { content: ""; position: absolute; right: 0; top: 0; bottom: 0; width: 10px; background: linear-gradient(90deg, transparent, rgba(255,255,255,.55)); animation: pulse 1.6s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: .2; } }
+    .journey-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); }
+    .journey-legend span { display: inline-flex; gap: 6px; align-items: center; }
+    .journey-legend b { color: var(--text-soft); font-variant-numeric: tabular-nums; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--stage); display: inline-block; }
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; margin: 12px 0; }
+    .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 13px; padding: 9px 11px; }
+    .kpi small { display: block; font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; color: var(--muted-light); }
+    .kpi b { display: block; font-size: 16px; font-weight: 800; margin-top: 3px; font-variant-numeric: tabular-nums; }
+    .kpi.good b { color: var(--success); } .kpi.warn b { color: var(--warning); }
+    .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+    .tl-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 14px 0 6px; }
+    .tl-tools .input { height: 28px; font-size: 12px; flex: 1 1 160px; }
 
-    .muted {
-      color: #64748b;
-    }
+    .timeline { position: relative; margin-top: 8px; }
+    .tl-day { font-size: 11px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; color: var(--muted-light); margin: 16px 0 8px 46px; }
+    .tl-item { --k: var(--k-other); position: relative; display: grid; grid-template-columns: 34px 1fr; gap: 12px; padding-bottom: 12px; }
+    .tl-item::before { content: ""; position: absolute; left: 16px; top: 34px; bottom: 0; width: 2px; background: linear-gradient(180deg, color-mix(in srgb, var(--k) 40%, var(--border)), var(--border)); }
+    .tl-item .k-icon { width: 34px; height: 34px; border-radius: 12px; position: relative; z-index: 1; background: color-mix(in srgb, var(--k) 16%, var(--surface)); }
+    .tl-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 10px 12px; box-shadow: var(--shadow-xs); min-width: 0; }
+    .tl-item.recon .tl-card { border-style: dashed; background: color-mix(in srgb, var(--surface) 70%, transparent); box-shadow: none; }
+    .tl-item.recon .k-icon { border-style: dashed; }
+    .tl-item.focus .tl-card { box-shadow: 0 0 0 2px var(--primary); }
+    .tl-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .tl-label { font-weight: 750; font-size: 13.5px; }
+    .tl-when { margin-left: auto; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .tl-change { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 7px; font-size: 12.5px; }
+    .val { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 2px 8px; border-radius: 8px; background: var(--surface-muted); border: 1px solid var(--border); font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+    .val.old { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--danger) 60%, transparent); color: var(--muted); }
+    .val.empty { font-style: italic; color: var(--muted-light); font-weight: 500; }
+    .tl-text { margin-top: 8px; padding: 9px 11px; border-radius: 10px; background: color-mix(in srgb, var(--k) 7%, var(--surface-soft)); border-left: 3px solid color-mix(in srgb, var(--k) 55%, transparent); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-soft); }
+    .tl-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 11.5px; color: var(--muted); }
+    .tl-meta .who { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; color: var(--text-soft); }
+    .dwell { display: inline-flex; align-items: center; gap: 5px; font-weight: 650; }
+    .dwell .dot { width: 7px; height: 7px; }
 
-    .pill {
-      display: inline-block;
-      padding: 4px 8px;
-      border-radius: 999px;
-      background: #eef2ff;
-      color: #4338ca;
-      font-weight: 800;
-      font-size: 11px;
-    }
-    .pill.sync { background: #f1f5f9; color: #64748b; }
+    [data-k="created"] { --k: var(--k-created); } [data-k="stage"] { --k: var(--k-stage); } [data-k="assign"] { --k: var(--k-assign); }
+    [data-k="cs"] { --k: var(--k-cs); } [data-k="priority"] { --k: var(--k-priority); } [data-k="category"] { --k: var(--k-category); }
+    [data-k="note"] { --k: var(--k-note); } [data-k="reply"] { --k: var(--k-reply); } [data-k="jira"] { --k: var(--k-jira); }
+    [data-k="link"] { --k: var(--k-link); } [data-k="sla"] { --k: var(--k-sla); } [data-k="snooze"] { --k: var(--k-snooze); }
+    [data-k="archive"] { --k: var(--k-archive); } [data-k="resolution"] { --k: var(--k-resolution); } [data-k="reopen"] { --k: var(--k-reopen); }
+    [data-k="duplicate"] { --k: var(--k-duplicate); } [data-k="sync"] { --k: var(--k-sync); } [data-k="other"] { --k: var(--k-other); }
+    [data-st="new"] { --stage: var(--st-new); } [data-st="inp"] { --stage: var(--st-inp); } [data-st="wus"] { --stage: var(--st-wus); }
+    [data-st="dft"] { --stage: var(--st-dft); } [data-st="wct"] { --stage: var(--st-wct); } [data-st="res"] { --stage: var(--st-res); }
 
-    .empty {
-      padding: 40px;
-      text-align: center;
-      color: #94a3b8;
-    }
+    .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(20px); opacity: 0; background: var(--text); color: var(--bg); padding: 9px 16px; border-radius: 12px; font-weight: 650; font-size: 13px; transition: all .2s ease; z-index: 60; pointer-events: none; }
+    .toast.show { opacity: 1; transform: translateX(-50%); }
+    .hidden { display: none !important; }
 
-    /* Agent header: the code first and large, because the page is scanned by
-       agent, and the two counts next to it because they are what gets compared. */
-    .agent-head {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      padding: 14px 16px;
-      border-bottom: 1px solid #e2e8f0;
-      flex-wrap: wrap;
+    @media (max-width: 760px) {
+      .brand-sub, .tab .lbl, .app-header > a.btn { display: none; }
+      .s-row { grid-template-columns: 48px 30px 1fr; }
+      .s-row .s-what, .s-row .s-who { grid-column: 2 / -1; }
+      .stat.wide { grid-column: auto; }
+      .d-body, .d-head { padding-left: 14px; padding-right: 14px; }
     }
-    .agent-code {
-      font-size: 15px;
-      font-weight: 900;
-      letter-spacing: .04em;
-      background: #0f172a;
-      color: white;
-      padding: 6px 12px;
-      border-radius: 10px;
-    }
-    .agent-code.cs { background: #0d9488; }
-    .agent-code.unknown { background: #b45309; }
-    .agent-stat { font-size: 12px; color: #334155; }
-    .agent-stat strong { font-size: 15px; color: #0f172a; }
-    .agent-quiet { padding: 14px 16px; color: #94a3b8; font-size: 13px; }
-
-    .section-title {
-      margin: 26px 4px 10px;
-      font-size: 12px;
-      font-weight: 900;
-      text-transform: uppercase;
-      letter-spacing: .08em;
-      color: #64748b;
-    }
-
-    .tno { font-weight: 800; white-space: nowrap; }
-    .status { white-space: nowrap; font-weight: 700; font-size: 11px; color: #475569; }
-    .when { white-space: nowrap; color: #475569; }
-    .count { text-align: right; font-weight: 800; white-space: nowrap; }
-
-    /* The change list. <details> rather than a JS accordion: the summary line
-       is the useful default and the full history is one click away without any
-       state to keep. */
-    details summary {
-      cursor: pointer;
-      font-size: 12px;
-      color: #4338ca;
-      font-weight: 700;
-    }
-    .change {
-      display: flex;
-      gap: 8px;
-      align-items: baseline;
-      flex-wrap: wrap;
-      padding: 4px 0;
-      font-size: 12px;
-      border-top: 1px dashed #e8edf5;
-    }
-    .change:first-child { border-top: 0; }
-    .change .arrow { color: #94a3b8; }
-    .change .val { font-weight: 700; }
-    .change .by { color: #64748b; }
-    .notice {
-      margin: 0 0 18px;
-      padding: 10px 14px;
-      border: 1px solid #f59e0b;
-      border-left-width: 4px;
-      border-radius: 10px;
-      background: #fffbeb;
-      font-size: 12.5px;
-    }
-  
-    /* Board palette: the same violet-black chrome and accent gradient as the
-       main board, so moving between pages does not change products. */
-    :root { --q-ink: #0d0f20; --q-ink-soft: #1a1d38; --q-primary: #5b4cf5; --q-grad: linear-gradient(135deg, #6d5efc 0%, #a855f7 62%, #ec4899 130%); --q-ring: 0 0 0 3px rgba(91, 76, 245, .22); }
-    body { -webkit-font-smoothing: antialiased; }
-    input:focus, select:focus, textarea:focus { outline: none; border-color: var(--q-primary) !important; box-shadow: var(--q-ring) !important; }
-    input[type="checkbox"] { accent-color: var(--q-primary); }
-    header {
-      background:
-        radial-gradient(600px 160px at 0% 0%, rgba(124, 92, 255, .38), transparent 70%),
-        radial-gradient(520px 160px at 100% 0%, rgba(236, 72, 153, .20), transparent 70%),
-        linear-gradient(180deg, var(--q-ink-soft), var(--q-ink)) !important;
-      position: relative;
-      box-shadow: 0 10px 30px rgba(13, 15, 32, .28);
-    }
-    header::after {
-      content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(167, 139, 250, .7) 22%, rgba(236, 72, 153, .55) 60%, rgba(34, 211, 238, .45) 85%, transparent);
-    }
-    body { min-height: 100vh; background: radial-gradient(1000px 480px at -10% -8%, rgba(124, 92, 255, .10), transparent 60%), #f3f4fb; background-attachment: fixed; color: #13152c; }
-    header h1, header strong { font-family: Caladea, Georgia, serif; font-weight: 700; }
-    header a { border-color: rgba(255, 255, 255, .14); background: rgba(255, 255, 255, .06); font-weight: 600; font-size: 13.5px; }
-    header a:hover { background: rgba(255, 255, 255, .12); }
-    .card { border-radius: 18px; border-color: #e3e5f2; box-shadow: 0 2px 6px rgba(25, 22, 70, .04), 0 14px 34px rgba(25, 22, 70, .08); }
-    button { background: var(--q-grad) !important; border: 0 !important; color: #fff !important; border-radius: 10px !important; box-shadow: 0 6px 18px rgba(109, 94, 252, .28); }
-    select, input[type="search"] { border-radius: 10px; border-color: #cdd1e6; }
-    th { font-size: 11px; letter-spacing: .08em; color: #5a6082; }
   </style>
 </head>
 <body>
-  <header>
-    <strong>Ticket Activity by Agent</strong>
-    <div style="display:flex;gap:10px;">
-      <a href="/">Board</a>
-      <a href="/profile">Profile</a>
-    </div>
+  <header class="app-header">
+    <a class="brand" href="/" title="Back to the board">
+      <span class="brand-mark" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 2"/><circle cx="12" cy="12" r="9"/></svg></span>
+      <span><div class="brand-title">Ticket audit</div><div class="brand-sub" id="brandSub">Every ticket, its whole history</div></span>
+    </a>
+    <div class="header-spacer"></div>
+    <nav class="tabs" role="tablist" aria-label="Views">
+      <button class="tab" role="tab" data-view="board" aria-selected="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="4" width="5" height="16" rx="1.5"/><rect x="10" y="4" width="5" height="11" rx="1.5"/><rect x="17" y="4" width="4" height="7" rx="1.5"/></svg><span class="lbl">Board</span></button>
+      <button class="tab" role="tab" data-view="stream" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h13"/></svg><span class="lbl">Activity</span></button>
+      <button class="tab" role="tab" data-view="agents" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.3-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><circle cx="17.5" cy="9" r="2.6"/><path d="M17 14.6c2.5.2 4 1.8 4.6 4.4"/></svg><span class="lbl">By agent</span></button>
+    </nav>
+    <button class="btn icon" id="themeBtn" type="button" title="Switch light / dark" aria-label="Switch light or dark theme"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+    <a class="btn" href="/">Board</a>
   </header>
 
   <main>
-    <section class="card">
-      <div class="toolbar">
-        <div>
-          <strong>Which tickets each agent updated</strong>
-          <div class="muted" style="font-size:12px;margin-top:3px;" id="summary">Loading...</div>
-        </div>
-        <div class="controls">
-          <div class="control">
-            <label for="days">Window</label>
-            <select id="days">
-              <option value="7">Last 7 days</option>
-              <option value="30" selected>Last 30 days</option>
-              <option value="90">Last 90 days</option>
-              <option value="180">Last 180 days</option>
-            </select>
-          </div>
-          <div class="control">
-            <label for="scope">Show</label>
-            <select id="scope">
-              <option value="both" selected>Support and CS</option>
-              <option value="support">Support only</option>
-              <option value="cs">CS only</option>
-            </select>
-          </div>
-          <div class="control">
-            <label for="q">Filter</label>
-            <input type="search" id="q" placeholder="Agent code, ticket no. or subject" autocomplete="off">
-          </div>
-          <div class="control check">
-            <input type="checkbox" id="includeSync">
-            <label for="includeSync">Include mail-sync changes</label>
-          </div>
-          <button id="refreshBtn">Refresh</button>
-        </div>
-      </div>
+    <div id="scopeNote" class="notice hidden"></div>
+
+    <section class="filters" aria-label="Filters">
+      <label class="field search-wrap">
+        <span>Search</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input class="input" id="fQ" type="search" placeholder="#number, subject, company, sender or Jira key" autocomplete="off">
+        <span class="kbd" aria-hidden="true">/</span>
+      </label>
+      <label class="field"><span>Agent</span><select class="select" id="fAgent"><option value="">Everyone</option></select></label>
+      <label class="field"><span>As</span><select class="select" id="fAgentRole"><option value="">Support or CS</option><option value="support">Support agent</option><option value="cs">CS owner</option></select></label>
+      <label class="field"><span>Done by</span><select class="select" id="fActor" title="Who made the change"><option value="">Anyone</option></select></label>
+      <label class="field"><span>Priority</span><select class="select" id="fPriority"><option value="">Any</option><option>High</option><option>Medium</option><option>Low</option><option>Normal</option></select></label>
+      <label class="field"><span>Period</span>
+        <select class="select" id="fPeriod">
+          <option value="">Any time</option><option value="1">Today</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last 12 months</option><option value="custom">Custom…</option>
+        </select>
+      </label>
+      <label class="field hidden" id="fFromWrap"><span>From</span><input class="input" id="fFrom" type="date"></label>
+      <label class="field hidden" id="fToWrap"><span>To</span><input class="input" id="fTo" type="date"></label>
+      <label class="field"><span>Archived</span><select class="select" id="fArchived"><option value="all">Include</option><option value="hide">Hide</option><option value="only">Only archived</option></select></label>
+      <label class="toggle" title="Subject, sender and body rewrites from Outlook"><input type="checkbox" id="fSync"> Mail sync</label>
+      <button class="btn" id="resetBtn" type="button">Reset</button>
+      <button class="btn primary" id="exportBtn" type="button" title="Download every matching event as CSV"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v12m0 0-4.5-4.5M12 15l4.5-4.5M4 17v2.5A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5V17"/></svg>CSV</button>
+      <div class="kind-chips" id="kindChips" style="flex-basis:100%"></div>
     </section>
 
-    <div id="content">
-      <div class="empty">Loading activity...</div>
-    </div>
+    <section class="stats" id="stats" aria-live="polite"></section>
+
+    <section id="viewBoard"><div class="board" id="board"></div></section>
+    <section id="viewStream" class="hidden"><div class="stream" id="stream"></div><div id="streamMore"></div></section>
+    <section id="viewAgents" class="hidden"><div id="agents"></div></section>
   </main>
 
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dTitle">
+    <div class="d-head" id="dHead"></div>
+    <div class="d-body" id="dBody"></div>
+  </aside>
+  <div class="toast" id="toast" role="status"></div>
+
   <script>
-    function esc(value) {
-      return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
+  (function () {
+    'use strict';
+
+    const STAGES = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
+    const STAGE_LABEL = { new: 'New', inp: 'In Progress', wus: 'Waiting on Us', dft: 'Due for Test', wct: 'Waiting on Contact', res: 'Resolved' };
+    const KIND_LABEL = {
+      created: 'Created', stage: 'Stage moves', assign: 'Support agent', cs: 'CS owner', priority: 'Priority', category: 'Category',
+      note: 'Notes', reply: 'Replies', jira: 'Jira', link: 'Links', sla: 'SLA', snooze: 'Snooze', archive: 'Archive',
+      resolution: 'CS review', reopen: 'Re-opens', duplicate: 'Duplicates', sync: 'Mail sync', other: 'Other'
+    };
+    const ICON = {
+      created: '<path d="M12 5v14M5 12h14"/>',
+      stage: '<path d="M5 12h14m-5-5 5 5-5 5"/>',
+      assign: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20c.9-3.6 3.6-5.5 7-5.5s6.1 1.9 7 5.5"/>',
+      cs: '<path d="M12 3 4 6v6c0 4.5 3.4 8 8 9 4.6-1 8-4.5 8-9V6z"/><path d="m9 12 2 2 4-4"/>',
+      priority: '<path d="M5 21V4m0 0h11l-2 4 2 4H5"/>',
+      category: '<path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="7.5" r="1.5"/>',
+      note: '<path d="M5 4h14v12l-5 4H5z"/><path d="M14 20v-4h5M8.5 9h7M8.5 12.5h4"/>',
+      reply: '<path d="M10 9 5 13l5 4"/><path d="M5 13h9a5 5 0 0 0 5-5V6"/>',
+      jira: '<path d="M12 3 3 12l9 9 9-9z"/><path d="m12 8.5-3.5 3.5 3.5 3.5 3.5-3.5z"/>',
+      link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+      sla: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9.5 2.5h5"/>',
+      snooze: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+      archive: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9M10 13h4"/>',
+      resolution: '<circle cx="12" cy="12" r="9"/><path d="m8 12.5 2.8 2.8L16.5 9.5"/>',
+      reopen: '<path d="M4 12a8 8 0 0 1 13.7-5.6L20 8.5M20 4v4.5h-4.5"/><path d="M20 12a8 8 0 0 1-13.7 5.6L4 15.5M4 20v-4.5h4.5"/>',
+      duplicate: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/>',
+      sync: '<path d="M4 6h16v12H4z"/><path d="m4 7 8 6 8-6"/>',
+      other: '<circle cx="12" cy="12" r="1.5"/><circle cx="6" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/>'
+    };
+    const RECON_TIP = 'Reconstructed: nobody logged this when it happened. It is worked out from the ticket and the board (dates on the card, the resolution record, the assignment stamp), so the time is the best one the data gives.';
+
+    const $ = (id) => document.getElementById(id);
+    const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const svg = (kind) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[kind] || ICON.other}</svg>`;
+    const PALETTE = Array.from({ length: 22 }, (_, i) => `var(--ag-${i})`);
+    // The board's own agentColor(), so an agent is the same colour on both pages.
+    function agentColor(code) { let h = 0; for (const c of String(code)) h = (h * 31 + c.charCodeAt(0)) % PALETTE.length; return PALETTE[h]; }
+    function avatar(code, opts = {}) {
+      const cls = ['avatar', opts.size || '', opts.cs ? 'cs' : ''].join(' ').trim();
+      if (!code) return `<span class="${cls} none" title="${esc(opts.title || 'Nobody')}">–</span>`;
+      const c = String(code).toUpperCase();
+      return `<span class="${cls}" style="--av:${agentColor(c)}" title="${esc(opts.title || c)}">${esc(c.slice(0, 3))}</span>`;
+    }
+    const num = (n) => (n ? `#${String(n).padStart(4, '0')}` : '#—');
+    function fmtDur(ms) {
+      if (ms == null || !Number.isFinite(ms)) return '—';
+      const s = Math.max(0, Math.round(ms / 1000));
+      if (s < 60) return `${s}s`;
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m}m`;
+      const h = Math.floor(m / 60);
+      if (h < 24) return `${h}h${m % 60 ? ` ${m % 60}m` : ''}`;
+      const d = Math.floor(h / 24);
+      if (d < 30) return `${d}d${h % 24 ? ` ${h % 24}h` : ''}`;
+      const mo = Math.floor(d / 30);
+      return mo < 12 ? `${mo}mo ${d % 30}d` : `${(d / 365).toFixed(1)}y`;
+    }
+    function ago(iso) {
+      if (!iso) return '—';
+      const ms = Date.now() - new Date(iso).getTime();
+      if (ms < 45000) return 'just now';
+      return `${fmtDur(ms).split(' ')[0]} ago`;
+    }
+    const dtf = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    const tf = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+    const df = new Intl.DateTimeFormat(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    const fmtAbs = (iso) => (iso ? dtf.format(new Date(iso)) : '—');
+    function dayKey(iso) { const d = new Date(iso); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; }
+    function dayLabel(iso) {
+      const d = new Date(iso); const today = new Date(); const y = new Date(); y.setDate(today.getDate() - 1);
+      if (dayKey(d) === dayKey(today)) return 'Today';
+      if (dayKey(d) === dayKey(y)) return 'Yesterday';
+      return df.format(d);
+    }
+    function stagePill(stage) {
+      if (!stage) return '<span class="stage-pill unknown" title="Not recorded">Unknown</span>';
+      return `<span class="stage-pill" data-st="${esc(stage)}">${esc(STAGE_LABEL[stage] || stage)}</span>`;
+    }
+    function toast(text) { const t = $('toast'); t.textContent = text; t.classList.add('show'); clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove('show'), 2200); }
+
+    async function api(path) {
+      const res = await fetch(path, { credentials: 'include', headers: { Accept: 'application/json' } });
+      if (res.status === 401) { location.href = '/login'; throw new Error('Signed out'); }
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error === 'support_or_admin_required' ? 'The audit is for Support and admin.' : (body.error || `HTTP ${res.status}`));
+      return body;
     }
 
-    function formatDate(value) {
-      if (!value) return '-';
-      return new Date(value).toLocaleString();
+    // ---- Filters, kept in the URL so any view can be shared as a link ----------
+    const F = { view: 'board', q: '', agent: '', agentRole: '', actor: '', priority: '', period: '', from: '', to: '', archived: 'all', sync: false, kinds: [] };
+    let META = null;
+    let currentTicketRef = null;
+    function readUrl() {
+      const p = new URLSearchParams(location.search);
+      for (const k of ['view', 'q', 'agent', 'agentRole', 'actor', 'priority', 'period', 'from', 'to', 'archived']) if (p.get(k)) F[k] = p.get(k);
+      F.sync = p.get('sync') === '1';
+      F.kinds = (p.get('kinds') || '').split(',').filter(Boolean);
+      if (!['board', 'stream', 'agents'].includes(F.view)) F.view = 'board';
+      return p.get('ticket');
+    }
+    function writeUrl() {
+      const p = new URLSearchParams();
+      if (F.view !== 'board') p.set('view', F.view);
+      for (const k of ['q', 'agent', 'agentRole', 'actor', 'priority', 'period', 'from', 'to']) if (F[k]) p.set(k, F[k]);
+      if (F.archived !== 'all') p.set('archived', F.archived);
+      if (F.sync) p.set('sync', '1');
+      if (F.kinds.length) p.set('kinds', F.kinds.join(','));
+      if (currentTicketRef) p.set('ticket', currentTicketRef);
+      const qs = p.toString();
+      history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : ''));
+    }
+    function isoDay(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+    function range() {
+      if (F.period === 'custom') return { from: F.from, to: F.to };
+      if (!F.period) return { from: '', to: '' };
+      const d = new Date(); d.setDate(d.getDate() - (Number(F.period) - 1));
+      return { from: isoDay(d), to: '' };
+    }
+    function query(extra = {}, { kinds = true } = {}) {
+      const p = new URLSearchParams();
+      const r = range();
+      const set = (k, v) => { if (v !== '' && v != null && v !== false) p.set(k, v); };
+      set('q', F.q); set('agent', F.agent); set('agentRole', F.agent ? F.agentRole : ''); set('priority', F.priority);
+      set('from', r.from); set('to', r.to);
+      if (F.sync) p.set('includeSync', '1');
+      if (kinds && F.kinds.length) p.set('kinds', F.kinds.join(','));
+      Object.entries(extra).forEach(([k, v]) => set(k, v));
+      return p.toString();
     }
 
-    // Last loaded payload, so changing the filter or the scope re-renders
-    // without a round trip. Only Window and Include-mail-sync change what the
-    // server has to send.
-    let current = null;
-
-    function ticketLabel(t) {
-      if (t.number) return '#' + String(t.number).padStart(4, '0');
-      return 'ID ' + t.ticketId;
+    function fillFilters() {
+      const opts = (list, label) => (list.length ? `<optgroup label="${esc(label)}">${list.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</optgroup>` : '');
+      const a = META.agents;
+      const formerOnly = a.former.filter((c) => !a.support.includes(c) && !a.cs.includes(c));
+      const html = opts(a.support, 'Support') + opts(a.cs, 'CS') + opts(formerOnly, 'Former');
+      $('fAgent').insertAdjacentHTML('beforeend', html);
+      $('fActor').insertAdjacentHTML('beforeend', html);
+      $('kindChips').innerHTML = Object.keys(KIND_LABEL).filter((k) => k !== 'other').map((k) =>
+        `<button type="button" class="chip-btn" data-k="${k}" data-kind="${k}" aria-pressed="${F.kinds.includes(k)}">${esc(KIND_LABEL[k])}<span class="n" data-kind-n="${k}"></span></button>`).join('');
+      $('fQ').value = F.q; $('fAgent').value = F.agent; $('fAgentRole').value = F.agentRole; $('fActor').value = F.actor;
+      $('fPriority').value = F.priority; $('fPeriod').value = F.period; $('fFrom').value = F.from; $('fTo').value = F.to;
+      $('fArchived').value = F.archived; $('fSync').checked = F.sync;
+      syncPeriodFields();
+    }
+    function syncPeriodFields() {
+      const custom = F.period === 'custom';
+      $('fFromWrap').classList.toggle('hidden', !custom);
+      $('fToWrap').classList.toggle('hidden', !custom);
     }
 
-    function changeLine(c) {
-      const from = c.from ? '<span class="val">' + esc(c.from) + '</span>' : '<span class="muted">empty</span>';
-      const to = c.to ? '<span class="val">' + esc(c.to) + '</span>' : '<span class="muted">empty</span>';
-      // Created and Note added have no meaningful "from", so they read as a
-      // single value rather than a transition.
-      const body = (c.type === 'ticket_created' || c.type === 'comment_added')
-        ? to
-        : from + ' <span class="arrow">&rarr;</span> ' + to;
-      // actor is the agent the board says did it; account is the login whose
-      // save carried it. They differ for auto-assign and cross-tab writes, and
-      // when they do, both are worth seeing.
-      const who = [c.actor ? 'by ' + esc(c.actor) : null, c.account ? '(' + esc(c.account) + ')' : null, c.source ? esc(c.source) : null]
-        .filter(Boolean).join(' ');
-      return '<div class="change">'
-        + '<span class="pill' + (c.sync ? ' sync' : '') + '">' + esc(c.label) + '</span>'
-        + '<span>' + body + '</span>'
-        + '<span class="by">' + esc(formatDate(c.at)) + (who ? ' ' + who : '') + '</span>'
-        + '</div>';
+    let refreshTimer = null;
+    function onFilterChange() {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => { writeUrl(); refresh(); }, 220);
+    }
+    function bindFilters() {
+      $('fQ').addEventListener('input', (e) => { F.q = e.target.value.trim(); onFilterChange(); });
+      [['fAgent', 'agent'], ['fAgentRole', 'agentRole'], ['fActor', 'actor'], ['fPriority', 'priority'], ['fArchived', 'archived'], ['fFrom', 'from'], ['fTo', 'to']].forEach(([id, key]) => {
+        $(id).addEventListener('change', (e) => { F[key] = e.target.value; onFilterChange(); });
+      });
+      $('fPeriod').addEventListener('change', (e) => { F.period = e.target.value; syncPeriodFields(); onFilterChange(); });
+      $('fSync').addEventListener('change', (e) => { F.sync = e.target.checked; onFilterChange(); });
+      $('kindChips').addEventListener('click', (e) => {
+        const b = e.target.closest('[data-kind]'); if (!b) return;
+        const k = b.dataset.kind;
+        F.kinds = F.kinds.includes(k) ? F.kinds.filter((x) => x !== k) : [...F.kinds, k];
+        b.setAttribute('aria-pressed', String(F.kinds.includes(k)));
+        onFilterChange();
+      });
+      $('resetBtn').addEventListener('click', () => {
+        Object.assign(F, { q: '', agent: '', agentRole: '', actor: '', priority: '', period: '', from: '', to: '', archived: 'all', sync: false, kinds: [] });
+        document.querySelectorAll('[data-kind]').forEach((b) => b.setAttribute('aria-pressed', 'false'));
+        $('fQ').value = ''; ['fAgent', 'fAgentRole', 'fActor', 'fPriority', 'fPeriod', 'fFrom', 'fTo'].forEach((id) => { $(id).value = ''; });
+        $('fArchived').value = 'all'; $('fSync').checked = false; syncPeriodFields();
+        writeUrl(); refresh();
+      });
+      $('exportBtn').addEventListener('click', () => {
+        location.href = `/api/audit/export.csv?${query(F.actor ? { actor: F.actor } : {})}`;
+        toast('Preparing the CSV - every matching event, notes included');
+      });
+      document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => setView(t.dataset.view)));
+      $('themeBtn').addEventListener('click', () => {
+        const dark = document.documentElement.dataset.theme === 'dark';
+        if (dark) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = 'dark';
+        try { localStorage.setItem('theme', dark ? 'light' : 'dark'); } catch (_) {}
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && $('drawer').classList.contains('open')) { closeDrawer(); return; }
+        if (e.key === '/' && !/input|select|textarea/i.test(document.activeElement.tagName)) { e.preventDefault(); $('fQ').focus(); }
+      });
+      $('scrim').addEventListener('click', closeDrawer);
+    }
+    function setView(view) {
+      F.view = view;
+      document.querySelectorAll('.tab').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.view === view)));
+      $('viewBoard').classList.toggle('hidden', view !== 'board');
+      $('viewStream').classList.toggle('hidden', view !== 'stream');
+      $('viewAgents').classList.toggle('hidden', view !== 'agents');
+      writeUrl();
+      refreshView();
     }
 
-    function ticketRow(t) {
-      const first = t.changes.length ? changeLine(t.changes[0]) : '';
-      const rest = t.changes.slice(1);
-      const more = rest.length
-        ? '<details><summary>' + rest.length + ' earlier change' + (rest.length > 1 ? 's' : '') + '</summary>'
-          + rest.map(changeLine).join('') + '</details>'
-        : '';
-      return '<tr>'
-        + '<td class="tno">' + esc(ticketLabel(t)) + '</td>'
-        // The board deep-links on externalId (its own ticket id). A manual
-        // ticket without one cannot be opened that way, so it stays plain text
-        // rather than becoming a link that goes nowhere.
-        + '<td>' + (t.externalId
-          ? '<a href="/?ticket=' + encodeURIComponent(t.externalId) + '" title="Open on the board">' + esc(t.subject || '(no subject)') + '</a>'
-          : esc(t.subject || '(no subject)')) + '</td>'
-        + '<td class="status">' + esc(t.status || '-') + '</td>'
-        + '<td class="count">' + t.eventCount + '</td>'
-        + '<td class="when">' + esc(formatDate(t.lastAt)) + '</td>'
-        + '<td>' + first + more + '</td>'
-        + '</tr>';
-    }
-
-    function agentCard(agent, query) {
-      let tickets = agent.tickets;
-      if (query) {
-        const q = query.toLowerCase();
-        // An agent matched by code keeps all of its tickets - "show me what SFA
-        // did" should not also filter the ticket list by "sfa".
-        if (!agent.code.toLowerCase().includes(q)) {
-          tickets = tickets.filter(t => String(t.subject || '').toLowerCase().includes(q)
-            || String(t.number || '').includes(q)
-            || String(t.ticketId).includes(q));
-          if (!tickets.length) return '';
-        }
-      }
-      const codeClass = 'agent-code' + (agent.kind === 'cs' ? ' cs' : '') + (agent.known ? '' : ' unknown');
-      const head = '<div class="agent-head">'
-        + '<span class="' + codeClass + '">' + esc(agent.code) + '</span>'
-        + '<span class="agent-stat"><strong>' + tickets.length + '</strong> ticket' + (tickets.length === 1 ? '' : 's') + ' updated</span>'
-        + '<span class="agent-stat"><strong>' + agent.eventCount + '</strong> update' + (agent.eventCount === 1 ? '' : 's') + '</span>'
-        + '<span class="agent-stat muted">' + (agent.lastActivityAt ? 'last ' + esc(formatDate(agent.lastActivityAt)) : 'no activity in this window') + '</span>'
-        + (agent.known ? '' : '<span class="agent-stat muted">not on the current roster</span>')
-        + '</div>';
-      if (!tickets.length) {
-        return '<section class="card">' + head + '<div class="agent-quiet">No ticket updates in this window.</div></section>';
-      }
-      return '<section class="card">' + head
-        + '<div class="scroll-x"><table><thead><tr>'
-        + '<th>Ticket</th><th>Subject</th><th>Status</th><th>Updates</th><th>Last update</th><th>Most recent change</th>'
-        + '</tr></thead><tbody>'
-        + tickets.map(ticketRow).join('')
-        + '</tbody></table></div></section>';
-    }
-
-    function render() {
-      const content = document.getElementById('content');
-      if (!current) return;
-      const scope = document.getElementById('scope').value;
-      const query = document.getElementById('q').value.trim();
-      const blocks = [];
-
-      if (current.truncated) {
-        blocks.push('<div class="notice">This window hit the 5000-event cap, so the oldest activity in it is not shown. Narrow the window for a complete picture.</div>');
-      }
-
-      const sections = [];
-      if (scope !== 'cs') sections.push(['Support agents', current.support]);
-      if (scope !== 'support') sections.push(['CS agents', current.cs]);
-
-      for (const [title, agents] of sections) {
-        const cards = agents.map(a => agentCard(a, query)).filter(Boolean);
-        blocks.push('<div class="section-title">' + esc(title) + ' (' + cards.length + ')</div>');
-        blocks.push(cards.length ? cards.join('') : '<div class="card"><div class="empty">Nothing matches that filter.</div></div>');
-      }
-
-      content.innerHTML = blocks.join('');
-    }
-
-    async function loadAudit() {
-      const content = document.getElementById('content');
-      const summary = document.getElementById('summary');
-      content.innerHTML = '<div class="empty">Loading activity...</div>';
-
-      const days = document.getElementById('days').value;
-      const includeSync = document.getElementById('includeSync').checked ? '1' : '';
-
+    // ---- Stats strip -------------------------------------------------------------
+    let statsSeq = 0;
+    async function loadStats() {
+      const seq = ++statsSeq;
+      const box = $('stats');
+      box.innerHTML = '<div class="stat"><div class="loader"><span class="spinner"></span>Counting…</div></div>';
       try {
-        const res = await fetch('/api/audit/agent-activity?days=' + encodeURIComponent(days) + (includeSync ? '&includeSync=1' : ''), {
-          credentials: 'same-origin'
-        });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-          throw new Error(data.error || 'Could not load activity');
-        }
-
-        current = data;
-        summary.textContent = data.totals.events + ' update'
-          + (data.totals.events === 1 ? '' : 's')
-          + ' across ' + data.totals.tickets + ' ticket' + (data.totals.tickets === 1 ? '' : 's')
-          + ' in the last ' + data.days + ' days'
-          + (data.includeSync ? ', mail-sync changes included' : ', agent changes only')
-          + (data.scope === 'own_tickets' ? ', limited to the tickets assigned to you' : '')
-          + '. Read at ' + formatDate(data.generatedAt) + '.';
-
-        if (!data.totals.events) {
-          content.innerHTML = '<div class="card"><div class="empty">'
-            + (data.scope === 'own_tickets'
-              ? 'No updates in this window on the tickets assigned to you.'
-              : 'No ticket updates in this window.')
-            + '</div></div>';
-          return;
-        }
-
-        render();
-      } catch (error) {
-        summary.textContent = '';
-        content.innerHTML = '<div class="card"><div class="empty">' + esc(error.message || 'Could not load activity') + '</div></div>';
+        const s = await api(`/api/audit/stats?${query(F.actor ? { actor: F.actor } : {})}`);
+        if (seq !== statsSeq) return;
+        const t = s.totals;
+        const days = Object.keys(s.byDay).sort();
+        const max = Math.max(1, ...Object.values(s.byDay));
+        const spark = days.slice(-60).map((d) => `<i style="height:${Math.max(4, Math.round(s.byDay[d] / max * 100))}%" title="${esc(d)}: ${s.byDay[d]}"></i>`).join('');
+        const dwellMax = Math.max(1, ...Object.values(s.dwell).map((d) => d.avgMs));
+        const dwell = STAGES.filter((st) => s.dwell[st]).map((st) => {
+          const d = s.dwell[st];
+          return `<div class="dwell-row" data-st="${st}" title="${d.count} moves out of ${esc(STAGE_LABEL[st])} - median ${fmtDur(d.medianMs)}"><b><span class="dot"></span>${esc(STAGE_LABEL[st])}</b><span class="dwell-bar"><i style="width:${Math.max(3, Math.round(d.avgMs / dwellMax * 100))}%"></i></span><em>${fmtDur(d.avgMs)}</em></div>`;
+        }).join('') || '<div class="stat-sub">No stage moves in this period.</div>';
+        const actors = s.topActors.map((a) => `<span class="actor-pill" data-actor="${esc(a.code)}" title="Show only what ${esc(a.code)} did">${avatar(a.code, { size: 'sm' })}${esc(a.code)} <span class="n">${a.count}</span></span>`).join('') || '<span class="stat-sub">Nobody yet.</span>';
+        const span = s.from ? `since ${new Date(s.from).toLocaleDateString()}` : 'all time';
+        box.innerHTML = `
+          <div class="stat" style="--tone:var(--primary)"><div class="stat-label">Events</div><div class="stat-value">${t.items.toLocaleString()}</div><div class="stat-sub">${t.notes.toLocaleString()} notes · ${esc(span)}${s.truncated ? ' · capped' : ''}</div></div>
+          <div class="stat" style="--tone:var(--st-wus)"><div class="stat-label">Tickets touched</div><div class="stat-value">${t.tickets.toLocaleString()}</div><div class="stat-sub">${t.replies.toLocaleString()} replies</div></div>
+          <div class="stat" style="--tone:var(--st-inp)"><div class="stat-label">Stage moves</div><div class="stat-value">${t.moves.toLocaleString()}</div><div class="stat-sub">${t.reopens} re-opened · ${t.sendBacks} sent back</div></div>
+          <div class="stat" style="--tone:var(--k-cs)"><div class="stat-label">Reassignments</div><div class="stat-value">${t.reassignments.toLocaleString()}</div><div class="stat-sub">Support and CS</div></div>
+          <div class="stat wide" style="--tone:var(--accent-b)"><div class="stat-label">Activity by day</div><div class="spark">${spark || '<span class="stat-sub">No activity.</span>'}</div></div>
+          <div class="stat wide" style="--tone:var(--st-res)"><div class="stat-label">Average time in a stage before a move</div>${dwell}</div>
+          <div class="stat wide" style="--tone:var(--st-wct)"><div class="stat-label">Most active</div><div class="actor-stack">${actors}</div></div>`;
+        box.querySelectorAll('[data-actor]').forEach((el) => el.addEventListener('click', () => {
+          F.actor = F.actor === el.dataset.actor ? '' : el.dataset.actor; $('fActor').value = F.actor;
+          if (F.view !== 'stream') { setView('stream'); loadStats(); } else { writeUrl(); refresh(); }
+        }));
+        Object.keys(KIND_LABEL).forEach((k) => { const n = document.querySelector(`[data-kind-n="${k}"]`); if (n) n.textContent = s.byKind[k] ? s.byKind[k].toLocaleString() : ''; });
+      } catch (err) {
+        if (seq === statsSeq) box.innerHTML = `<div class="error">Could not load the figures: ${esc(err.message)}</div>`;
       }
     }
 
-    document.getElementById('refreshBtn').addEventListener('click', loadAudit);
-    document.getElementById('days').addEventListener('change', loadAudit);
-    document.getElementById('includeSync').addEventListener('change', loadAudit);
-    document.getElementById('scope').addEventListener('change', render);
-    document.getElementById('q').addEventListener('input', render);
-    loadAudit();
+    // ---- Board view ------------------------------------------------------------------
+    const boardCols = {};
+    function cardHtml(t) {
+      const tags = [];
+      if (t.archived) tags.push(`<span class="tag gray" title="${esc(t.archivedReason || '')}">Archived</span>`);
+      if (t.onBoard === false) tags.push('<span class="tag gray" title="No longer on the board">Off board</span>');
+      if (t.snoozedUntil) tags.push(`<span class="tag violet" title="Until ${esc(fmtAbs(t.snoozedUntil))}">Snoozed</span>`);
+      if (t.slaHoldAt) tags.push('<span class="tag amber">SLA hold</span>');
+      if (t.reopened) tags.push('<span class="tag red">Re-opened</span>');
+      if (t.duplicateOf) tags.push('<span class="tag violet">Duplicate</span>');
+      if (t.jiraTicketKey) tags.push(`<span class="tag blue">${esc(t.jiraTicketKey)}</span>`);
+      const prio = t.priority && t.priority !== 'Normal' ? `<span class="tag gray pb-${esc(t.priority)}">${esc(t.priority)}</span>` : '';
+      return `<button type="button" class="a-card p-${esc(t.priority || '')}${t.archived ? ' is-archived' : ''}" data-open="${t.id}">
+        <div class="card-top"><span class="ticket-no">${esc(num(t.number))}</span>${prio}${tags.join('')}</div>
+        <div class="card-subject">${esc(t.subject || '(No subject)')}</div>
+        <div class="card-company">${esc(t.companyName || t.senderEmail || '')}</div>
+        <div class="card-foot">
+          <span class="card-people">${avatar(t.assignedAgent, { size: 'sm', title: `Support: ${t.assignedAgent || 'nobody'}` })}${avatar(t.csAgent, { size: 'sm', cs: true, title: `CS: ${t.csAgent || 'nobody'}` })}</span>
+          <span class="metric" title="Events and notes in the log">${svg('other')}${(t.eventCount || 0) + (t.noteCount || 0)}</span>
+          <span class="metric" title="Stage moves">${svg('stage')}${t.moves || 0}</span>
+          <span class="metric" title="Reassignments">${svg('assign')}${t.reassignments || 0}</span>
+          <span class="when" title="${esc(t.lastEventLabel ? `${t.lastEventLabel} · ${fmtAbs(t.lastEventAt)}` : fmtAbs(t.updatedAt))}">${esc(ago(t.lastEventAt || t.updatedAt))}</span>
+        </div>
+      </button>`;
+    }
+    function boardQuery(extra) { return query({ archived: F.archived === 'all' ? '' : F.archived, ...extra }, { kinds: false }); }
+    let boardSeq = 0;
+    async function loadBoard() {
+      const seq = ++boardSeq;
+      const board = $('board');
+      board.innerHTML = STAGES.map((st) => `<div class="column col-${st}"><div class="col-header">${esc(STAGE_LABEL[st])}<span class="col-badge" id="badge-${st}">…</span></div><div class="col-body" id="col-${st}"><div class="loader"><span class="spinner"></span></div></div></div>`).join('');
+      try {
+        const data = await api(`/api/audit/board?${boardQuery({ limit: 30 })}`);
+        if (seq !== boardSeq) return;
+        STAGES.forEach((st) => { boardCols[st] = { total: data.columns[st].total, tickets: data.columns[st].tickets }; renderColumn(st); });
+      } catch (err) {
+        if (seq === boardSeq) board.innerHTML = `<div class="error" style="grid-column:1/-1">Could not load the board: ${esc(err.message)}</div>`;
+      }
+    }
+    function renderColumn(st) {
+      const col = boardCols[st];
+      $(`badge-${st}`).textContent = col.total.toLocaleString();
+      const body = $(`col-${st}`);
+      if (!col.tickets.length) { body.innerHTML = '<div class="empty">Nothing here</div>'; return; }
+      const left = col.total - col.tickets.length;
+      const more = left > 0 ? `<button type="button" class="more-btn" data-more="${st}">Load ${Math.min(30, left)} more · ${left.toLocaleString()} left</button>` : '';
+      body.innerHTML = col.tickets.map(cardHtml).join('') + more;
+      highlightActiveCard();
+    }
+    $('board').addEventListener('click', async (e) => {
+      const more = e.target.closest('[data-more]');
+      if (more) {
+        const st = more.dataset.more;
+        const seq = boardSeq;
+        more.disabled = true; more.innerHTML = '<span class="spinner"></span>Loading…';
+        try {
+          const data = await api(`/api/audit/board?${boardQuery({ stage: st, offset: boardCols[st].tickets.length, limit: 30 })}`);
+          if (seq !== boardSeq) return;
+          boardCols[st].tickets.push(...data.columns[st].tickets);
+          boardCols[st].total = data.columns[st].total;
+          renderColumn(st);
+        } catch (err) { toast(err.message); more.disabled = false; }
+        return;
+      }
+      const card = e.target.closest('[data-open]');
+      if (card) openTicket(card.dataset.open);
+    });
+
+    // ---- Activity stream ----------------------------------------------------------------
+    let streamState = { seq: 0, before: null, hasMore: false, lastDay: null, loading: false };
+    function fmtValue(item, value) {
+      if (/^\d{4}-\d{2}-\d{2}T/.test(String(value))) return fmtAbs(value);
+      if (item.type === 'ticket_reopen_decided') return { reopen: 'Re-opened', keep: 'Kept resolved', new: 'Opened as a new ticket', pending: 'Pending' }[value] || value;
+      if (item.type === 'ticket_archived') return String(value).replace(/_/g, ' ');
+      return value;
+    }
+    function changeHtml(item, compact) {
+      const parts = [];
+      if (item.type === 'ticket_created') parts.push(stagePill(item.toStage || 'new'));
+      else if (item.kind === 'stage') parts.push(stagePill(item.fromStage), '<span class="arrow">→</span>', stagePill(item.toStage));
+      else if (item.kind === 'assign' || item.kind === 'cs') {
+        const cs = item.kind === 'cs';
+        parts.push(`<span class="val">${avatar(item.from, { size: 'sm', cs })}${esc(item.from || 'Nobody')}</span>`, '<span class="arrow">→</span>', `<span class="val">${avatar(item.to, { size: 'sm', cs })}${esc(item.to || 'Nobody')}</span>`);
+      } else if (item.type !== 'ticket_sent_back' && (item.from != null || item.to != null)) {
+        if (item.from != null) parts.push(`<span class="val old">${esc(fmtValue(item, item.from))}</span>`, '<span class="arrow">→</span>');
+        parts.push(item.to != null ? `<span class="val">${esc(fmtValue(item, item.to))}</span>` : '<span class="val empty">cleared</span>');
+      }
+      const text = item.text || (item.meta && item.meta.note) || (item.type === 'ticket_sent_back' ? item.to : null);
+      if (compact && text) parts.push(`<span class="txt">${esc(text)}</span>`);
+      return parts.join('');
+    }
+    function whoHtml(item) {
+      if (item.actor) return `${avatar(item.actor, { size: 'sm' })}${esc(item.actor)}`;
+      if (item.source === 'customer_reply') return '<span class="avatar sm none">✉</span>The client';
+      if (item.source === 'mail' || item.type === 'customer_replied') return '<span class="avatar sm none">✉</span>Mailbox';
+      return '<span class="avatar sm none">⚙</span>System';
+    }
+    function streamRowHtml(item) {
+      const t = item.ticket || {};
+      return `<div class="s-row" data-open="${t.id || ''}" data-item="${esc(item.id)}">
+        <span class="s-time" title="${esc(fmtAbs(item.at))}">${esc(tf.format(new Date(item.at)))}</span>
+        <span class="k-icon" data-k="${esc(item.kind)}">${svg(item.kind)}</span>
+        <span class="s-ticket"><span><span class="ticket-no">${esc(num(t.number))}</span> ${t.stage ? stagePill(t.stage) : ''}</span><span class="subj" title="${esc(t.subject)}">${esc(t.subject || '')}</span></span>
+        <span class="s-what"><span class="lbl">${esc(item.label)}</span>${changeHtml(item, true)}${item.reconstructed ? '<span class="tag recon">Reconstructed</span>' : ''}</span>
+        <span class="s-who">${whoHtml(item)}</span>
+      </div>`;
+    }
+    async function loadStream(reset) {
+      if (reset) {
+        streamState = { seq: streamState.seq + 1, before: null, hasMore: false, lastDay: null, loading: false };
+        $('stream').innerHTML = '<div class="loader"><span class="spinner"></span>Loading activity…</div>';
+        $('streamMore').innerHTML = '';
+      }
+      if (streamState.loading) return;
+      streamState.loading = true;
+      const seq = streamState.seq;
+      try {
+        const extra = { limit: 80, before: streamState.before || '' };
+        if (F.actor) extra.actor = F.actor;
+        const data = await api(`/api/audit/stream?${query(extra)}`);
+        if (seq !== streamState.seq) return;
+        const box = $('stream');
+        if (reset) box.innerHTML = '';
+        let html = '';
+        data.items.forEach((item) => {
+          const dk = dayKey(item.at);
+          if (dk !== streamState.lastDay) { html += `<div class="day-head">${esc(dayLabel(item.at))}</div>`; streamState.lastDay = dk; }
+          html += streamRowHtml(item);
+        });
+        if (reset && !data.items.length) html = '<div class="loader">Nothing matches these filters.</div>';
+        box.insertAdjacentHTML('beforeend', html);
+        streamState.before = data.nextBefore;
+        streamState.hasMore = data.hasMore;
+        $('streamMore').innerHTML = data.hasMore
+          ? '<div class="loader" id="streamSentinel"><button class="btn" type="button" id="streamMoreBtn">Load older activity</button></div>'
+          : (data.items.length ? '<div class="loader">That is the very beginning of the log for these filters.</div>' : '');
+        const btn = $('streamMoreBtn');
+        if (btn) { btn.addEventListener('click', () => loadStream(false)); observer.observe($('streamSentinel')); }
+      } catch (err) {
+        if (seq === streamState.seq) $('streamMore').innerHTML = `<div class="error">Could not load activity: ${esc(err.message)}</div>`;
+      } finally {
+        if (seq === streamState.seq) streamState.loading = false;
+      }
+    }
+    // Older pages load on their own as the bottom of the list comes into view.
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((en) => { if (en.isIntersecting && streamState.hasMore && F.view === 'stream') { observer.unobserve(en.target); loadStream(false); } });
+    }, { rootMargin: '400px' });
+    $('stream').addEventListener('click', (e) => { const row = e.target.closest('[data-open]'); if (row && row.dataset.open) openTicket(row.dataset.open, row.dataset.item); });
+
+    // ---- By agent --------------------------------------------------------------------------
+    function normStatus(s) { const v = String(s || '').toLowerCase(); return v === 'in progress' ? 'inp' : v === 'waiting on us' ? 'wus' : v === 'due for test' ? 'dft' : v === 'waiting on contact' ? 'wct' : (v === 'resolved' || v === 'closed') ? 'res' : 'new'; }
+    async function loadAgents() {
+      const box = $('agents');
+      box.innerHTML = '<div class="loader"><span class="spinner"></span>Grouping activity by agent…</div>';
+      const days = F.period && F.period !== 'custom' ? F.period : '30';
+      try {
+        const data = await api(`/api/audit/agent-activity?days=${encodeURIComponent(days)}${F.sync ? '&includeSync=1' : ''}`);
+        const q = F.q.toLowerCase();
+        const section = (title, list, cs) => {
+          const rows = list.filter((a) => (!F.agent || a.code === F.agent)
+            && (!q || a.code.toLowerCase().includes(q) || a.tickets.some((t) => String(t.subject).toLowerCase().includes(q) || String(t.number || '') === q.replace('#', ''))));
+          if (!rows.length) return '';
+          return `<div class="section-title">${esc(title)}</div><div class="agents">${rows.map((a) => {
+            const none = a.code.startsWith('(');
+            return `<div class="agent-card" style="--av:${none ? 'var(--muted-light)' : agentColor(a.code)}">
+              <div class="agent-head">${none ? avatar(null, { size: 'lg' }) : avatar(a.code, { size: 'lg', cs })}<div><b>${esc(a.code)}</b><div class="sub">${a.lastActivityAt ? `Last activity ${esc(ago(a.lastActivityAt))}` : 'Nothing in this period'}${a.known || none ? '' : ' · not on the roster'}</div></div>
+              <div class="big">${a.eventCount}<small>${a.ticketCount} tickets</small></div></div>
+              <div class="agent-list">${a.tickets.slice(0, 60).map((t) => `<div class="agent-t" data-open="${t.ticketId}">${stagePill(normStatus(t.status))}<span class="ticket-no">${esc(num(t.number))}</span><span class="subj" title="${esc(t.subject)}">${esc(t.subject)}</span><span class="n">${t.eventCount}</span></div>`).join('')}</div>
+            </div>`;
+          }).join('')}</div>`;
+        };
+        box.innerHTML = `<div class="notice">Grouped by who holds each ticket, over the last ${esc(days)} days${data.truncated ? ' (capped - pick a shorter period for the full picture)' : ''}. Click a ticket for its full history.</div>`
+          + section('Support agents', data.support, false) + section('CS owners', data.cs, true);
+      } catch (err) { box.innerHTML = `<div class="error">Could not load: ${esc(err.message)}</div>`; }
+    }
+    $('agents').addEventListener('click', (e) => { const row = e.target.closest('[data-open]'); if (row) openTicket(row.dataset.open); });
+
+    // ---- Ticket drawer: the whole life of one ticket ------------------------------------------
+    let TL = null;
+    const tlFilter = { kinds: new Set(), recon: true, q: '' };
+    function highlightActiveCard() {
+      document.querySelectorAll('.a-card.active').forEach((c) => c.classList.remove('active'));
+      if (TL) document.querySelectorAll(`.a-card[data-open="${TL.ticket.id}"]`).forEach((c) => c.classList.add('active'));
+    }
+    function closeDrawer() {
+      $('drawer').classList.remove('open'); $('scrim').classList.remove('open');
+      currentTicketRef = null; TL = null; writeUrl(); highlightActiveCard();
+    }
+    async function openTicket(ref, focusItem) {
+      if (!ref) return;
+      currentTicketRef = String(ref);
+      writeUrl();
+      $('drawer').classList.add('open'); $('scrim').classList.add('open');
+      $('dHead').innerHTML = '<div class="loader"><span class="spinner"></span>Loading history…</div>';
+      $('dBody').innerHTML = '';
+      try {
+        const data = await api(`/api/audit/timeline/${encodeURIComponent(ref)}`);
+        if (currentTicketRef !== String(ref)) return;
+        TL = data;
+        tlFilter.kinds.clear(); tlFilter.q = ''; tlFilter.recon = true;
+        renderDrawer();
+        highlightActiveCard();
+        $('dBody').scrollTop = 0;
+        if (focusItem) {
+          const el = document.querySelector(`[data-tl="${CSS.escape(focusItem)}"]`);
+          if (el) { el.classList.add('focus'); el.scrollIntoView({ block: 'center' }); }
+        }
+      } catch (err) {
+        $('dHead').innerHTML = `<div class="d-actions"><span style="flex:1"></span><button class="btn" type="button" id="dClose">Close</button></div><div class="error" style="margin-top:12px">${esc(err.message === 'ticket_not_found' ? 'That ticket does not exist, or it is not one you can see.' : err.message)}</div>`;
+        $('dClose').addEventListener('click', closeDrawer);
+      }
+    }
+    function renderDrawer() {
+      const t = TL.ticket; const s = TL.stats; const b = TL.board;
+      $('drawer').dataset.st = t.stage;
+      const badges = [];
+      if (t.archived) badges.push(`<span class="tag gray">Archived${t.archivedReason ? ` · ${esc(t.archivedReason.replace(/_/g, ' '))}` : ''}</span>`);
+      if (t.onBoard === false) badges.push('<span class="tag gray">No longer on the board</span>');
+      if (t.snoozedUntil) badges.push(`<span class="tag violet">Snoozed until ${esc(fmtAbs(t.snoozedUntil))}</span>`);
+      if (t.slaHoldAt) badges.push(`<span class="tag amber">SLA on hold since ${esc(fmtAbs(t.slaHoldAt))}</span>`);
+      if (t.reopened) badges.push('<span class="tag red">Re-opened by the client</span>');
+      if (t.jiraTicketKey) badges.push(`<span class="tag blue">Jira ${esc(t.jiraTicketKey)}</span>`);
+      if (t.hubspotTicketId) badges.push(`<span class="tag gray">HubSpot ${esc(t.hubspotTicketId)}</span>`);
+      if (b.velmaBug) badges.push(`<span class="tag amber">Velma bug ${esc(b.velmaBug.row || b.velmaBug.id || '')}${b.velmaBug.status ? ` · ${esc(b.velmaBug.status)}` : ''}</span>`);
+      if (TL.duplicateOf) badges.push(`<button type="button" class="tag violet" style="cursor:pointer" data-open-ticket="${TL.duplicateOf.id}">Duplicate of ${esc(num(TL.duplicateOf.displayNumber))}</button>`);
+      if (t.category) badges.push(`<span class="tag gray">${esc(t.category)}</span>`);
+      if (s.reconstructed) badges.push(`<span class="tag recon" title="${esc(RECON_TIP)}">${s.reconstructed} reconstructed</span>`);
+      const contributors = s.actors.filter((a) => a !== t.assignedAgent && a !== t.csAgent).slice(0, 8);
+      $('dHead').innerHTML = `
+        <div class="d-actions">
+          <span class="ticket-no">${esc(num(t.number))}</span>${stagePill(t.stage)}
+          ${t.priority ? `<span class="tag gray pb-${esc(t.priority)}">${esc(t.priority)}</span>` : ''}
+          <span style="flex:1"></span>
+          ${t.externalId && t.onBoard !== false ? `<a class="btn" href="/?ticket=${encodeURIComponent(t.externalId)}" title="Open the card on the board">Open on board</a>` : ''}
+          <button class="btn" type="button" id="dCopy" title="Copy a link to this history">Copy link</button>
+          <button class="btn" type="button" id="dCsv" title="This ticket's timeline as CSV">CSV</button>
+          <button class="btn icon" type="button" id="dClose" aria-label="Close">✕</button>
+        </div>
+        <div class="d-title" id="dTitle">${esc(t.subject || '(No subject)')}</div>
+        <div class="d-sub">${esc([t.companyName, t.senderName, t.senderEmail].filter(Boolean).join(' · '))}${t.createdAt ? ` · arrived ${esc(fmtAbs(t.createdAt))}` : ''}</div>
+        <div class="d-people">
+          <span class="d-person">${avatar(t.assignedAgent, { size: 'lg' })}<span><small>Support</small><b>${esc(t.assignedAgent || 'Nobody')}</b></span></span>
+          <span class="d-person">${avatar(t.csAgent, { size: 'lg', cs: true })}<span><small>CS owner</small><b>${esc(t.csAgent || 'Nobody')}</b></span></span>
+          ${contributors.length ? `<span class="d-person"><span style="display:flex">${contributors.map((c) => avatar(c)).join('')}</span><span><small>Also worked on it</small><b>${esc(contributors.join(', '))}</b></span></span>` : ''}
+        </div>`;
+      $('dClose').addEventListener('click', closeDrawer);
+      $('dCopy').addEventListener('click', () => {
+        const url = `${location.origin}/audit/tickets?ticket=${encodeURIComponent(t.id)}`;
+        (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject(new Error('no clipboard'))).then(() => toast('Link copied'), () => window.prompt('Link to this history', url));
+      });
+      $('dCsv').addEventListener('click', exportTimelineCsv);
+
+      // Journey bar: every stage the ticket sat in, as wide as the time it sat there.
+      const segs = TL.segments;
+      const total = segs.reduce((sum, x) => sum + Math.max(x.durationMs, 1), 0) || 1;
+      const bar = segs.map((x) => `<i data-st="${esc(x.stage)}" class="${x.reconstructed ? 'recon' : ''}${x.ongoing && x.stage !== 'res' ? ' ongoing' : ''}" style="flex:${Math.max(x.durationMs / total, 0.012)}" title="${esc(STAGE_LABEL[x.stage] || x.stage)} · ${fmtDur(x.durationMs)}${x.ongoing ? ' so far' : ''}${x.by ? ` · moved by ${esc(x.by)}` : ''}"></i>`).join('');
+      const legend = STAGES.filter((st) => s.stageTotals[st] != null).map((st) => `<span data-st="${st}"><span class="dot"></span>${esc(STAGE_LABEL[st])} <b>${st === 'res' && t.stage === 'res' ? 'now' : fmtDur(s.stageTotals[st])}</b></span>`).join('');
+      const kpi = (label, value, cls = '', tip = '') => `<div class="kpi ${cls}" title="${esc(tip)}"><small>${esc(label)}</small><b>${esc(value)}</b></div>`;
+      const kindCounts = {};
+      TL.items.forEach((i) => { kindCounts[i.kind] = (kindCounts[i.kind] || 0) + 1; });
+      $('dBody').innerHTML = `
+        ${badges.length ? `<div class="badges">${badges.join('')}</div>` : ''}
+        <div class="journey">
+          <div class="stat-label">Journey · ${segs.length} stage${segs.length === 1 ? '' : 's'} · ${s.moves} move${s.moves === 1 ? '' : 's'}</div>
+          <div class="journey-bar">${bar}</div>
+          <div class="journey-legend">${legend}</div>
+        </div>
+        <div class="kpis">
+          ${kpi('Age', fmtDur(s.ageMs), '', 'Since the email arrived')}
+          ${kpi('First move', s.firstMoveMs == null ? '—' : fmtDur(s.firstMoveMs), s.firstMoveMs != null && s.firstMoveMs < 4 * 3600e3 ? 'good' : '', 'From arrival to leaving New')}
+          ${kpi('First reply', s.firstReplyMs == null ? '—' : fmtDur(s.firstReplyMs), s.firstReplyMs != null && s.firstReplyMs < 24 * 3600e3 ? 'good' : '', 'From arrival to the first reply sent from the board')}
+          ${kpi('Resolved in', s.resolutionMs == null ? '—' : fmtDur(s.resolutionMs), s.resolutionMs != null ? 'good' : '', 'From arrival to Resolved')}
+          ${kpi('On hold', s.holdMs ? fmtDur(s.holdMs) : '—', s.holdMs ? 'warn' : '', 'Time the SLA clock was frozen')}
+          ${kpi('Reassigned', String(s.reassignments), '', 'Support and CS changes')}
+          ${kpi('Notes', String(s.notes))}
+          ${kpi('Replies', `${s.repliesSent} out · ${s.clientReplies} in`, '', 'Sent from the board · new messages in the thread')}
+        </div>
+        <div class="tl-tools" id="tlTools">
+          ${Object.keys(kindCounts).sort((x, y) => kindCounts[y] - kindCounts[x]).map((k) => `<button type="button" class="chip-btn" data-k="${esc(k)}" data-tlkind="${esc(k)}" aria-pressed="false">${esc(KIND_LABEL[k] || k)} <span class="n">${kindCounts[k]}</span></button>`).join('')}
+          ${s.reconstructed ? `<label class="toggle" title="${esc(RECON_TIP)}"><input type="checkbox" id="tlRecon" checked> Reconstructed</label>` : ''}
+          <input class="input" id="tlQ" type="search" placeholder="Find in this history…">
+        </div>
+        <div class="timeline" id="timeline"></div>`;
+      $('dBody').querySelectorAll('[data-open-ticket]').forEach((el) => el.addEventListener('click', () => openTicket(el.dataset.openTicket)));
+      $('tlTools').addEventListener('click', (e) => {
+        const c = e.target.closest('[data-tlkind]'); if (!c) return;
+        const k = c.dataset.tlkind;
+        if (tlFilter.kinds.has(k)) tlFilter.kinds.delete(k); else tlFilter.kinds.add(k);
+        c.setAttribute('aria-pressed', String(tlFilter.kinds.has(k)));
+        renderTimeline();
+      });
+      const rc = $('tlRecon'); if (rc) rc.addEventListener('change', (e) => { tlFilter.recon = e.target.checked; renderTimeline(); });
+      $('tlQ').addEventListener('input', (e) => { tlFilter.q = e.target.value.trim().toLowerCase(); renderTimeline(); });
+      renderTimeline();
+    }
+    function renderTimeline() {
+      const items = TL.items.filter((i) => (!tlFilter.kinds.size || tlFilter.kinds.has(i.kind)) && (tlFilter.recon || !i.reconstructed)
+        && (!tlFilter.q || [i.label, i.text, i.from, i.to, i.actor, i.account, STAGE_LABEL[i.fromStage], STAGE_LABEL[i.toStage]].some((v) => v && String(v).toLowerCase().includes(tlFilter.q))));
+      let lastDay = null;
+      // Newest first: the question is usually "what happened last".
+      const html = items.slice().reverse().map((i) => {
+        let head = '';
+        const when = i.happenedAt && Math.abs(new Date(i.happenedAt) - new Date(i.at)) > 60000 ? i.happenedAt : i.at;
+        const dk = dayKey(when);
+        if (dk !== lastDay) { head = `<div class="tl-day">${esc(dayLabel(when))}</div>`; lastDay = dk; }
+        const meta = [];
+        if (i.actor || !i.reconstructed) meta.push(`<span class="who">${whoHtml(i)}</span>`);
+        if (i.account && i.actor && String(i.account).toUpperCase() !== i.actor) meta.push(`<span title="The login whose save carried this change">saved by ${esc(i.account)}</span>`);
+        if (i.source && !['board', 'reconstructed', 'mail', 'customer_reply'].includes(i.source)) meta.push(`<span class="tag gray">${esc(String(i.source).replace(/[/_]/g, ' '))}</span>`);
+        if (i.meta && i.meta.mode) meta.push(`<span class="tag gray">${esc(i.meta.mode)}</span>`);
+        if (i.dwellMs != null && i.fromStage) meta.push(`<span class="dwell" data-st="${esc(i.fromStage)}"><span class="dot"></span>after ${esc(fmtDur(i.dwellMs))} in ${esc(STAGE_LABEL[i.fromStage] || i.fromStage)}</span>`);
+        if (i.edited) meta.push('<span class="tag gray">edited</span>');
+        if (i.tags && i.tags.length) meta.push(`<span>tagged ${i.tags.map(esc).join(', ')}</span>`);
+        if (i.meta && i.meta.recipients) meta.push(`<span>to ${esc(i.meta.recipients.join(', '))}</span>`);
+        if (i.meta && i.meta.to && i.type === 'ticket_sent_back') meta.push(`<span>back to ${esc(i.meta.to)}</span>`);
+        if (i.meta && i.meta.from && /reopen|received/.test(i.type)) meta.push(`<span>from ${esc(i.meta.from)}</span>`);
+        if (i.meta && i.meta.channel) meta.push(`<span class="tag gray">${esc(i.meta.channel)}</span>`);
+        const text = i.text || (i.meta && i.meta.note) || (i.type === 'ticket_sent_back' ? i.to : null);
+        const change = changeHtml(i, false);
+        return `${head}<div class="tl-item${i.reconstructed ? ' recon' : ''}" data-k="${esc(i.kind)}" data-tl="${esc(i.id)}">
+          <span class="k-icon" data-k="${esc(i.kind)}">${svg(i.kind)}</span>
+          <div class="tl-card">
+            <div class="tl-head"><span class="tl-label">${esc(i.label)}</span>${i.reconstructed ? `<span class="tag recon" title="${esc(RECON_TIP)}">Reconstructed</span>` : ''}<span class="tl-when" title="${esc(fmtAbs(when))}">${esc(tf.format(new Date(when)))} · ${esc(ago(when))}</span></div>
+            ${change ? `<div class="tl-change">${change}</div>` : ''}
+            ${text && i.kind !== 'sync' ? `<div class="tl-text">${esc(text)}</div>` : ''}
+            ${meta.length ? `<div class="tl-meta">${meta.join('')}</div>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+      $('timeline').innerHTML = html || '<div class="loader">Nothing matches.</div>';
+    }
+    function exportTimelineCsv() {
+      const t = TL.ticket;
+      const cell = (v) => { let s = v == null ? '' : String(v); if (/^[=+\-@]/.test(s)) s = `'${s}`; return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+      const rows = [['When', 'Event', 'Kind', 'From', 'To', 'Text', 'By', 'Account', 'Source', 'Reconstructed', 'Time in previous stage']];
+      TL.items.forEach((i) => rows.push([i.happenedAt || i.at, i.label, i.kind, i.fromStage ? STAGE_LABEL[i.fromStage] : i.from, i.toStage ? STAGE_LABEL[i.toStage] : i.to, i.text || (i.meta && i.meta.note) || '', i.actor || '', i.account || '', i.source || '', i.reconstructed ? 'yes' : '', i.dwellMs != null ? fmtDur(i.dwellMs) : '']));
+      const blob = new Blob([`﻿${rows.map((r) => r.map(cell).join(',')).join('\r\n')}`], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `ticket-${t.number || t.id}-history.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }
+
+    // ---- Wiring ---------------------------------------------------------------------------------
+    function refreshView() {
+      if (F.view === 'board') loadBoard();
+      else if (F.view === 'stream') loadStream(true);
+      else loadAgents();
+    }
+    function refresh() { loadStats(); refreshView(); }
+
+    async function init() {
+      const ticket = readUrl();
+      bindFilters();
+      try {
+        META = await api('/api/audit/meta');
+      } catch (err) {
+        document.querySelector('main').innerHTML = `<div class="error">${esc(err.message)}</div>`;
+        return;
+      }
+      fillFilters();
+      const tot = META.totals;
+      $('brandSub').textContent = `${tot.tickets.toLocaleString()} tickets · ${(tot.events + tot.notes).toLocaleString()} recorded events`;
+      if (META.scope === 'own_tickets') {
+        $('scopeNote').classList.remove('hidden');
+        $('scopeNote').textContent = `You are seeing the tickets you hold (${META.me.code}). Admins see the whole board.`;
+      }
+      setView(F.view);
+      loadStats();
+      if (ticket) openTicket(ticket);
+    }
+    init();
+  })();
   </script>
 </body>
 </html>

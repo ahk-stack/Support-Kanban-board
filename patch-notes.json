@@ -1,6 +1,17 @@
 {
   "patches": [
     {
+      "date": "2026-11-19",
+      "title": "Jira Tracker",
+      "notes": [
+        { "type": "new", "text": "A new Jira Tickets page lists the Jira tickets the support team raised, with a coloured badge showing who opened each one, its status, age and Jira SLA. Support agents see the tickets they opened; admins see everyone's." },
+        { "type": "new", "text": "The KPI page has a \"Jira tickets raised by Support\" section: tickets opened and resolved in the period, the open queue, resolve time and Jira SLA breaches, per person." },
+        { "type": "improved", "text": "Jira tickets raised from the shared Helpdesk account without picking who opened them still show up on the Jira Tickets page, marked Unattributed, so none slip through." },
+        { "type": "new", "text": "Jira Tickets has status buttons (To-Do, Planned, Pending, ...) and a \"created\" period filter, with counts that follow your other filters." },
+        { "type": "new", "text": "Each open Jira ticket shows the dev ticket it is linked to, with its status and the sprint it is planned in, or a warning when it is not planned in any sprint." }
+      ]
+    },
+    {
       "date": "2026-11-17",
       "title": "Jira Catch-Up",
       "notes": [
