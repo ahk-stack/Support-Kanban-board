@@ -8696,6 +8696,28 @@ body > header :focus-visible,
   #email-modal .modal.notes-panel { animation: none !important; }
 }
 </style>
+<style id="mailview-style">
+/* Received Mail: who has the ticket, the "No agent assigned" tile, and the
+   paging button for long windows. */
+.mv-side-top { display: flex; align-items: center; gap: 6px; }
+.mv-agent {
+  --mv-agent-color: var(--primary, #4f46e5);
+  font-size: 11.5px; font-weight: 800; letter-spacing: .04em; white-space: nowrap;
+  border-radius: 999px; padding: 2px 8px; color: #fff;
+  background: var(--mv-agent-color);
+}
+.mv-agent-none {
+  background: transparent; color: var(--amber-800, #92400e);
+  border: 1px dashed var(--amber-300, #fcd34d); font-weight: 700; text-transform: uppercase;
+}
+.mv-tile-noagent .mv-tile-n { color: var(--amber-700, #b45309); }
+.mv-more { display: block; margin: 12px auto 0; }
+.mv-loading-note { font-size: 13px; margin-top: 6px; color: var(--muted-light, #94a3b8); }
+#mv-refresh:disabled { opacity: .55; cursor: progress; }
+@media (max-width: 720px) {
+  .mv-side-top { flex-wrap: wrap; }
+}
+</style>
 </head>
 <body>
 <header>
@@ -8976,9 +8998,14 @@ body > header :focus-visible,
       <input class="filter-sel mv-search" id="mv-search" type="text" placeholder="Search sender or subject…" autocomplete="off">
       <select class="filter-sel" id="mv-window">
         <option value="24">Last 24 hours</option>
-        <option value="96" selected>Last 4 days</option>
+        <option value="96">Last 4 days</option>
         <option value="336">Last 14 days</option>
         <option value="720">Last 30 days</option>
+        <option value="2160" selected>Last 3 months</option>
+      </select>
+      <select class="filter-sel" id="mv-agent" title="Support agent the ticket is assigned to">
+        <option value="">All agents</option>
+        <option value="__none__">No agent assigned</option>
       </select>
       <select class="filter-sel" id="mv-filter">
         <option value="all">Everything</option>
@@ -9863,13 +9890,23 @@ const FORMER_SUPPORT_AGENTS=new Set();
 const FORMER_CS_AGENTS=new Set();
 const CLIENT_TAG='CLIENT';
 const EMAIL_MAP=Object.fromEntries(ALL_AGENTS.map(t=>[t,t.toLowerCase()+'@quinta.im']));
-function isKnownSupportAgent(code){return SUPPORT_AGENTS.includes(code)||FORMER_SUPPORT_AGENTS.has(code);}
-function isKnownCSAgent(code){return CS_AGENTS.includes(code)||FORMER_CS_AGENTS.has(code);}
+/* Service accounts (the Hidden team in Manage Users, e.g. the n8n digest token
+   user). They keep their role and token, but are never shown on the board,
+   offered in a picker, tagged or given a ticket. The server sends their codes
+   with the roster; the name match catches the digest account even before that
+   answer arrives, or while its team still says Support. */
+const HIDDEN_AGENT_CODES=new Set();
+const SERVICE_ACCOUNT_NAME_RE=/n8n|digest/i;
+function isHiddenAgentCode(code){const c=String(code||'').trim().toUpperCase();return !!c&&(HIDDEN_AGENT_CODES.has(c)||SERVICE_ACCOUNT_NAME_RE.test(c));}
+function isKnownSupportAgent(code){return !isHiddenAgentCode(code)&&(SUPPORT_AGENTS.includes(code)||FORMER_SUPPORT_AGENTS.has(code));}
+function isKnownCSAgent(code){return !isHiddenAgentCode(code)&&(CS_AGENTS.includes(code)||FORMER_CS_AGENTS.has(code));}
 function isKnownAgentCode(code){return isKnownSupportAgent(code)||isKnownCSAgent(code);}
 // Returns whether the roster changed.
 function applyAgentRoster(roster){
   if(!roster||!Array.isArray(roster.support)||!Array.isArray(roster.cs))return false;
-  const clean=list=>[...new Set(list.map(c=>String(c||'').trim().toUpperCase()).filter(Boolean))];
+  HIDDEN_AGENT_CODES.clear();
+  (Array.isArray(roster.hidden)?roster.hidden:[]).forEach(c=>{const v=String(c||'').trim().toUpperCase();if(v)HIDDEN_AGENT_CODES.add(v);});
+  const clean=list=>[...new Set(list.map(c=>String(c||'').trim().toUpperCase()).filter(c=>c&&!isHiddenAgentCode(c)))];
   const support=clean(roster.support),cs=clean(roster.cs);
   // An empty roster is a server that could not read its users, not a team
   // with nobody on it - keep what the board has.
@@ -16494,7 +16531,7 @@ function renderKpiViewLocal(){
   if (canViewAllTickets) {
     const teamAgents=kpiTeamFilter==='cs'?CS_AGENTS:(kpiTeamFilter==='support'?SUPPORT_AGENTS:ALL_AGENTS);
     const uniqAgents=new Set(teamAgents);
-    allTickets.forEach(t=>{const {assignee,csOwner}=ticketFilterAgentValues(t);const ag=kpiTeamFilter==='cs'?csOwner:assignee;if(!ag)return;if(kpiTeamFilter==='cs'&&!isKnownCSAgent(ag))return;if(kpiTeamFilter==='support'&&!isKnownSupportAgent(ag))return;uniqAgents.add(ag);});
+    allTickets.forEach(t=>{const {assignee,csOwner}=ticketFilterAgentValues(t);const ag=kpiTeamFilter==='cs'?csOwner:assignee;if(!ag||isHiddenAgentCode(ag))return;if(kpiTeamFilter==='cs'&&!isKnownCSAgent(ag))return;if(kpiTeamFilter==='support'&&!isKnownSupportAgent(ag))return;uniqAgents.add(ag);});
     const options=['<option value="all">All</option>',...Array.from(uniqAgents).sort((a,b)=>a.localeCompare(b)).map(a=>`<option value="${esc(a)}">${esc(a)}</option>`)];
     agentFilterEl.innerHTML=options.join('');
     if(kpiAgentFilter!=='all'&&!uniqAgents.has(kpiAgentFilter))kpiAgentFilter='all';
@@ -21587,13 +21624,69 @@ async function emSendReply(){
 let mailViewState = { state: 'idle', rows: [], at: 0, message: '' };
 let mailViewQuery = '';
 let mailViewFilter = 'all';
-let mailViewHours = 96;
+// Three months by default: the view is for answering "did we get that email?"
+// and a client chasing an old thread is exactly when it gets asked. The
+// server pages through the whole window (allPages), not just one Graph page.
+let mailViewHours = 2160;
+// '' = every agent, MAIL_VIEW_NO_AGENT = tickets nobody is assigned to,
+// otherwise a support agent's code.
+const MAIL_VIEW_NO_AGENT = '__none__';
+let mailViewAgent = '';
+// The verdicts for the rows in mailViewState, worked out once per fetch (or
+// per visit) rather than on every keystroke in the search box: with three
+// months of mail that is thousands of thread lookups against the board.
+let mailViewJudged = null;
+// Rows drawn at once. Three months can be thousands of messages and drawing
+// them all makes typing in the search box lag; "Show more" draws the rest.
+const MAIL_VIEW_PAGE = 300;
+let mailViewShowCount = MAIL_VIEW_PAGE;
+
+// The support agent whose ticket this message landed on, or '' when the
+// ticket has nobody (or there is no ticket at all).
+function mailViewAssignee(verdict) {
+  const id = verdict?.ticket?.id;
+  return id ? String(ticketAssignee[id] || '').trim().toUpperCase() : '';
+}
+
+// The agent filter. "No agent assigned" means a ticket nobody has picked up:
+// a message that never became a ticket (filtered out, or unaccounted for) has
+// nothing to assign and is left out, and so is spam, which nobody is meant to
+// work. Picking an agent shows the messages on that agent's tickets, merged
+// replies included, since those are theirs to answer too.
+function mailViewAgentMatches(verdict) {
+  if (!mailViewAgent) return true;
+  if (mailViewAgent === MAIL_VIEW_NO_AGENT) {
+    return !!verdict.ticket && verdict.kind !== 'spam' && !mailViewAssignee(verdict);
+  }
+  return mailViewAssignee(verdict) === mailViewAgent;
+}
+
+// The live support roster, plus anyone holding a ticket in this window who
+// has since left it, so their tickets can still be found.
+function syncMailViewAgentOptions(judged) {
+  const sel = document.getElementById('mv-agent');
+  if (!sel) return;
+  const codes = SUPPORT_AGENTS.filter(code => !isHiddenAgentCode(code));
+  (judged || []).forEach(j => {
+    const code = mailViewAssignee(j.verdict);
+    if (code && !codes.includes(code) && !isHiddenAgentCode(code)) codes.push(code);
+  });
+  const key = codes.join(',');
+  if (sel.dataset.codes === key) return;
+  sel.dataset.codes = key;
+  const name = code => supportAgentDisplayNames?.[code] ? `${code} · ${supportAgentDisplayNames[code]}` : code;
+  sel.innerHTML = '<option value="">All agents</option><option value="' + MAIL_VIEW_NO_AGENT + '">No agent assigned</option>'
+    + codes.map(code => `<option value="${esc(code)}">${esc(name(code))}</option>`).join('');
+  sel.value = mailViewAgent;
+  // The chosen agent left the roster and has nothing in this window.
+  if (sel.value !== mailViewAgent) { mailViewAgent = ''; sel.value = ''; }
+}
 
 /* Why a message is not a card, in the same order the ingest decides it. This
    mirrors the filter in ingestEmails - if that changes, this has to change
    with it, and saying nothing would be better than saying something stale. */
-function mailViewClassify(msg) {
-  const onBoard = allTickets.find(t => t && t.id === msg.id);
+function mailViewClassify(msg, index) {
+  const onBoard = index ? index.byId.get(msg.id) : allTickets.find(t => t && t.id === msg.id);
   if (onBoard) {
     const stage = String(ticketState[msg.id] || 'new');
     const cat = String(ticketCategory[msg.id] || '');
@@ -21615,7 +21708,11 @@ function mailViewClassify(msg) {
   // A reply lands on the ticket that owns its thread rather than making a new
   // one, so the message id is nowhere on the board even though the mail was
   // read and used.
-  const owner = findExistingTicketForEmail(msg);
+  // The conversation index is the same first-ticket-wins match the strict
+  // pass of findExistingTicketForEmail makes, without walking every ticket for
+  // every message - which three months of mail made slow.
+  const conv = String(msg.conversationId || '').trim();
+  const owner = (index && conv && index.byConv.get(conv)) || findExistingTicketForEmail(msg);
   if (owner) {
     return {
       kind: 'merged',
@@ -21646,24 +21743,34 @@ function mailViewAutoReason(msg) {
   return 'Matched an automatic-mail rule (newsletter, meeting invite, or similar).';
 }
 
+// A three-month read takes a while; a second Fetch (or a window change) made
+// meanwhile must win, not be overwritten by the slower read finishing last.
+let mailViewLoadSeq = 0;
 async function loadMailView() {
+  const seq = ++mailViewLoadSeq;
   mailViewState = { ...mailViewState, state: 'loading' };
   renderMailView();
   try {
     // The same call the poller makes, against the same mailbox, so this view
     // cannot disagree with the ingest about what is there.
+    // allPages: the whole window, not one page of MAIL_FETCH_LIMIT - the
+    // server follows Graph's paging up to its own cap and says if it hit it.
     const res = await window.cowork.callMcpTool(SEARCH_TOOL, {
-      limit: MAIL_FETCH_LIMIT,
+      allPages: true,
       mailboxOwnerEmail: SUPPORT_BOX,
       afterDateTime: isoHoursAgo(mailViewHours)
     });
+    if (seq !== mailViewLoadSeq) return;
     if (res?.isError) throw new Error(res.error || 'mailbox_unavailable');
     const rows = Array.isArray(res?.structuredContent) ? res.structuredContent : [];
     rows.sort((a, b) => new Date(b?.receivedDateTime || 0) - new Date(a?.receivedDateTime || 0));
-    mailViewState = { state: 'done', rows, at: Date.now(), message: '' };
+    mailViewState = { state: 'done', rows, at: Date.now(), message: '', truncated: !!res?.truncated };
   } catch (error) {
+    if (seq !== mailViewLoadSeq) return;
     mailViewState = { state: 'error', rows: [], at: Date.now(), message: String(error?.message || error) };
   }
+  mailViewJudged = null;
+  mailViewShowCount = MAIL_VIEW_PAGE;
   renderMailView();
 }
 
@@ -21672,6 +21779,7 @@ function mailViewMatches(row, verdict) {
     // Spam sits under "on the board", since that is where the mail went.
     if (!(mailViewFilter === 'ticket' && verdict.kind === 'spam')) return false;
   }
+  if (!mailViewAgentMatches(verdict)) return false;
   const q = mailViewQuery.trim().toLowerCase();
   if (!q) return true;
   return [row.subject, row.sender, row.summary].some(v => String(v || '').toLowerCase().includes(q));
@@ -21687,12 +21795,16 @@ function renderMailView() {
   if (sub) {
     sub.textContent = s.at
       ? `${SUPPORT_BOX} · ${s.rows.length} message${s.rows.length === 1 ? '' : 's'} fetched · read ${fmtDate(new Date(s.at).toISOString())}`
+        + (s.truncated ? ' · only the newest shown, pick a shorter window for the rest' : '')
       : `${SUPPORT_BOX} · press Fetch to read the mailbox`;
   }
+  const refreshBtn = document.getElementById('mv-refresh');
+  if (refreshBtn) refreshBtn.disabled = s.state === 'loading';
 
   if (s.state === 'loading') {
     if (tiles) tiles.innerHTML = '';
-    host.innerHTML = '<div class="mv-loading"><span class="spinner"></span> Reading the mailbox…</div>';
+    const span = mailViewHours >= 2160 ? 'three months of' : mailViewHours >= 720 ? 'a month of' : '';
+    host.innerHTML = `<div class="mv-loading"><span class="spinner"></span> Reading ${span ? span + ' ' : ''}the mailbox…${mailViewHours >= 720 ? '<div class="mv-loading-note">A long window takes a little while.</div>' : ''}</div>`;
     return;
   }
   if (s.state === 'error') {
@@ -21706,30 +21818,56 @@ function renderMailView() {
     return;
   }
 
-  const judged = s.rows.map(row => ({ row, verdict: mailViewClassify(row) }));
-  const count = kind => judged.filter(j => j.verdict.kind === kind).length;
+  if (!mailViewJudged) {
+    const index = { byId: new Map(), byConv: new Map() };
+    allTickets.forEach(t => {
+      if (!t || !t.id) return;
+      if (!index.byId.has(t.id)) index.byId.set(t.id, t);
+      const conv = String(t.email?.conversationId || '').trim();
+      if (conv && !index.byConv.has(conv)) index.byConv.set(conv, t);
+    });
+    mailViewJudged = s.rows.map(row => ({ row, verdict: mailViewClassify(row, index) }));
+  }
+  const judged = mailViewJudged;
+  syncMailViewAgentOptions(judged);
+  // The tiles count within the chosen agent, so picking someone shows how
+  // their mail split up; "No agent" always counts the whole window.
+  const inAgent = judged.filter(j => mailViewAgentMatches(j.verdict));
+  const count = kind => inAgent.filter(j => j.verdict.kind === kind).length;
   const counts = {
-    all: judged.length,
+    all: inAgent.length,
     ticket: count('ticket') + count('spam'),
     merged: count('merged'),
     filtered: count('filtered'),
-    missing: count('missing')
+    missing: count('missing'),
+    noagent: judged.filter(j => j.verdict.ticket && j.verdict.kind !== 'spam' && !mailViewAssignee(j.verdict)).length
   };
 
   if (tiles) {
     const tile = (key, label, alert) => `<button class="mv-tile${mailViewFilter === key ? ' on' : ''}${alert && counts[key] ? ' mv-tile-alert' : ''}" type="button" data-mv-tile="${key}">
         <div class="mv-tile-n">${counts[key]}</div><div class="mv-tile-l">${label}</div></button>`;
+    const noAgentTile = `<button class="mv-tile mv-tile-noagent${mailViewAgent === MAIL_VIEW_NO_AGENT ? ' on' : ''}" type="button" data-mv-noagent="1" title="Mail on tickets nobody is assigned to">
+        <div class="mv-tile-n">${counts.noagent}</div><div class="mv-tile-l">No agent assigned</div></button>`;
     tiles.innerHTML = tile('all', 'Fetched')
       + tile('ticket', 'On the board')
       + tile('merged', 'Merged into a thread')
       + tile('filtered', 'Filtered out')
-      + tile('missing', 'Unaccounted for', true);
+      + tile('missing', 'Unaccounted for', true)
+      + noAgentTile;
     tiles.querySelectorAll('[data-mv-tile]').forEach(b => b.addEventListener('click', () => {
       mailViewFilter = b.dataset.mvTile;
       const sel = document.getElementById('mv-filter');
       if (sel) sel.value = mailViewFilter;
+      mailViewShowCount = MAIL_VIEW_PAGE;
       renderMailView();
     }));
+    tiles.querySelector('[data-mv-noagent]')?.addEventListener('click', () => {
+      mailViewAgent = mailViewAgent === MAIL_VIEW_NO_AGENT ? '' : MAIL_VIEW_NO_AGENT;
+      const sel = document.getElementById('mv-agent');
+      if (sel) sel.value = mailViewAgent;
+      mailViewShowCount = MAIL_VIEW_PAGE;
+      renderMailView();
+    });
   }
 
   const shown = judged.filter(j => mailViewMatches(j.row, j.verdict));
@@ -21738,8 +21876,17 @@ function renderMailView() {
     return;
   }
 
-  host.innerHTML = `<div class="mv-list">${shown.map(({ row, verdict }) => {
+  const drawn = shown.slice(0, mailViewShowCount);
+  const more = shown.length - drawn.length;
+  host.innerHTML = `<div class="mv-list">${drawn.map(({ row, verdict }) => {
     const internal = isInternalEmailAddress(row.sender) ? '<span class="mv-tag">internal</span>' : '';
+    const assignee = mailViewAssignee(verdict);
+    // Who has the ticket, on every message that reached one; spam is nobody's.
+    const agentChip = !verdict.ticket || verdict.kind === 'spam'
+      ? ''
+      : assignee
+        ? `<span class="mv-agent" style="--mv-agent-color:${agentColor(assignee)}" title="${esc(supportAgentDisplayNames?.[assignee] || assignee)}">${esc(assignee)}</span>`
+        : '<span class="mv-agent mv-agent-none">No agent</span>';
     return `<div class="mv-row" data-mv-open="${esc(row.id)}">
       <div class="mv-when">${esc(fmtDate(row.receivedDateTime))}</div>
       <div class="mv-main">
@@ -21748,11 +21895,16 @@ function renderMailView() {
         ${row.summary ? `<div class="mv-preview">${esc(row.summary)}</div>` : ''}
       </div>
       <div class="mv-side">
-        <span class="mv-pill mv-pill-${verdict.kind}">${esc(verdict.pill)}</span>
+        <div class="mv-side-top">${agentChip}<span class="mv-pill mv-pill-${verdict.kind}">${esc(verdict.pill)}</span></div>
         <span class="mv-why">${verdict.why}</span>
       </div>
     </div>`;
-  }).join('')}</div>`;
+  }).join('')}</div>${more > 0 ? `<button class="btn-out mv-more" type="button" id="mv-more">Show ${Math.min(more, MAIL_VIEW_PAGE)} more of ${more}</button>` : ''}`;
+
+  document.getElementById('mv-more')?.addEventListener('click', () => {
+    mailViewShowCount += MAIL_VIEW_PAGE;
+    renderMailView();
+  });
 
   // Clicking a row goes to the ticket when there is one, and to Outlook when
   // there is not - which is the only place left to look at that point.
@@ -21776,6 +21928,9 @@ function showMailView() {
   document.getElementById('mail-view').style.display = 'block';
   setSideNavActive('mail');
   saveLastWorkspaceSession('mail');
+  // The board may have moved on since the last visit (new tickets, merges):
+  // judge the fetched mail again, which costs nothing against the mailbox.
+  mailViewJudged = null;
   renderMailView();
   // Fetched on first open rather than on every visit: it is a live Graph call
   // and re-reading the mailbox on a tab switch would be rude to the throttle.
@@ -21787,15 +21942,22 @@ document.getElementById('mail-view-btn')?.addEventListener('click', () => {
 });
 document.getElementById('mv-refresh')?.addEventListener('click', loadMailView);
 document.getElementById('mv-window')?.addEventListener('change', e => {
-  mailViewHours = Number(e.target.value) || 96;
+  mailViewHours = Number(e.target.value) || 2160;
   loadMailView();
 });
 document.getElementById('mv-filter')?.addEventListener('change', e => {
   mailViewFilter = e.target.value || 'all';
+  mailViewShowCount = MAIL_VIEW_PAGE;
+  renderMailView();
+});
+document.getElementById('mv-agent')?.addEventListener('change', e => {
+  mailViewAgent = e.target.value || '';
+  mailViewShowCount = MAIL_VIEW_PAGE;
   renderMailView();
 });
 document.getElementById('mv-search')?.addEventListener('input', e => {
   mailViewQuery = e.target.value;
+  mailViewShowCount = MAIL_VIEW_PAGE;
   renderMailView();
 });
 

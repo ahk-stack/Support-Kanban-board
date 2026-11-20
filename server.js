@@ -770,6 +770,19 @@ function normalizeTeam(team) {
   return value === 'cs' || value === 'support' || value === 'hidden' ? value : undefined;
 }
 const HIDDEN_TEAM = 'hidden';
+// Service accounts kept off every display. The Hidden team is the switch; the
+// name match is the fallback for the n8n digest token user, so it stays off
+// the board even while its team still says Support.
+const SERVICE_ACCOUNT_NAME_RE = /n8n|digest/i;
+const HIDDEN_AGENT_CODES = new Set();
+function isHiddenServiceUser(user) {
+  if (String(user?.team || '').trim().toLowerCase() === HIDDEN_TEAM) return true;
+  return [user?.username, user?.displayName, user?.email].some(v => SERVICE_ACCOUNT_NAME_RE.test(String(v || '')));
+}
+function isHiddenAgentCode(code) {
+  const value = String(code || '').trim().toUpperCase();
+  return !!value && (HIDDEN_AGENT_CODES.has(value) || SERVICE_ACCOUNT_NAME_RE.test(value));
+}
 // A user's agent code is their username when it is a trigram, otherwise the
 // local part of their email - the same order the board resolves it in.
 function userAgentCode(user) {
@@ -791,12 +804,12 @@ let agentRosterLoadedAt = 0;
 async function refreshAgentRoster() {
   let users;
   try {
-    users = await prisma.user.findMany({ where: { team: { in: ['cs', 'support', HIDDEN_TEAM] } }, orderBy: { username: 'asc' }, select: { username: true, email: true, team: true, isActive: true } });
+    users = await prisma.user.findMany({ orderBy: { username: 'asc' }, select: { username: true, displayName: true, email: true, team: true, isActive: true } });
   } catch (error) {
     console.warn('Agent roster: could not read users, keeping the current roster:', error?.message || error);
     return false;
   }
-  if (!users.some(user => user.team !== HIDDEN_TEAM)) return false;
+  if (!users.some(user => (user.team === 'cs' || user.team === 'support') && !isHiddenServiceUser(user))) return false;
   const next = { support: new Set(), cs: new Set() };
   const inactive = { support: new Set(), cs: new Set() };
   // Hidden accounts are on no roster and are not "former" agents either: a
@@ -805,7 +818,8 @@ async function refreshAgentRoster() {
   for (const user of users) {
     const code = userAgentCode(user);
     if (!code) continue;
-    if (user.team === HIDDEN_TEAM) { hidden.add(code); continue; }
+    if (isHiddenServiceUser(user)) { hidden.add(code); continue; }
+    if (user.team !== 'cs' && user.team !== 'support') continue;
     (user.isActive === false ? inactive : next)[user.team].add(code);
   }
   for (const kind of ['support', 'cs']) {
@@ -818,6 +832,8 @@ async function refreshAgentRoster() {
     live.clear();
     next[kind].forEach(code => live.add(code));
   }
+  HIDDEN_AGENT_CODES.clear();
+  hidden.forEach(code => HIDDEN_AGENT_CODES.add(code));
   agentRosterLoadedAt = Date.now();
   return true;
 }
@@ -826,6 +842,9 @@ function agentRosterPayload() {
     support: [...SUPPORT_AGENT_CODES],
     cs: [...CS_AGENT_CODES],
     former: { support: [...FORMER_AGENT_CODES.support], cs: [...FORMER_AGENT_CODES.cs] },
+    // Service accounts' codes, so the board can keep them out of lists it
+    // builds from ticket data rather than from the roster.
+    hidden: [...HIDDEN_AGENT_CODES],
     loadedAt: agentRosterLoadedAt || null
   };
 }
@@ -3472,6 +3491,13 @@ async function claimResolvedTeamsAlert({ ticketDbId, externalId, csAgent, catego
   return { ticketId: externalId, csOwner: csOwnerForAlert, ticketNumber, subject, companyName, jiraKey: jiraTicketKey, assignee: assignedAgent };
 }
 
+// The Received Mail view pages through a whole window of the helpdesk
+// mailbox. 250 per page keeps each Graph response small (bodyPreview is the
+// bulk of it); the cap is well above three months of helpdesk mail and stops
+// a runaway window from holding the request open indefinitely.
+const MAIL_WINDOW_PAGE_SIZE = 250;
+const MAIL_WINDOW_MAX_MESSAGES = 8000;
+
 function mapMessage(msg) {
   const recipients = [
     ...(msg.toRecipients || []),
@@ -4827,7 +4853,7 @@ app.get('/api/shift/state', requireAuth, (req, res) => {
   sweepIdleShifts();
   const me = shiftAgentFromRequest(req, req.query?.agent);
   const agents = {};
-  Object.keys(shiftStore.agents).forEach((code) => { agents[code] = shiftSnapshotFor(code); });
+  Object.keys(shiftStore.agents).forEach((code) => { if (!isHiddenAgentCode(code)) agents[code] = shiftSnapshotFor(code); });
   // slaTimeZone: the zone the SLA's working hours are read in, so every board
   // counts 08:00-12:00 / 14:00-17:00 the same way the server does.
   return res.json({ me, agents, idleMs: SHIFT_IDLE_MS, serverNow: Date.now(), slaTimeZone: process.env.TZ || null, leave: activeAgentLeave() });
@@ -4961,10 +4987,11 @@ app.get('/api/support-agents/names', requireAuth, async (req, res) => {
   try {
     const users = await prisma.user.findMany({
       where: { isActive: true },
-      select: { username: true, displayName: true, email: true }
+      select: { username: true, displayName: true, email: true, team: true }
     });
     const agents = {};
     users.forEach((user) => {
+      if (isHiddenServiceUser(user)) return;
       const candidates = [user.username, String(user.email || '').split('@')[0]]
         .map(v => String(v || '').trim().toUpperCase());
       const code = candidates.find(c => SUPPORT_AGENT_CODES.has(c));
@@ -7890,7 +7917,7 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       ...Array.from(SUPPORT_AGENT_CODES),
       ...Array.from(CS_AGENT_CODES),
       ...tickets.flatMap(t => [t.assignedAgent, t.csAgent]).filter(Boolean).map(v => String(v).trim().toUpperCase())
-    ])).sort((a, b) => a.localeCompare(b));
+    ])).filter(code => !isHiddenAgentCode(code)).sort((a, b) => a.localeCompare(b));
 
     // The whole life of the board, for admins, under the same filters as the
     // cards. Counted off the very tickets the cards are counted off
@@ -8005,8 +8032,9 @@ app.get('/api/tickets/kpis', requireAuth, async (req, res) => {
       categoryRows: sortRows(categoryCounts).map(([category, count]) => ({ category, count })),
       priorityRows: sortRows(priorityCounts).map(([priority, count]) => ({ priority, count })),
       companyRows: sortRows(companyCounts).map(([company, count]) => ({ company, count })),
-      csRows: sortRows(csCounts).map(([agent, count]) => ({ agent, count })),
+      csRows: sortRows(csCounts).filter(([agent]) => !isHiddenAgentCode(agent)).map(([agent, count]) => ({ agent, count })),
       agentRows: Object.values(agentRows)
+        .filter(row => !isHiddenAgentCode(row.agent))
         .map(({ resolveHours, ...row }) => ({
           ...row,
           avgResolveShiftHours: avgOf(resolveHours),
@@ -8967,7 +8995,8 @@ app.get('/api/insights/suggest-assignee', requireAuth, async (req, res) => {
 
     for (const past of history) {
       const agent = String(past.assignedAgent || '').trim().toUpperCase();
-      if (!agent) continue;
+      // Never suggest a service account, whatever an old ticket says.
+      if (!agent || isHiddenAgentCode(agent)) continue;
       if (!agents.has(agent)) agents.set(agent, { agent, sameCompany: 0, sameSender: 0, sameCategory: 0, similarSubject: 0, total: 0, lastAt: null, examples: [] });
       const row = agents.get(agent);
       row.total++;
@@ -10414,6 +10443,8 @@ function buildAgentActivity(events, { includeSync = false, wholeBoard = true } =
   }
 
   const shape = (kind) => [...buckets[kind].values()]
+    // A service account is not an agent to report on.
+    .filter(a => !isHiddenAgentCode(a.code))
     .map(a => ({
       code: a.code,
       kind: a.kind,
@@ -13866,11 +13897,33 @@ app.post('/api/mcp-proxy', requireAuth, async (req, res) => {
       // there answered the request before the check was ever reached.
       const mailbox = resolveReadableMailbox(args?.mailboxOwnerEmail);
       if (!mailbox) return res.status(403).json({ isError: true, error: 'mailbox_not_allowed' });
-      const token = await graphDelegatedToken(req);
-      const top = Math.min(Math.max(Number(args?.limit || 20), 1), 200);
       const select = '$select=id,subject,bodyPreview,from,toRecipients,ccRecipients,receivedDateTime,webLink,conversationId,internetMessageId';
       const orderBy = '$orderby=receivedDateTime desc';
       const filter = args?.afterDateTime ? `&$filter=receivedDateTime ge ${new Date(args.afterDateTime).toISOString()}` : '';
+      // allPages: the Received Mail view reads a whole window (up to three
+      // months), which is far more than one Graph page. It follows nextLink up
+      // to a hard cap and says when the cap cut the window short. The poller
+      // does not ask for this and keeps its single page of `limit`.
+      if (args?.allPages) {
+        const cap = Math.min(Math.max(Number(args?.limit) || MAIL_WINDOW_MAX_MESSAGES, 1), MAIL_WINDOW_MAX_MESSAGES);
+        const out = [];
+        let next = `/users/${encodeURIComponent(mailbox)}/messages?$top=${Math.min(cap, MAIL_WINDOW_PAGE_SIZE)}&${select}&${orderBy}${filter}`;
+        while (next && out.length < cap) {
+          const data = await graphGetResilient(next, req);
+          for (const msg of (data?.value || [])) {
+            if (out.length >= cap) break;
+            out.push(mapMessage(msg));
+          }
+          // graphGet takes a path under /v1.0; nextLink is absolute.
+          const link = String(data?.['@odata.nextLink'] || '');
+          next = link.startsWith('https://graph.microsoft.com/v1.0')
+            ? link.slice('https://graph.microsoft.com/v1.0'.length)
+            : '';
+        }
+        return res.json({ isError: false, structuredContent: out, truncated: !!next });
+      }
+      const token = await graphDelegatedToken(req);
+      const top = Math.min(Math.max(Number(args?.limit || 20), 1), 200);
       const data = await graphGet(`/users/${encodeURIComponent(mailbox)}/messages?$top=${top}&${select}&${orderBy}${filter}`, token);
       return res.json({ isError: false, structuredContent: (data.value || []).map(mapMessage) });
     }
