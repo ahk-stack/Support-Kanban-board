@@ -8480,6 +8480,222 @@ body > header :focus-visible,
 }
 
 </style>
+<style id="notes-panel-style">
+/* Notes beside the ticket. The ticket modal's Notes button docks the notes
+   sheet (#com-sheet) inside #email-modal as a sibling window on the ticket's
+   left; the flex backdrop centres the pair. Below 1100px there is no room for
+   both, so the panel floats over the ticket's left edge instead. */
+.em-notes-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 10px 0 11px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, .14);
+  background: rgba(255, 255, 255, .08);
+  color: rgba(255, 255, 255, .9);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, box-shadow .2s ease, transform .15s ease;
+}
+.em-notes-btn:hover { background: rgba(255, 255, 255, .16); transform: translateY(-1px); }
+.em-notes-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.em-notes-btn.active {
+  background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary) 55%, #ec4899));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--primary) 45%, transparent);
+}
+.em-notes-count {
+  min-width: 19px;
+  height: 19px;
+  padding: 0 6px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  background: var(--primary);
+  color: #fff;
+}
+.em-notes-count[hidden] { display: none; }
+.em-notes-btn.active .em-notes-count { background: rgba(255, 255, 255, .26); }
+
+/* Docked: side by side */
+#email-modal.notes-docked { gap: 14px; }
+#email-modal.notes-docked > .modal:not(.notes-panel) { min-width: 0; }
+#email-modal .modal.notes-panel {
+  flex: 0 0 380px;
+  width: 380px;
+  max-width: 380px !important;
+  min-height: min(440px, 86vh);
+  max-height: 86vh;
+  box-shadow: 0 30px 80px rgba(8, 6, 40, .35), 0 0 0 1px color-mix(in srgb, var(--primary) 22%, transparent);
+}
+#email-modal.open .modal.notes-panel { animation: npIn .32s cubic-bezier(.2, .9, .3, 1.1) both; }
+#email-modal.open .modal.notes-panel.np-closing { animation: npOut .17s ease-in both; pointer-events: none; }
+@keyframes npIn {
+  from { opacity: 0; transform: translateX(32px) scale(.97); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes npOut {
+  to { opacity: 0; transform: translateX(26px) scale(.97); }
+}
+
+/* Header: kicker, subject, people */
+.np-kicker, .np-people { display: none; }
+.notes-panel .np-kicker { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+.np-pill {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .13);
+  color: rgba(255, 255, 255, .9);
+}
+.np-num { font-size: 12px; font-weight: 700; color: rgba(255, 255, 255, .6); font-variant-numeric: tabular-nums; }
+.notes-panel #com-title {
+  font-size: 15px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.notes-panel #com-subtitle {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px !important;
+  color: rgba(255, 255, 255, .6) !important;
+}
+.notes-panel .np-people { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.np-avs { display: flex; }
+.np-av {
+  width: 24px;
+  height: 24px;
+  margin-left: -6px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  font-weight: 800;
+  color: #fff;
+  box-shadow: 0 0 0 2px var(--ink-soft);
+}
+.np-av:first-child { margin-left: 0; }
+.np-av-more { background: rgba(255, 255, 255, .2); }
+.np-stat { font-size: 12px; color: rgba(255, 255, 255, .72); }
+
+/* Day dividers - in the notes modal too */
+.comment-day {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--muted-light);
+}
+.comment-day::before, .comment-day::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+/* Thread: a timeline */
+.notes-panel .com-thread { max-height: none; min-height: 0; flex: 1 1 auto; padding: 16px 16px 12px; gap: 14px; }
+.notes-panel .comment-item { position: relative; gap: 12px; flex-shrink: 0; }
+.notes-panel .comment-item:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  left: 15px;
+  top: 38px;
+  bottom: -12px;
+  width: 2px;
+  border-radius: 2px;
+  background: linear-gradient(var(--border-strong), var(--border));
+}
+.notes-panel .comment-avatar {
+  position: relative;
+  z-index: 1;
+  width: 32px;
+  height: 32px;
+  margin-top: 0;
+  border-radius: 50%;
+  font-size: 10px;
+  color: #fff;
+  box-shadow: 0 0 0 3px var(--surface), 0 4px 10px rgba(0, 0, 0, .18);
+}
+.notes-panel .comment-bubble {
+  min-width: 0;
+  border-radius: 4px 14px 14px 14px;
+  box-shadow: var(--shadow-xs);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.notes-panel .comment-bubble:hover { border-color: color-mix(in srgb, var(--primary) 30%, var(--border)); box-shadow: var(--shadow-sm); }
+.notes-panel .comment-item.mine .comment-bubble {
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface-soft));
+  border-color: color-mix(in srgb, var(--primary) 24%, var(--border));
+}
+.notes-panel .comment-item.system .comment-bubble {
+  background: color-mix(in srgb, var(--brand-jira) 7%, var(--surface-soft));
+  border-style: dashed;
+}
+.notes-panel .comment-time { margin-left: auto; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.notes-panel .comment-text { font-size: 13.5px; overflow-wrap: anywhere; }
+.notes-panel .no-comments { margin: auto; padding: 28px 12px; text-align: center; font-size: 13px; color: var(--muted); }
+.notes-panel .no-comments::before {
+  content: "";
+  display: block;
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 12px;
+  border-radius: 15px;
+  background: linear-gradient(135deg, var(--primary-soft), color-mix(in srgb, var(--primary) 30%, var(--primary-soft)));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 25%, transparent);
+}
+
+/* Composer */
+.notes-panel .compose-area { padding: 12px 14px 14px; gap: 8px; box-shadow: 0 -10px 22px -16px rgba(0, 0, 0, .3); }
+.notes-panel #com-input { min-height: 64px; max-height: 180px; }
+.notes-panel .compose-footer { flex-direction: column; align-items: stretch; }
+.notes-panel .compose-footer > div:last-child { align-self: flex-end; }
+.notes-panel .tag-grid { max-height: 62px; overflow-y: auto; padding: 3px; }
+
+/* Narrow: float over the ticket's left edge rather than squeeze or run off-screen */
+@media (max-width: 1099px) {
+  #email-modal.notes-docked { gap: 0; }
+  #email-modal .modal.notes-panel {
+    position: fixed;
+    z-index: 3;
+    left: 12px;
+    top: 24px;
+    bottom: 16px;
+    width: min(400px, calc(100vw - 24px));
+    max-width: none !important;
+    height: auto !important;
+    min-height: 0;
+    max-height: none;
+    box-shadow: 0 30px 90px rgba(8, 6, 40, .55), 0 0 0 1px color-mix(in srgb, var(--primary) 30%, transparent);
+  }
+  @keyframes npIn {
+    from { opacity: 0; transform: translateX(-32px) scale(.98); }
+    to   { opacity: 1; transform: none; }
+  }
+  @keyframes npOut {
+    to { opacity: 0; transform: translateX(-26px) scale(.98); }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #email-modal .modal.notes-panel { animation: none !important; }
+}
+</style>
 </head>
 <body>
 <header>
@@ -9195,7 +9411,7 @@ body > header :focus-visible,
 <div id="toast"></div>
 
 <!-- Email modal -->
-<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="em-thread-list" id="em-thread"></div>
+<div class="modal-bg" id="email-modal"><div class="modal"><div class="modal-head"><h2 id="em-title"></h2><button type="button" class="em-notes-btn" id="em-notes-btn" aria-pressed="false" title="Internal notes - opens beside the ticket"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/></svg><span>Notes</span><span class="em-notes-count" id="em-notes-count" hidden>0</span></button><button class="modal-close-x" data-close="email-modal"></button></div><div class="modal-meta-bar" id="em-meta"></div><div class="tr-bar" id="em-tr-bar"></div><div class="em-thread-list" id="em-thread"></div>
 <div class="modal-body-scroll" id="em-body"></div>
 <div class="em-context" id="em-context"></div>
 <!-- Replying to the client, without leaving the board. Collapsed until the
@@ -9231,7 +9447,7 @@ body > header :focus-visible,
   <div class="tr-pop-foot" id="tr-pop-foot"></div>
 </div>
 <!-- Intern com modal -->
-<div class="modal-bg" id="com-modal"><div class="modal" style="max-width:560px;"><div class="modal-head"><div style="flex:1;min-width:0;"><h2 id="com-title"></h2><div style="font-size:13px;color:var(--slate-400);margin-top:3px;" id="com-subtitle"></div></div><button class="modal-close-x" data-close="com-modal"></button></div><div class="tr-bar" id="com-tr-bar"></div><div class="com-thread" id="com-thread"></div><div class="compose-area"><div class="compose-label">Add internal comment</div><textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea><div class="compose-footer"><div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div><div style="display:flex;gap:8px;align-self:flex-end;"><button class="btn-out" id="com-debug-expert">Debug Expert</button><button class="btn-primary" id="com-post">Post</button></div></div></div></div></div>
+<div class="modal-bg" id="com-modal"><div class="modal" id="com-sheet" style="max-width:560px;"><div class="modal-head"><div style="flex:1;min-width:0;"><div class="np-kicker" id="np-kicker"></div><h2 id="com-title"></h2><div style="font-size:13px;color:var(--slate-400);margin-top:3px;" id="com-subtitle"></div><div class="np-people" id="np-people"></div></div><button class="modal-close-x" data-close="com-modal"></button></div><div class="tr-bar" id="com-tr-bar"></div><div class="com-thread" id="com-thread"></div><div class="compose-area"><div class="compose-label">Add internal comment</div><textarea class="compose-textarea" id="com-input" placeholder="e.g. Client needs to provide API credentials before we can proceed."></textarea><div class="compose-footer"><div class="tag-section"><label>Tag people:</label><div class="tag-grid" id="tag-grid"></div></div><div style="display:flex;gap:8px;align-self:flex-end;"><button class="btn-out" id="com-debug-expert">Debug Expert</button><button class="btn-primary" id="com-post">Post</button></div></div></div></div></div>
 <!-- KPI drilldown: the tickets behind a red ("bad" tone) KPI card -->
 <!-- Admins: tickets resolved on one day, by agent. Read live, not from the KPI checkpoint. -->
 <div class="modal-bg" id="kpi-day-report-modal"><div class="modal" style="max-width:760px;"><div class="modal-head"><h2 id="kpi-day-report-title">Day report</h2><button class="modal-close-x" data-close="kpi-day-report-modal"></button></div>
@@ -19778,6 +19994,7 @@ function safeCard(ticket){
 
 function renderBoard(){
   closeAllAgentMenus();
+  notesPanelSync();
   closeSnoozeMenu();
   // The language popover is anchored to a trigger inside a card. A re-render
   // destroys that card, so an open popover would be left pointing at nothing.
@@ -22473,6 +22690,7 @@ function emRenderMeta(ticket){
 async function openEmailModal(ticket){
   const{email,id}=ticket;const clientEmail=ticketClientEmail[id];
   emCurrentTicket=ticket;
+  notesPanelOnTicket(ticket);
   emResetReply(ticket);
   // "Seen before" is the panel worth paying for up front - it is the one that
   // changes what the agent writes. History waits until it is opened.
@@ -22763,14 +22981,14 @@ const cs=ticketComments[id]||[];const el=document.getElementById('com-thread');i
 // A live-sync redraw while a note is being edited must not throw the draft away.
 const editing=comEditing&&comEditing.ticketId===id?comEditing:null;
 const keepScroll=editing?el.scrollTop:null;
-el.innerHTML=cs.map((c,ci)=>{const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):'var(--slate-600)';const shown=trNotes&&typeof trNotes[ci]==='string'?trNotes[ci]:c.text;const trMark=trNotes&&typeof trNotes[ci]==='string'&&trNotes[ci]!==c.text?' tr-seg':'';
+el.innerHTML=cs.map((c,ci)=>{const day=c.ts?new Date(c.ts).toDateString():'';const dayHtml=day&&(!ci||new Date(cs[ci-1].ts||0).toDateString()!==day)?`<div class="comment-day"><span>${esc(notesDayLabel(c.ts))}</span></div>`:'';const tagHtml=(c.tags||[]).map(t=>{const bg=t===CLIENT_TAG?'var(--slate-600)':agentColor(t);return`<span class="ctag" style="background:${bg}">@${t}</span>`;}).join('');const isSys=c.author==='Jira';const bg=ALL_AGENTS.includes(c.author)?agentColor(c.author):isSys?'var(--brand-jira)':'var(--slate-600)';const mine=!!c.author&&agentIdentityCode(c.author)===agentIdentityCode(currentUser());const shown=trNotes&&typeof trNotes[ci]==='string'?trNotes[ci]:c.text;const trMark=trNotes&&typeof trNotes[ci]==='string'&&trNotes[ci]!==c.text?' tr-seg':'';
   const isEditing=editing&&editing.ci===ci;
   const editedHtml=c.editedAt?`<span class="comment-edited" title="Edited ${esc(fmtTime(c.editedAt))}${c.editedBy?' by '+esc(c.editedBy):''}">(edited)</span>`:'';
   const editBtn=!isEditing&&canEditNote(c)?`<button type="button" class="comment-edit-btn" data-com-edit="${ci}">Edit</button>`:'';
   const body=isEditing
     ?`<div class="comment-edit"><textarea class="compose-textarea comment-edit-input" data-com-edit-input="${ci}">${esc(editing.draft)}</textarea><div class="comment-edit-actions"><button type="button" class="btn-out" data-com-edit-cancel="${ci}">Cancel</button><button type="button" class="btn-primary" data-com-edit-save="${ci}">Save</button></div></div>`
     :`<div class="comment-text${trMark}">${noteTextHtml(shown)}</div>`;
-  return`<div class="comment-item"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${editedHtml}${editBtn}${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div>${body}</div></div>`;}).join('');
+  return`${dayHtml}<div class="comment-item${mine?' mine':''}${isSys?' system':''}"><div class="comment-avatar" style="background:${bg}">${esc(c.author)}</div><div class="comment-bubble"><div class="comment-header"><span class="comment-author">${esc(c.author)}</span><span class="comment-time">${fmtTime(c.ts)}</span>${editedHtml}${editBtn}${tagHtml?`<div class="comment-tags">${tagHtml}</div>`:''}</div>${body}</div></div>`;}).join('');
 if(editing){el.scrollTop=keepScroll;const input=el.querySelector('[data-com-edit-input]');if(input&&editing.focus){editing.focus=false;input.focus();input.setSelectionRange(input.value.length,input.value.length);input.scrollIntoView({block:'nearest'});}}
 else el.scrollTop=el.scrollHeight;}
 /* Notes are plain text. Links in them are made clickable, with a copy button
@@ -22843,11 +23061,115 @@ document.getElementById('com-thread').addEventListener('keydown',ev=>{
   if(ev.key==='Enter'&&(ev.ctrlKey||ev.metaKey)){ev.preventDefault();saveNoteEdit();}
   else if(ev.key==='Escape'){ev.preventDefault();ev.stopPropagation();const id=comEditing?.ticketId;comEditing=null;if(id)renderThread(id);}
 });
-function openComModal(ticket,opts){const{email,id}=ticket;comTicketId=id;comEditing=null;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee} · CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr} · ${agInfo} · ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);document.getElementById('com-modal').classList.add('open');if(opts&&Number.isInteger(opts.editIndex))startNoteEdit(id,opts.editIndex);}
+function openComModal(ticket,opts){const docked=!!(opts&&opts.docked);if(!docked)notesPanelDetach();const{email,id}=ticket;comTicketId=id;comEditing=null;trResetNotesState(id);trRenderNotesBar();trLoadCachedFor(id);const clientEmail=ticketClientEmail[id];const hs=clientEmail?hsCache[clientEmail]:null;const coStr=hs?.companyName?(hs.inferredVia?'   '+hs.companyName+' ~':'   '+hs.companyName):'';const who=isQuintaSender(email.sender)&&clientEmail?`Client: ${clientEmail}`:email.sender||'';const csOwner=ticketCSOwner[id]||null;const assignee=ticketAssignee[id]||'';const agInfo=csOwner?`${assignee} · CS:${csOwner}`:assignee;document.getElementById('com-title').textContent=email.subject||'(no subject)';document.getElementById('com-subtitle').textContent=`${who}${coStr} · ${agInfo} · ${fmtDate(email.receivedDateTime)}`;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));renderThread(id);if(!docked)document.getElementById('com-modal').classList.add('open');if(opts&&Number.isInteger(opts.editIndex))startNoteEdit(id,opts.editIndex);}
 function postTicketComment(ticketId,text,tags){if(!text||!ticketId)return false;if(!ticketComments[ticketId])ticketComments[ticketId]=[];const author=currentUser();const normalizedTags=[...new Set((Array.isArray(tags)?tags:[]).map(t=>t===CLIENT_TAG?CLIENT_TAG:agentIdentityCode(t)).filter(Boolean))];ticketComments[ticketId].push({author,text,tags:normalizedTags,ts:Date.now()});saveState('ticket_comment_added');renderBoard();if(comTicketId===ticketId)renderThread(ticketId);const at=normalizedTags.filter(t=>t!==CLIENT_TAG);if(at.length)showToast(`Bell alert sent to: ${at.join(', ')}`,'ok');else showToast('Comment posted','ok');return true;}
 function addInternalComment(ticketId,text,tags){if(!postTicketComment(ticketId,text,tags))return;if(comTicketId===ticketId)renderThread(ticketId);}
 document.getElementById('com-post').addEventListener('click',()=>{const text=document.getElementById('com-input').value.trim();if(!text||!comTicketId)return;const tags=[...selectedTags];if(!postTicketComment(comTicketId,text,tags))return;document.getElementById('com-input').value='';selectedTags.clear();document.querySelectorAll('.tag-chip').forEach(c=>c.classList.remove('selected'));if(comTicketId)renderThread(comTicketId);});
 document.getElementById('com-debug-expert').addEventListener('click',async()=>{if(!comTicketId)return;const btn=document.getElementById('com-debug-expert');const ticket=allTickets.find(t=>t.id===comTicketId);if(!ticket)return;const assignee=ticketAssignee[comTicketId]||null;btn.disabled=true;btn.textContent='Analyzing';try{const ce=ticketClientEmail[comTicketId]||getClientEmail(ticket.email)||null;const hs=ce?hsCache[ce]:null;const resp=await fetch('/api/debug-expert',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({ticketId:comTicketId,email:ticket.email,assignee,companyName:hs?.companyName||null})});const out=await resp.json().catch(()=>({}));if(!resp.ok){showToast(`Debug Expert failed: ${out?.error||resp.status}`);return;}const parts=[];parts.push('Debug Expert proposed solution');if(out?.summary)parts.push(out.summary);if(Array.isArray(out?.steps)&&out.steps.length){parts.push('Recommended steps:');out.steps.slice(0,6).forEach((s,i)=>parts.push(`${i+1}. ${s}`));}if(Array.isArray(out?.articles)&&out.articles.length){parts.push('Relevant HubSpot KB articles:');out.articles.slice(0,5).forEach(a=>parts.push(`- ${a.title}${a.url?` (${a.url})`:''}`));}if(Array.isArray(out?.attachmentFindings)&&out.attachmentFindings.length){parts.push('Attachment findings:');out.attachmentFindings.slice(0,5).forEach(a=>parts.push(`- ${a}`));}const tags=assignee?[assignee]:[];addInternalComment(comTicketId,parts.join('\n'),tags);showToast(assignee?`Debug proposal posted and tagged ${assignee}`:'Debug proposal posted','ok');}catch(e){showToast(`Debug Expert error: ${String(e?.message||e)}`);}finally{btn.disabled=false;btn.textContent='Debug Expert';}});
+/* Notes beside the ticket. The ticket modal's Notes button docks the notes
+   sheet (#com-sheet, the one #com-modal shows) as a window just left of the
+   ticket, so posting, editing, tagging and translating stay one implementation.
+   Opened from a card or an alert, #com-modal works as before and takes the
+   sheet back. var, not let: renderBoard calls notesPanelSync and can run before
+   this part of the script has. */
+var npCloseTimer=0,npSig='',npHeightObs=null,npEmWasOpen=false;
+var NP_AUTO_KEY='kanban.notesPanelAuto';
+function npSheet(){return document.getElementById('com-sheet');}
+function npTicketSheet(){return document.querySelector('#email-modal .modal:not(#com-sheet)');}
+function notesPanelIsOpen(){const s=npSheet();return !!s&&s.classList.contains('notes-panel');}
+// Opens by itself on tickets that have notes, until the agent closes it; opening it by hand turns that back on.
+function npAutoWanted(){try{return localStorage.getItem(NP_AUTO_KEY)!=='0';}catch(_){return true;}}
+function npSetAuto(on){try{localStorage.setItem(NP_AUTO_KEY,on?'1':'0');}catch(_){}}
+function npNotesSig(id){const cs=ticketComments[id]||[];return cs.length+':'+cs.reduce((m,c)=>Math.max(m,Number(c.editedAt)||0),0);}
+function notesDayLabel(ts){const d=new Date(ts),t=new Date(),y=new Date();y.setDate(t.getDate()-1);if(d.toDateString()===t.toDateString())return'Today';if(d.toDateString()===y.toDateString())return'Yesterday';return d.toLocaleDateString('en-GB',{weekday:'short',day:'2-digit',month:'short',year:d.getFullYear()===t.getFullYear()?undefined:'numeric'});}
+// The ticket glides to its new place instead of jumping when the panel takes or gives back room.
+function npGlide(el,before){
+  if(before==null||!el||typeof el.animate!=='function')return;
+  if(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches)return;
+  const dx=before-el.getBoundingClientRect().left;if(Math.abs(dx)<1)return;
+  try{el.animate([{transform:`translateX(${dx}px)`},{transform:'none'}],{duration:260,easing:'cubic-bezier(.2,.8,.2,1)'});}catch(_){}
+}
+// Side by side, the panel is as tall as the ticket. Narrow screens overlay it instead (CSS).
+function npSyncHeight(){const s=npSheet(),tm=npTicketSheet();if(!s||!tm||!notesPanelIsOpen())return;const h=tm.offsetHeight;if(!h)return;s.style.height=window.innerWidth>=1100?h+'px':'';}
+function npRenderHead(id){
+  const cs=ticketComments[id]||[];
+  const kicker=document.getElementById('np-kicker'),people=document.getElementById('np-people');
+  if(kicker)kicker.innerHTML=`<span class="np-pill">Internal notes</span><span class="np-num">${esc(ticketDisplayNumber(id))}</span>`;
+  if(!people)return;
+  const authors=[...new Set(cs.map(c=>c.author).filter(Boolean))];
+  const last=cs.reduce((m,c)=>Math.max(m,Number(c.ts)||0),0);
+  const av=authors.slice(0,5).map(a=>`<span class="np-av" title="${esc(a)}" style="background:${ALL_AGENTS.includes(a)?agentColor(a):a==='Jira'?'var(--brand-jira)':'var(--slate-600)'}">${esc(String(a).slice(0,4))}</span>`).join('')+(authors.length>5?`<span class="np-av np-av-more">+${authors.length-5}</span>`:'');
+  people.innerHTML=cs.length?`<span class="np-avs">${av}</span><span class="np-stat">${cs.length} note${cs.length===1?'':'s'}${last?` · last ${esc(fmtDate(last))}`:''}</span>`:'<span class="np-stat">No notes yet - start the thread below</span>';
+}
+function npSyncButton(){
+  const btn=document.getElementById('em-notes-btn'),cnt=document.getElementById('em-notes-count');if(!btn||!cnt)return;
+  const id=emCurrentTicket?.id;const n=id?(ticketComments[id]||[]).length:0;
+  cnt.textContent=String(n);cnt.hidden=!n;btn.classList.toggle('has-notes',n>0);
+  const open=notesPanelIsOpen();btn.classList.toggle('active',open);btn.setAttribute('aria-pressed',open?'true':'false');
+  btn.title=open?'Hide the notes panel':`Internal notes${n?` (${n})`:''} - opens beside the ticket`;
+}
+function notesPanelOpen(ticket,auto){
+  const em=document.getElementById('email-modal'),s=npSheet(),tm=npTicketSheet();if(!ticket||!em||!s||!tm)return;
+  clearTimeout(npCloseTimer);s.classList.remove('np-closing');
+  document.getElementById('com-modal').classList.remove('open');
+  const wasOpen=notesPanelIsOpen();
+  const before=em.classList.contains('open')&&!wasOpen?tm.getBoundingClientRect().left:null;
+  if(!wasOpen||comTicketId!==ticket.id)openComModal(ticket,{docked:true});
+  if(!wasOpen){s.classList.add('notes-panel');em.insertBefore(s,tm);em.classList.add('notes-docked');}
+  npGlide(tm,before);
+  const id=ticket.id;npSig=npNotesSig(id);
+  npRenderHead(id);npSyncButton();
+  if(!npHeightObs&&typeof ResizeObserver==='function'){npHeightObs=new ResizeObserver(npSyncHeight);npHeightObs.observe(tm);}
+  npSyncHeight();
+  if(!auto){npSetAuto(true);setTimeout(()=>{if(notesPanelIsOpen())document.getElementById('com-input')?.focus({preventScroll:true});},60);}
+  // Reading the notes is reading the alerts that pointed at them.
+  if(getAlertFeed(currentUser()).some(x=>x.isUnread&&String(x.ticketId)===String(id))){markAlertFeedReadForTicket(id,currentUser());updateMentionsBadge();renderBoard();}
+}
+// Hands the sheet back to #com-modal at once - also how the panel goes when the ticket modal closes.
+function notesPanelDetach(){
+  clearTimeout(npCloseTimer);
+  const s=npSheet(),cm=document.getElementById('com-modal');if(!s||!cm)return;
+  s.classList.remove('np-closing');
+  if(!notesPanelIsOpen())return;
+  const em=document.getElementById('email-modal'),tm=npTicketSheet();
+  const before=em?.classList.contains('open')&&tm?tm.getBoundingClientRect().left:null;
+  s.classList.remove('notes-panel');s.style.height='';
+  cm.appendChild(s);em?.classList.remove('notes-docked');
+  npGlide(tm,before);npSyncButton();
+}
+function notesPanelClose(){
+  const s=npSheet();if(!notesPanelIsOpen()||s.classList.contains('np-closing'))return;
+  npSetAuto(false);
+  s.classList.add('np-closing');clearTimeout(npCloseTimer);npCloseTimer=setTimeout(notesPanelDetach,170);
+}
+// Called as the ticket modal opens on a ticket. An open panel follows to the new ticket.
+function notesPanelOnTicket(ticket){
+  const id=ticket?.id;if(!id)return;
+  if(notesPanelIsOpen()){if(comTicketId!==id)notesPanelOpen(ticket,true);else npSyncButton();return;}
+  npSyncButton();
+  if((ticketComments[id]||[]).length&&npAutoWanted()&&window.innerWidth>=1100)notesPanelOpen(ticket,true);
+}
+// From renderBoard: keeps the count on the button and the thread current as notes arrive by live sync.
+function notesPanelSync(){
+  if(!document.getElementById('email-modal')?.classList.contains('open'))return;
+  npSyncButton();
+  if(!notesPanelIsOpen()||!comTicketId)return;
+  const sig=npNotesSig(comTicketId);if(sig===npSig)return;
+  npSig=sig;renderThread(comTicketId);npRenderHead(comTicketId);
+}
+document.getElementById('em-notes-btn')?.addEventListener('click',()=>{if(notesPanelIsOpen())notesPanelClose();else if(emCurrentTicket)notesPanelOpen(emCurrentTicket,false);});
+document.querySelector('#com-sheet [data-close="com-modal"]')?.addEventListener('click',()=>{if(notesPanelIsOpen())notesPanelClose();});
+(()=>{const em=document.getElementById('email-modal');if(!em)return;new MutationObserver(()=>{const open=em.classList.contains('open');if(npEmWasOpen&&!open)notesPanelDetach();npEmWasOpen=open;}).observe(em,{attributes:true,attributeFilter:['class']});})();
+window.addEventListener('resize',npSyncHeight);
+// Escape closes the panel before anything else on the ticket - unless it belongs to something on top of it.
+window.addEventListener('keydown',e=>{
+  if(e.key!=='Escape'||!notesPanelIsOpen()||npSheet().classList.contains('np-closing'))return;
+  if(!document.getElementById('email-modal')?.classList.contains('open'))return;
+  if(e.target?.closest?.('[data-com-edit-input], #fb-chat, #tr-pop'))return;
+  if(trPopEl()?.classList.contains('open')||paletteOpen||document.getElementById('at-lightbox')?.classList.contains('open'))return;
+  if(document.querySelector('.modal-bg.open:not(#email-modal), .agent-assign-wrap.open, body > .agent-assign-menu'))return;
+  e.preventDefault();notesPanelClose();
+},true);
 
 //  Browser push notifications
 let notifySnapshot=null;
