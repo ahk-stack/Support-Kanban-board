@@ -1,6 +1,13 @@
 {
   "patches": [
     {
+      "date": "2026-11-20",
+      "title": "Jira Spotlight",
+      "notes": [
+        { "type": "improved", "text": "The Jira Tickets entry in the menu now has the Jira logo, so it is easy to spot." }
+      ]
+    },
+    {
       "date": "2026-11-19",
       "title": "Jira Tracker",
       "notes": [

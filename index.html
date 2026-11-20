@@ -6388,7 +6388,14 @@ body > header::after {
 #mail-view-btn       { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2' y='4' width='20' height='16' rx='3'/%3E%3Cpath d='m22 7-10 6L2 7'/%3E%3C/svg%3E"); }
 #companies-view-btn  { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 21h18M5 21V5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v16M16 9h3a2 2 0 0 1 2 2v10M9 7h3M9 11h3M9 15h3'/%3E%3C/svg%3E"); }
 #dashboard-view-btn  { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M11 3l1.8 4.7L17.5 9.5l-4.7 1.8L11 16l-1.8-4.7L4.5 9.5l4.7-1.8z'/%3E%3Cpath d='M18.5 14.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z'/%3E%3C/svg%3E"); }
-#jira-tickets-view-btn { --nav-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 9V6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3a3 3 0 0 0 0 6v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a3 3 0 0 0 0-6z'/%3E%3Cpath d='M13 5v2M13 11v2M13 17v2'/%3E%3C/svg%3E"); }
+/* The Jira mark in Jira's own blues, so the page is recognisable at a glance:
+   a full-colour image rather than the single-colour mask the other icons use. */
+#jira-tickets-view-btn::before {
+  -webkit-mask: none;
+  mask: none;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='a' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%230052CC'/%3E%3Cstop offset='1' stop-color='%232684FF'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath fill='url(%23a)' fill-rule='evenodd' d='M16 1.5 30.5 16 16 30.5 1.5 16zM16 10.5 10.5 16 16 21.5 21.5 16z'/%3E%3C/svg%3E") center / contain no-repeat;
+  opacity: 1;
+}
 /* Jira Tickets page and the KPI section that reads the same data. The opener
    badge colour comes from a fixed map (jiraOpenerColor), never from Jira text. */
 .jt-opener{display:inline-flex;align-items:center;gap:6px;padding:2px 9px 2px 7px;border-radius:999px;font-size:12px;font-weight:800;letter-spacing:.02em;white-space:nowrap;color:var(--jt-c);background:color-mix(in srgb,var(--jt-c) 14%,transparent);border:1px solid color-mix(in srgb,var(--jt-c) 45%,transparent);}
