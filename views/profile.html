@@ -443,6 +443,69 @@
     .btn-secondary:hover { background: #f1f2fa; }
     .form-input { border-radius: 10px; }
     .avatar-preview { background: var(--q-grad) !important; }
+
+    /* Polish pass: the remaining cool-slate greys and blue focus glow moved
+       onto the board's violet neutrals, weights a step lighter like the board,
+       and the same motion, pressed and focus states. */
+    :root { --q-text-soft: #353a5c; --q-border-strong: #cdd1e6; --q-surface-soft: #f8f9fe; --q-ease: cubic-bezier(.2, .8, .2, 1); }
+    .wrap { margin: 36px auto 48px; }
+    .content { padding: 26px 30px 30px; }
+    .stat { border-radius: 16px; background: var(--q-surface-soft); box-shadow: 0 1px 2px rgba(25, 22, 70, .04); }
+    .stat-label { font-size: 11px; letter-spacing: .08em; color: var(--muted); }
+    .stat-value { font-weight: 700; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+    .details { border-radius: 16px; }
+    .row { padding: 14px 18px; border-bottom-color: var(--border); align-items: center; }
+    .label { font-weight: 650; color: var(--muted); }
+    .value { font-weight: 600; }
+    .form-input { border-color: var(--q-border-strong); background: #fff; font-weight: 500; font-size: 14px; padding: 10px 12px; }
+    .form-input:hover { border-color: #b4abfb; }
+    .form-input:focus { box-shadow: 0 0 0 3px rgba(91, 76, 245, .30); }
+    .form-input::placeholder { color: #646b8e; opacity: 1; }
+    .avatar-preview { border-color: #e4e0ff; box-shadow: 0 10px 24px rgba(109, 94, 252, .22); }
+    .avatar-title { font-weight: 700; }
+    .avatar-note { font-weight: 500; }
+    .badge { padding: 4px 10px; border-radius: 8px; font-size: 12.5px; font-weight: 700; }
+    .btn { font-size: 14px; transition: transform .15s var(--q-ease), box-shadow .15s var(--q-ease), filter .15s var(--q-ease), background-color .15s var(--q-ease), border-color .15s var(--q-ease); }
+    .btn-secondary:hover { border-color: rgba(91, 76, 245, .35); }
+    .btn-danger { background: #fef2f2; border: 1px solid #fecaca; }
+    .btn-danger:hover { background: #fee2e2; }
+    .btn:active { transform: translateY(0) scale(.98); }
+    .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; filter: none; }
+    .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(91, 76, 245, .32); }
+    .nav a:focus-visible, .nav button:focus-visible, .avatar-picker:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(196, 181, 253, .9), 0 0 0 5px rgba(124, 92, 255, .35); }
+    .nav a:active, .nav button:active { transform: scale(.97); }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; } .btn:hover, .btn:active, .avatar-picker:hover .avatar { transform: none; } }
+  </style>
+  <style id="alerts-history-style">
+    /* Alerts history: the My Alerts entries already read. */
+    .alerts-history { margin-top: 22px; }
+    .alerts-history-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 22px 26px 14px; border-bottom: 1px solid var(--border); }
+    .alerts-history-head h2 { margin: 0; font-family: Caladea, Georgia, serif; font-size: 22px; }
+    .alerts-history-sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
+    .alerts-history-filter { display: flex; gap: 6px; flex-wrap: wrap; }
+    .alerts-history-filter button { border: 1px solid var(--border); background: #fff; color: var(--muted); border-radius: 999px; padding: 5px 11px; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+    .alerts-history-filter button.active { background: var(--q-primary); border-color: var(--q-primary); color: #fff; }
+    .alerts-history-list { list-style: none; margin: 0; padding: 6px 0; max-height: 640px; overflow-y: auto; }
+    .alerts-history-item { display: grid; grid-template-columns: 36px 1fr auto; gap: 12px; align-items: start; padding: 12px 26px; border-bottom: 1px solid rgba(226,229,242,.7); }
+    .alerts-history-item:last-child { border-bottom: 0; }
+    .alerts-history-icon { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; font-weight: 800; font-size: 15px; color: #fff; background: #64748b; }
+    .alerts-history-icon.t-mention { background: var(--q-primary); }
+    .alerts-history-icon.t-jira { background: #0ea5e9; }
+    .alerts-history-icon.t-jira_resolved { background: linear-gradient(135deg, #0ea5e9, #10b981); }
+    .alerts-history-icon.t-sendback { background: #e11d48; }
+    .alerts-history-main { min-width: 0; }
+    .alerts-history-ticket { font-weight: 700; font-size: 14px; color: var(--text); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+    .alerts-history-ticket:hover { color: var(--q-primary); text-decoration: underline; }
+    .alerts-history-ticket .no { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 6px; }
+    .alerts-history-what { font-size: 13px; color: var(--muted); margin-top: 2px; }
+    .alerts-history-text { font-size: 13px; color: var(--text); margin-top: 4px; white-space: pre-wrap; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+    .alerts-history-time { font-size: 12px; color: var(--muted); text-align: right; white-space: nowrap; }
+    .alerts-history-empty { padding: 30px 26px; color: var(--muted); text-align: center; font-size: 14px; }
+    @media (max-width: 640px) {
+      .alerts-history-item { grid-template-columns: 32px 1fr; padding: 12px 16px; }
+      .alerts-history-time { grid-column: 2; text-align: left; }
+      .alerts-history-head { padding: 18px 16px 12px; }
+    }
   </style>
 </head>
 <body>
@@ -555,6 +618,24 @@
           <button class="btn btn-danger" id="logoutBtn" type="button">Logout</button>
         </div>
       </div>
+    </section>
+
+    <section class="profile-card alerts-history" id="alerts-history">
+      <div class="alerts-history-head">
+        <div>
+          <h2>Alerts history</h2>
+          <div class="alerts-history-sub" id="alertsHistorySub">Alerts from My Alerts land here once you have read them.</div>
+        </div>
+        <div class="alerts-history-filter" id="alertsHistoryFilter">
+          <button type="button" class="active" data-type="all">All</button>
+          <button type="button" data-type="mention">Notes</button>
+          <button type="button" data-type="jira">Jira</button>
+          <button type="button" data-type="sendback">Sent back</button>
+        </div>
+      </div>
+      <ul class="alerts-history-list" id="alertsHistoryList">
+        <li class="alerts-history-empty">Loading...</li>
+      </ul>
     </section>
   </main>
 
@@ -728,8 +809,72 @@
       loadMcpTokenStatus();
     });
 
+    // Alerts history: read My Alerts, newest first, each linking to its ticket on the board.
+    let alertsHistory = [];
+    let alertsHistoryType = 'all';
+    const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    function escHtml(value) {
+      return String(value == null ? '' : value).replace(/[&<>"']/g, ch => HTML_ESCAPES[ch]);
+    }
+    const ALERT_ICONS = { mention: '@', jira: 'J', jira_resolved: '&#10003;', sendback: '&#8617;' };
+    function alertHistoryWhat(a) {
+      if (a.type === 'mention') return (a.who || 'Someone') + ' tagged you in a note';
+      if (a.type === 'sendback') return (a.who || 'CS') + ' sent the ticket back from Resolved';
+      if (a.type === 'jira_resolved') return a.title || ((a.who || 'Jira') + ' is resolved');
+      return a.title || ((a.who || 'Jira') + ' update');
+    }
+    function renderAlertsHistory() {
+      const list = document.getElementById('alertsHistoryList');
+      if (!list) return;
+      const shown = alertsHistory.filter(a => alertsHistoryType === 'all' || (alertsHistoryType === 'jira' ? (a.type === 'jira' || a.type === 'jira_resolved') : a.type === alertsHistoryType));
+      if (!shown.length) {
+        list.innerHTML = '<li class="alerts-history-empty">' + (alertsHistory.length ? 'Nothing of this kind yet.' : 'No read alerts yet. Alerts you open or mark read in My Alerts show up here.') + '</li>';
+        return;
+      }
+      list.innerHTML = shown.map(a => {
+        const when = a.ts ? new Date(a.ts).toLocaleString() : '';
+        const read = a.readAt && a.readAt !== a.ts ? 'Read ' + new Date(a.readAt).toLocaleString() : '';
+        const href = '/?ticket=' + encodeURIComponent(a.ticketId || '');
+        return '<li class="alerts-history-item">'
+          + '<span class="alerts-history-icon t-' + escHtml(a.type) + '" aria-hidden="true">' + (ALERT_ICONS[a.type] || '!') + '</span>'
+          + '<div class="alerts-history-main">'
+          + '<a class="alerts-history-ticket" href="' + escHtml(href) + '" title="Open on the board">' + (a.ticketNumber ? '<span class="no">' + escHtml(a.ticketNumber) + '</span>' : '') + escHtml(a.subject || '(ticket no longer on the board)') + '</a>'
+          + '<div class="alerts-history-what">' + escHtml(alertHistoryWhat(a)) + '</div>'
+          + (a.text ? '<div class="alerts-history-text">' + escHtml(a.text) + '</div>' : '')
+          + '</div>'
+          + '<div class="alerts-history-time">' + escHtml(when) + (read ? '<br>' + escHtml(read) : '') + '</div>'
+          + '</li>';
+      }).join('');
+    }
+    async function loadAlertsHistory() {
+      const agent = new URLSearchParams(location.search).get('agent') || '';
+      try {
+        const res = await fetch('/api/alerts/history' + (agent ? '?agent=' + encodeURIComponent(agent) : ''), { credentials: 'same-origin' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'failed');
+        alertsHistory = Array.isArray(data.alerts) ? data.alerts : [];
+        const sub = document.getElementById('alertsHistorySub');
+        if (sub) sub.textContent = alertsHistory.length + ' read alert' + (alertsHistory.length === 1 ? '' : 's') + (data.agent ? ' for ' + data.agent : '') + '. Unread ones stay in My Alerts on the board.';
+      } catch (_) {
+        alertsHistory = [];
+        const list = document.getElementById('alertsHistoryList');
+        if (list) list.innerHTML = '<li class="alerts-history-empty">Could not load your alerts history. Try again in a moment.</li>';
+        return;
+      }
+      renderAlertsHistory();
+      if (location.hash === '#alerts-history') document.getElementById('alerts-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    document.getElementById('alertsHistoryFilter')?.addEventListener('click', (event) => {
+      const btn = event.target.closest('button[data-type]');
+      if (!btn) return;
+      alertsHistoryType = btn.dataset.type;
+      document.querySelectorAll('#alertsHistoryFilter button').forEach(b => b.classList.toggle('active', b === btn));
+      renderAlertsHistory();
+    });
+
     loadProfile();
     loadMcpTokenStatus();
+    loadAlertsHistory();
   </script>
 </body>
 </html>
