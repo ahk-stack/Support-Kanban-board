@@ -39,7 +39,21 @@
     .msg.ok{color:#16a34a}
     .msg.err{color:#dc2626}
     .hidden{display:none}
-    @media (prefers-reduced-motion:reduce){.card{animation:none}}
+    /* Polish pass: the board's accent lip on the card, the same focus and
+       pressed states, and placeholders/autofill that stay on palette. */
+    .card{position:relative;overflow:hidden}
+    .card::before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:var(--grad)}
+    h1{letter-spacing:-.012em}
+    input::placeholder{color:#646b8e;opacity:1}
+    input:-webkit-autofill{-webkit-text-fill-color:var(--text);box-shadow:0 0 0 40px #f6f5ff inset;caret-color:var(--text)}
+    input:-webkit-autofill:focus{box-shadow:0 0 0 40px #f6f5ff inset,0 0 0 3px rgba(91,76,245,.30)}
+    input:focus{box-shadow:0 0 0 3px rgba(91,76,245,.30)}
+    button:active{transform:translateY(0) scale(.985);filter:brightness(.97)}
+    .link-btn:active{transform:none;filter:none}
+    .link-btn:focus-visible{box-shadow:none;outline:2px solid var(--primary);outline-offset:3px;border-radius:4px}
+    .err:not(:empty){padding:8px 11px;border-radius:10px;background:#fef2f2;border:1px solid #fecaca;font-weight:600}
+    .msg.ok{color:#15803d;font-weight:600}
+    @media (prefers-reduced-motion:reduce){.card{animation:none}button,input{transition:none}button:hover,button:active{transform:none}}
   </style>
 </head>
 <body>
