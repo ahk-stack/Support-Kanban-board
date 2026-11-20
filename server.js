@@ -1299,6 +1299,7 @@ function jiraIssueSummary(issue) {
     key: String(issue.key || '').trim(),
     summary: fields.summary || '',
     status: fields.status?.name || '',
+    statusCategory: String(fields.status?.statusCategory?.key || '').trim().toLowerCase(),
     assignee: fields.assignee?.displayName || fields.assignee?.emailAddress || 'Unassigned',
     reporter: fields.reporter?.displayName || fields.reporter?.emailAddress || 'Unknown',
     reporterEmail: fields.reporter?.emailAddress || '',
@@ -2636,6 +2637,104 @@ async function reconcileTicketNumbersWithDatabase() {
   return state;
 }
 
+/* My Alerts read marks, per agent: { TRIGRAM: { alertKey: readAt } }. The
+   first read wins, so the time in an agent's alerts history does not move. */
+const ALERT_READS_PER_AGENT_MAX = 4000;
+const JIRA_ALERTS_MAX = 1000;
+function mergeAlertReads(current, incoming) {
+  const asMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+  const out = {};
+  for (const source of [asMap(current), asMap(incoming)]) {
+    for (const [agent, reads] of Object.entries(source)) {
+      const code = String(agent || '').trim().toUpperCase();
+      if (!code) continue;
+      const mine = out[code] || (out[code] = {});
+      for (const [key, at] of Object.entries(asMap(reads))) {
+        const ts = Number(at) || 0;
+        if (ts <= 0) continue;
+        if (!mine[key] || ts < mine[key]) mine[key] = ts;
+      }
+    }
+  }
+  for (const [code, reads] of Object.entries(out)) {
+    const keys = Object.keys(reads);
+    if (keys.length <= ALERT_READS_PER_AGENT_MAX) continue;
+    out[code] = Object.fromEntries(keys.map(k => [k, reads[k]]).sort((a, b) => b[1] - a[1]).slice(0, ALERT_READS_PER_AGENT_MAX));
+  }
+  return out;
+}
+function mergeJiraAlerts(current, incoming) {
+  const byKey = new Map();
+  for (const list of [current, incoming]) {
+    (Array.isArray(list) ? list : []).forEach((alert) => {
+      const key = String(alert?.key || '');
+      if (key && !byKey.has(key)) byKey.set(key, alert);
+    });
+  }
+  return [...byKey.values()].sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0)).slice(-JIRA_ALERTS_MAX);
+}
+/* The "Jira says this is resolved" note is posted by whichever open board sees
+   the change first. Two boards seeing it at the same moment would both post
+   it; the marker it carries lets the second copy be dropped here. */
+function dedupeJiraSystemNotes(ticketComments) {
+  if (!ticketComments || typeof ticketComments !== 'object') return;
+  for (const [ticketId, list] of Object.entries(ticketComments)) {
+    if (!Array.isArray(list) || !list.some(c => c && c.jiraEvent)) continue;
+    const seen = new Set();
+    ticketComments[ticketId] = list.filter((c) => {
+      if (!c || !c.jiraEvent) return true;
+      if (seen.has(c.jiraEvent)) return false;
+      seen.add(c.jiraEvent);
+      return true;
+    });
+  }
+}
+/* An agent's alerts history: the My Alerts entries addressed to them that they
+   have read, built from the stored board the same way the board builds the
+   live list (see getAlertFeed in index.html). Reads made before read marks
+   were kept per agent sit in the old shared sets and count as read. */
+function buildAlertHistory(state, agent) {
+  const me = String(agent || '').trim().toUpperCase();
+  if (!me) return [];
+  const asMap = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+  const reads = asMap(asMap(state.alertReads)[me]);
+  const legacy = new Set([
+    ...(Array.isArray(state.readMentions) ? state.readMentions : []),
+    ...(Array.isArray(state.readJiraAlerts) ? state.readJiraAlerts : [])
+  ].map(String));
+  const tickets = new Map((Array.isArray(state.allTickets) ? state.allTickets : []).filter(t => t && t.id).map(t => [String(t.id), t]));
+  const numbers = asMap(state.ticketNumbers);
+  const ticketInfo = (id) => {
+    const n = Number(numbers[id] || 0);
+    return { ticketId: String(id), ticketNumber: n ? `#${String(n).padStart(4, '0')}` : '', subject: String(tickets.get(String(id))?.email?.subject || '') };
+  };
+  const toTs = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : (Date.parse(v) || 0); };
+  const items = [];
+  const push = (key, ts, item) => {
+    const readAt = Number(reads[key] || 0) || (legacy.has(key) ? ts : 0);
+    if (!readAt) return;
+    items.push({ key, ts, readAt, ...item });
+  };
+  for (const [ticketId, list] of Object.entries(asMap(state.ticketComments))) {
+    (Array.isArray(list) ? list : []).forEach((c, ci) => {
+      // Jira's own notes reach the agent as a Jira alert, not as a mention.
+      if (!c || c.jiraEvent) return;
+      const tags = (Array.isArray(c.tags) ? c.tags : []).map(t => String(t || '').trim().toUpperCase());
+      if (!tags.includes(me)) return;
+      push(`${ticketId}:${ci}`, toTs(c.ts || c.createdAt), { type: 'mention', ...ticketInfo(ticketId), who: String(c.author || ''), text: String(c.text || c.comment || '').slice(0, 400) });
+    });
+  }
+  (Array.isArray(state.jiraAlerts) ? state.jiraAlerts : []).forEach((a) => {
+    if (!a || String(a.recipient || '').trim().toUpperCase() !== me) return;
+    push(String(a.key || ''), toTs(a.ts), { type: a.kind === 'jira_resolved' ? 'jira_resolved' : 'jira', ...ticketInfo(a.ticketId), who: String(a.jiraKey || 'Jira'), title: String(a.title || ''), text: String(a.message || '').slice(0, 400) });
+  });
+  for (const [ticketId, entry] of Object.entries(asMap(state.ticketSendBackAlerts))) {
+    if (!entry || !(Number(entry.at) > 0) || String(entry.to || '').trim().toUpperCase() !== me) continue;
+    push(`sendback:${ticketId}:${Number(entry.at)}`, Number(entry.at), { type: 'sendback', ...ticketInfo(ticketId), who: String(entry.by || 'CS'), text: String(entry.note || '').slice(0, 400) });
+  }
+  return items.sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 300);
+}
+
 async function safeWriteState(state, actor = null) {
   const nextState = (state && typeof state === 'object') ? state : {};
   const currentState = safeReadState();
@@ -2881,6 +2980,20 @@ async function safeWriteState(state, actor = null) {
     return out;
   })();
 
+  // My Alerts: every tab writes back the whole list and its own read marks, so
+  // these are unioned rather than taken from whichever tab saved last - one
+  // agent reading an alert must not un-read another's, and a tab that has not
+  // heard about a new Jira alert must not erase it.
+  nextState.alertReads = mergeAlertReads(currentState.alertReads, nextState.alertReads);
+  nextState.jiraAlerts = mergeJiraAlerts(currentState.jiraAlerts, nextState.jiraAlerts);
+  ['readMentions', 'readJiraAlerts'].forEach((field) => {
+    nextState[field] = [...new Set([
+      ...(Array.isArray(currentState[field]) ? currentState[field] : []),
+      ...(Array.isArray(nextState[field]) ? nextState[field] : [])
+    ].map(String))];
+  });
+  if (!isStale) dedupeJiraSystemNotes(nextState.ticketComments);
+
   // Every ticket stays in the saved board, resolved or not. Resolved tickets
   // used to be cut from it once CS confirmed them or 72 hours had passed; the
   // board only hides those (isResolvedTicketHidden in index.html), and "My
@@ -2901,7 +3014,7 @@ async function safeWriteState(state, actor = null) {
   // A stale snapshot (e.g. from a lagging tab) must not blindly overwrite
   // fields it didn't correctly merge - keep the current state as the base and
   // only layer in the fields we've safely reconciled above by id/timestamp.
-  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketCSTouchedAt', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketReopenRequests', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf', 'ticketVelmaBug', 'ticketSlaResetAt'];
+  const reconciledFields = ['ticketState', 'ticketStageTouchedAt', 'ticketAssigneeTouchedAt', 'ticketNumbers', 'ticketNumberCounter', 'allTickets', 'seenIds', 'ticketAssignee', 'ticketCSOwner', 'ticketAssignmentMode', 'manualSupportOverride', 'manualCSOverride', 'ticketCSTouchedAt', 'ticketResolutionMeta', 'ticketArchived', 'ticketSendBackAlerts', 'ticketReopenedAt', 'ticketReopenRequests', 'ticketCreatedBy', 'ticketJira', 'ticketHubspotId', 'ticketDuplicateOf', 'ticketVelmaBug', 'ticketSlaResetAt', 'alertReads', 'jiraAlerts', 'readMentions', 'readJiraAlerts'];
   const finalState = isStale
     ? { ...currentState, ...Object.fromEntries(reconciledFields.map(key => [key, nextState[key]])), _meta: enrichedMeta }
     : { ...nextState, _meta: enrichedMeta };
@@ -5006,6 +5119,25 @@ app.get('/api/support-agents/names', requireAuth, async (req, res) => {
 
 app.get('/auth/me', requireAuth, (req, res) => {
   res.json({ user: { id: req.session.userId, username: req.session.username, role: req.session.role, avatarUrl: avatarUrlForUserId(req.session.userId) }, roster: agentRosterPayload() });
+});
+// The signed-in agent's read My Alerts, for the Alerts history on the profile
+// page. An admin may look at someone else's by passing ?agent=.
+app.get('/api/alerts/history', requireAuth, async (req, res) => {
+  // The agent code the board files alerts under: the username when it is a
+  // trigram, otherwise the email's local part (userAgentCode).
+  let self = String(req.session.username || '').trim().toUpperCase();
+  try {
+    const me = await prisma.user.findUnique({ where: { id: Number(req.session.userId) || 0 }, select: { username: true, email: true } });
+    if (me) self = userAgentCode(me);
+  } catch (_) { /* fall back to the session username */ }
+  const asked = String(req.query.agent || '').trim().toUpperCase();
+  const agent = asked && (asked === self || isAdminRole(normalizeRole(req.session.role))) ? asked : self;
+  try {
+    res.json({ agent, alerts: buildAlertHistory(safeReadState(), agent) });
+  } catch (error) {
+    console.error('Alerts history failed:', error);
+    res.status(500).json({ error: 'alerts_history_failed' });
+  }
 });
 // The CS and Support rosters, for the board to refresh its dropdowns without
 // a reload when an admin changes someone in Manage Users.
