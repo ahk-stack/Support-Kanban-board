@@ -55,7 +55,7 @@
   --text: #13152c;
   --text-soft: #353a5c;
   --muted: #565c80;
-  --muted-light: #737a9c;
+  --muted-light: #646b8e;
 
   --border: #e3e5f2;
   --border-strong: #cdd1e6;
@@ -72,7 +72,11 @@
   --accent-c: #ec4899;
   --accent-grad: linear-gradient(135deg, var(--accent-a) 0%, var(--accent-b) 62%, var(--accent-c) 130%);
   --accent-glow: 0 8px 22px rgba(109, 94, 252, .32);
-  --focus-ring: 0 0 0 3px rgba(91, 76, 245, .22);
+  --focus-ring: 0 0 0 3px rgba(91, 76, 245, .30);
+  /* Focus on the dark chrome (header, sidebar, modal heads): the violet ring
+     above disappears on near-black, so those controls get a light one. */
+  --focus-ring-ink: 0 0 0 2px rgba(196, 181, 253, .9), 0 0 0 5px rgba(124, 92, 255, .35);
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
 
   /* Stage colours. Mid-tones that work as a dot, a bar and a tint on either
      theme; text that needs to be readable uses --stage-ink below. */
@@ -127,56 +131,56 @@
   /* ===== Dark mode: Tailwind-derived color tokens (light-mode values, identical to the hardcoded colors they replace) ===== */
   --white: #ffffff;
   --white-rgb: 255,255,255;
-  --slate-400: #94a3b8;
-  --slate-400-rgb: 148,163,184;
-  --slate-50: #f8fafc;
-  --slate-50-rgb: 248,250,252;
-  --slate-100: #f1f5f9;
-  --slate-100-rgb: 241,245,249;
-  --slate-500: #64748b;
-  --slate-500-rgb: 100,116,139;
-  --slate-600: #475569;
-  --slate-600-rgb: 71,85,105;
-  --slate-900: #0f172a;
-  --slate-900-rgb: 15,23,42;
-  --slate-200: #e2e8f0;
-  --slate-200-rgb: 226,232,240;
-  --slate-800: #1e293b;
-  --slate-800-rgb: 30,41,59;
-  --slate-700: #334155;
-  --slate-700-rgb: 51,65,85;
-  --slate-300: #cbd5e1;
-  --slate-300-rgb: 203,213,225;
-  --gray-200: #e5e7eb;
-  --gray-200-rgb: 229,231,235;
-  --gray-500: #6b7280;
-  --gray-500-rgb: 107,114,128;
-  --gray-800: #1f2937;
-  --gray-800-rgb: 31,41,55;
-  --gray-700: #374151;
-  --gray-700-rgb: 55,65,81;
-  --neutral-50: #fafafa;
-  --neutral-50-rgb: 250,250,250;
-  --legacy-666: #666666;
-  --legacy-666-rgb: 102,102,102;
-  --legacy-777: #777777;
-  --legacy-777-rgb: 119,119,119;
-  --legacy-555: #555555;
-  --legacy-555-rgb: 85,85,85;
-  --legacy-444: #444444;
-  --legacy-444-rgb: 68,68,68;
-  --legacy-333: #333333;
-  --legacy-333-rgb: 51,51,51;
-  --legacy-111: #111111;
-  --legacy-111-rgb: 17,17,17;
-  --legacy-ddd: #dddddd;
-  --legacy-ddd-rgb: 221,221,221;
-  --legacy-d7d7d7: #d7d7d7;
-  --legacy-d7d7d7-rgb: 215,215,215;
-  --legacy-f0f0f0: #f0f0f0;
-  --legacy-f0f0f0-rgb: 240,240,240;
-  --legacy-f8f8f8: #f8f8f8;
-  --legacy-f8f8f8-rgb: 248,248,248;
+  --slate-400: #6c7395;
+  --slate-400-rgb: 108,115,149;
+  --slate-50: #f8f9fe;
+  --slate-50-rgb: 248,249,254;
+  --slate-100: #f1f2fa;
+  --slate-100-rgb: 241,242,250;
+  --slate-500: #5f668a;
+  --slate-500-rgb: 95,102,138;
+  --slate-600: #4a5075;
+  --slate-600-rgb: 74,80,117;
+  --slate-900: #13152c;
+  --slate-900-rgb: 19,21,44;
+  --slate-200: #e3e5f2;
+  --slate-200-rgb: 227,229,242;
+  --slate-800: #23264a;
+  --slate-800-rgb: 35,38,74;
+  --slate-700: #353a5c;
+  --slate-700-rgb: 53,58,92;
+  --slate-300: #cdd1e6;
+  --slate-300-rgb: 205,209,230;
+  --gray-200: #e3e5f2;
+  --gray-200-rgb: 227,229,242;
+  --gray-500: #646b8e;
+  --gray-500-rgb: 100,107,142;
+  --gray-800: #23264a;
+  --gray-800-rgb: 35,38,74;
+  --gray-700: #3d4266;
+  --gray-700-rgb: 61,66,102;
+  --neutral-50: #fafbfe;
+  --neutral-50-rgb: 250,251,254;
+  --legacy-666: #565c80;
+  --legacy-666-rgb: 86,92,128;
+  --legacy-777: #646b8e;
+  --legacy-777-rgb: 100,107,142;
+  --legacy-555: #4a5075;
+  --legacy-555-rgb: 74,80,117;
+  --legacy-444: #3d4266;
+  --legacy-444-rgb: 61,66,102;
+  --legacy-333: #2b2f4f;
+  --legacy-333-rgb: 43,47,79;
+  --legacy-111: #13152c;
+  --legacy-111-rgb: 19,21,44;
+  --legacy-ddd: #dcdfee;
+  --legacy-ddd-rgb: 220,223,238;
+  --legacy-d7d7d7: #d9dcec;
+  --legacy-d7d7d7-rgb: 217,220,236;
+  --legacy-f0f0f0: #eff0f8;
+  --legacy-f0f0f0-rgb: 239,240,248;
+  --legacy-f8f8f8: #f8f9fe;
+  --legacy-f8f8f8-rgb: 248,249,254;
   --legacy-fafbff: #fafbff;
   --legacy-fafbff-rgb: 250,251,255;
   --legacy-f8fbff: #f8fbff;
@@ -373,7 +377,7 @@
   --primary-dark: #b3abff;
   --primary-soft: #262158;
 
-  --focus-ring: 0 0 0 3px rgba(141, 130, 255, .32);
+  --focus-ring: 0 0 0 3px rgba(141, 130, 255, .42);
   --accent-glow: 0 8px 24px rgba(109, 94, 252, .38);
 
   --st-new: #9a80ff;
@@ -406,8 +410,8 @@
   /* Tailwind-derived tokens */
   --white: #161931;
   --white-rgb: 22,25,49;
-  --slate-400: #6c7197;
-  --slate-400-rgb: 108,113,151;
+  --slate-400: #8287ab;
+  --slate-400-rgb: 130,135,171;
   --slate-50: #121429;
   --slate-50-rgb: 18,20,41;
   --slate-100: #1b1f3b;
@@ -8166,6 +8170,313 @@ th {
   .modal-bg.open .modal { animation: none; }
   .card:hover { transform: none; }
   .modal-close-x:hover { transform: none; }
+}
+
+/* =========================================================================
+   Polish pass
+   -------------------------------------------------------------------------
+   Small finishing touches over the visual refresh above: the same layer
+   approach, no new look. What it settles: one motion curve for every
+   control, a pressed state that matches the hover state, focus you can
+   actually see on the dark chrome, counts that do not jitter as they
+   change, and a handful of colour pairs that missed WCAG AA.
+   ========================================================================= */
+
+/* ---- Type ------------------------------------------------------------------ */
+
+/* Headings tighten a touch and wrap evenly. :where() keeps this at zero
+   specificity so every heading with its own rule still wins. */
+:where(h1, h2, h3, h4) { letter-spacing: -0.012em; text-wrap: balance; }
+
+/* Counts never jitter as they tick: every badge, tally and table cell lines
+   its digits up. */
+.col-badge,
+.spam-count-badge,
+.mentions-badge,
+.com-badge,
+.agent-pill .cnt,
+.fb-tab-count,
+.sel-count,
+.fstats,
+.ticket-no,
+.jira-ct,
+.card-date,
+#kpi-status-cards,
+#kpi-sla-cards,
+td {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Placeholders are hints, not ghosts: Firefox fades them to half strength by
+   default, which took the muted colour below AA. */
+::placeholder { color: var(--muted-light); opacity: 1; }
+
+/* ---- Motion ---------------------------------------------------------------- */
+
+/* One curve and one speed for every control. The base sheet animated "all",
+   which also tweened layout properties when a control changed size. */
+.btn-out,
+.btn-primary,
+.btn-danger,
+.btn-back,
+.btn-restore,
+.btn-clear-spam,
+.chip,
+.sort-btn,
+.filter-sel,
+.spam-view-btn,
+.jira-chip,
+.card-act,
+.com-btn,
+.cat-select,
+.tr-trigger,
+.open-email-btn,
+.velma-link-btn,
+.jira-link-btn,
+.crm-nav-btn,
+.account-link,
+.account-item,
+.agent-assign-option,
+.form-input,
+.compose-textarea,
+.modal-close-x {
+  transition:
+    background-color .15s var(--ease-out),
+    border-color .15s var(--ease-out),
+    color .15s var(--ease-out),
+    box-shadow .15s var(--ease-out),
+    transform .15s var(--ease-out),
+    filter .15s var(--ease-out),
+    opacity .15s var(--ease-out);
+}
+
+.card {
+  transition:
+    transform .18s var(--ease-out),
+    box-shadow .18s var(--ease-out),
+    border-color .18s var(--ease-out),
+    opacity .18s var(--ease-out);
+}
+
+/* Pressed: buttons settle back under the pointer instead of staying lifted. */
+.btn-primary:active,
+.btn-danger:active,
+.btn-out:active,
+.btn-back:active,
+.create-ticket-btn:active,
+.fb-launcher:active {
+  transform: translateY(0) scale(.98);
+  filter: brightness(.97);
+}
+
+.chip:active,
+.sort-btn:active,
+.jira-chip:active,
+.card-act:active,
+.com-btn:active,
+.crm-nav-btn:active,
+.agent-assign-option:active {
+  transform: scale(.97);
+}
+
+/* ---- Focus --------------------------------------------------------------------- */
+
+/* The violet ring vanishes on the near-black header, sidebar and modal heads;
+   controls there get a light ring instead. */
+body > header :focus-visible,
+.crm-sidebar :focus-visible,
+.modal-head :focus-visible,
+.undo-toast :focus-visible,
+.kpi-alltime :focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring-ink);
+}
+
+/* Clickable KPI tiles are role="button" divs; keyboard focus shows on them. */
+[data-kpi-drilldown]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring) !important;
+}
+
+/* ---- Buttons ------------------------------------------------------------------- */
+
+/* Danger matches primary: the same highlight, the same hover lift. Its hover
+   used to drop the gradient for a flat red. */
+.btn-danger {
+  color: #fff;
+  border: 0;
+  box-shadow: 0 4px 14px rgba(220, 38, 38, .28), inset 0 1px 0 rgba(255, 255, 255, .18);
+}
+
+.btn-danger:hover {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+}
+
+.btn-danger:disabled,
+.btn-back:disabled,
+.btn-restore:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+  filter: none;
+  transform: none;
+}
+
+/* Disabled buttons do not react to the pointer. */
+.btn-primary:disabled:hover,
+.btn-danger:disabled:hover { transform: none; filter: none; }
+.btn-out:disabled:hover {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text-soft);
+}
+
+/* ---- Fields --------------------------------------------------------------------- */
+
+:is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea):disabled {
+  background-color: var(--surface-muted);
+  color: var(--muted);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+
+.form-field label { letter-spacing: .005em; }
+
+/* ---- Cards --------------------------------------------------------------------- */
+
+/* While a card is in flight the source keeps its place but steps back. */
+.card.dragging {
+  opacity: .5;
+  transform: none;
+  box-shadow: none;
+  border-style: dashed;
+}
+
+/* A selected card keeps its ring when hovered; the hover shadow used to
+   replace it and the selection seemed to blink off. */
+.card.selected:hover {
+  box-shadow: 0 0 0 2px var(--primary), 0 12px 28px color-mix(in srgb, var(--primary) 18%, transparent);
+}
+
+/* ---- Modals --------------------------------------------------------------------- */
+
+/* The backdrop fades in with the dialog instead of snapping on. */
+.modal-bg.open { animation: modalBgIn .18s ease-out; }
+
+@keyframes modalBgIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.modal-head h2,
+.modal-head h3 { line-height: 1.3; }
+
+/* Footer lines up with the head and the meta bar above it. */
+.modal-actions { padding: 12px 20px; }
+
+.modal-close-x:active { transform: rotate(90deg) scale(.92); }
+
+/* ---- Toasts and popovers -------------------------------------------------------- */
+
+#toast { letter-spacing: .005em; }
+
+/* Menus open with a short settle rather than appearing in one frame. The
+   agent menu is positioned by script, so it only fades. */
+.snooze-menu,
+#tr-pop.open,
+.palette-overlay.open .palette { animation: popIn .14s var(--ease-out); }
+
+.agent-assign-menu.open,
+.agent-assign-wrap.open .agent-assign-menu { animation: fadeIn .12s ease-out; }
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes popIn {
+  from { opacity: 0; transform: translateY(-4px) scale(.98); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ---- Tables --------------------------------------------------------------------- */
+
+.kpi-table tbody tr,
+.ins-table tbody tr { transition: background-color .12s ease; }
+
+.kpi-table tbody tr:hover,
+.ins-table tbody tr:hover { background: color-mix(in srgb, var(--primary) 4%, var(--surface)); }
+
+.kpi-table td,
+.ins-table td { color: var(--text-soft); }
+
+/* ---- KPI tiles -------------------------------------------------------------------- */
+
+#kpi-status-cards > *:hover,
+#kpi-sla-cards > *:hover { box-shadow: var(--shadow-sm) !important; }
+
+/* ---- Scrollbars ------------------------------------------------------------------- */
+
+/* The email body and wide KPI tables keep their always-visible tracks, drawn
+   in the same quiet tone as every other scrollbar. */
+#em-body,
+.kpi-scroll-x {
+  scrollbar-color: color-mix(in srgb, var(--muted-light) 50%, transparent) color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+#em-body::-webkit-scrollbar-track,
+.kpi-scroll-x::-webkit-scrollbar-track { background: color-mix(in srgb, var(--border) 60%, transparent); }
+
+#em-body::-webkit-scrollbar-thumb,
+.kpi-scroll-x::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted-light) 50%, transparent);
+  background-clip: padding-box;
+}
+
+#em-body::-webkit-scrollbar-thumb:hover,
+.kpi-scroll-x::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--muted-light) 75%, transparent);
+  background-clip: padding-box;
+}
+
+/* ---- Contrast fixes ---------------------------------------------------------------- */
+
+/* White on emerald-500 is 2.5:1; the darker emerald is 5.5:1, in both themes. */
+.velma-status.done,
+.velma-badge-card.done .velma-status,
+.velma-details.done .velma-status { background: #047857; }
+
+/* The red NEW tags carry white text; rose-600 reads at AA where rose-500 did not. */
+.fb-launcher-badge,
+.fb-tab-count,
+.pn-ribbon { background: #e11d48; }
+
+/* ---- Reduced motion ----------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .modal-bg.open,
+  .snooze-menu,
+  #tr-pop.open,
+  .palette-overlay.open .palette,
+  .agent-assign-menu.open,
+  .agent-assign-wrap.open .agent-assign-menu,
+  .account-panel.open,
+  .col-body.just-received { animation: none; }
+  .btn-primary:hover,
+  .btn-danger:hover,
+  .create-ticket-btn:hover,
+  .btn-primary:active,
+  .btn-danger:active,
+  .btn-out:active,
+  .chip:active,
+  .card-act:active { transform: none; }
 }
 
 </style>

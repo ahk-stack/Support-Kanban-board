@@ -443,6 +443,38 @@
     .btn-secondary:hover { background: #f1f2fa; }
     .form-input { border-radius: 10px; }
     .avatar-preview { background: var(--q-grad) !important; }
+
+    /* Polish pass: the remaining cool-slate greys and blue focus glow moved
+       onto the board's violet neutrals, weights a step lighter like the board,
+       and the same motion, pressed and focus states. */
+    :root { --q-text-soft: #353a5c; --q-border-strong: #cdd1e6; --q-surface-soft: #f8f9fe; --q-ease: cubic-bezier(.2, .8, .2, 1); }
+    .wrap { margin: 36px auto 48px; }
+    .content { padding: 26px 30px 30px; }
+    .stat { border-radius: 16px; background: var(--q-surface-soft); box-shadow: 0 1px 2px rgba(25, 22, 70, .04); }
+    .stat-label { font-size: 11px; letter-spacing: .08em; color: var(--muted); }
+    .stat-value { font-weight: 700; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+    .details { border-radius: 16px; }
+    .row { padding: 14px 18px; border-bottom-color: var(--border); align-items: center; }
+    .label { font-weight: 650; color: var(--muted); }
+    .value { font-weight: 600; }
+    .form-input { border-color: var(--q-border-strong); background: #fff; font-weight: 500; font-size: 14px; padding: 10px 12px; }
+    .form-input:hover { border-color: #b4abfb; }
+    .form-input:focus { box-shadow: 0 0 0 3px rgba(91, 76, 245, .30); }
+    .form-input::placeholder { color: #646b8e; opacity: 1; }
+    .avatar-preview { border-color: #e4e0ff; box-shadow: 0 10px 24px rgba(109, 94, 252, .22); }
+    .avatar-title { font-weight: 700; }
+    .avatar-note { font-weight: 500; }
+    .badge { padding: 4px 10px; border-radius: 8px; font-size: 12.5px; font-weight: 700; }
+    .btn { font-size: 14px; transition: transform .15s var(--q-ease), box-shadow .15s var(--q-ease), filter .15s var(--q-ease), background-color .15s var(--q-ease), border-color .15s var(--q-ease); }
+    .btn-secondary:hover { border-color: rgba(91, 76, 245, .35); }
+    .btn-danger { background: #fef2f2; border: 1px solid #fecaca; }
+    .btn-danger:hover { background: #fee2e2; }
+    .btn:active { transform: translateY(0) scale(.98); }
+    .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; filter: none; }
+    .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(91, 76, 245, .32); }
+    .nav a:focus-visible, .nav button:focus-visible, .avatar-picker:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(196, 181, 253, .9), 0 0 0 5px rgba(124, 92, 255, .35); }
+    .nav a:active, .nav button:active { transform: scale(.97); }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; } .btn:hover, .btn:active, .avatar-picker:hover .avatar { transform: none; } }
   </style>
 </head>
 <body>
