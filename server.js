@@ -4321,7 +4321,7 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
       const at = safeDateForDb(c.ts);
       const row = c.edited && at ? existingCommentsByTs.get(at.getTime()) : null;
       if (row) {
-        if (row.comment !== c.text) editedComments.push({ id: row.id, text: c.text });
+        if (row.comment !== c.text) editedComments.push({ id: row.id, text: c.text, previous: row.comment });
       } else if (!existingCommentTexts.has(c.text)) {
         newComments.push(c);
       }
@@ -4455,7 +4455,7 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
         userId: req.session?.userId || null,
         before: existingTicket,
         after: ticket,
-        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'csAgent', 'hubspotTicketId', 'jiraTicketKey', 'body'],
+        fields: ['subject', 'senderEmail', 'companyName', 'status', 'priority', 'category', 'assignedAgent', 'csAgent', 'hubspotTicketId', 'jiraTicketKey', 'duplicateOfExternalId', 'body'],
         fieldMetadata: assignMeta ? {
           assignedAgent: { actor: assignMeta.by || null, source: assignMeta.source || null }
         } : {}
@@ -4476,6 +4476,16 @@ async function upsertBoardTicketsToDatabase(state, req) {  if (!state || typeof 
     }
     for (const comment of editedComments) {
       await prisma.ticketComment.update({ where: { id: comment.id }, data: { comment: comment.text } });
+      // The row is overwritten in place, so without this the audit had no
+      // trace that a note ever said something else.
+      await createTicketAuditEvent({
+        ticketId: ticket.id,
+        userId: req?.session?.userId || null,
+        eventType: 'comment_edited',
+        oldValue: String(comment.previous || '').slice(0, 500),
+        newValue: comment.text.slice(0, 500),
+        metadata: { commentId: comment.id, source: 'board' }
+      });
     }
 
     count += 1;
@@ -10662,6 +10672,964 @@ app.get('/api/audit/agent-activity', requireSupportOrAdmin, async (req, res) => 
   }
 });
 
+// ---------------------------------------------------------------------------
+// Audit trail
+//
+// The page used to read one capped slice of TicketEvent (the newest 500 rows,
+// or 30 days / 5000 rows grouped by agent, 40 rows a ticket). That was only
+// ever part of a ticket's life, for three reasons this section deals with:
+//
+// - Notes were never in the log: they are TicketComment rows, which nothing
+//   read. They are merged in here as timeline items.
+// - Everything the board keeps only in its state (archive, snooze, CS confirm
+//   or send-back, re-opens, re-open requests) was never logged at all. Those
+//   are now logged going forward (auditBoardStateTransitions), and for the
+//   past they are reconstructed from the state and the Ticket row, marked as
+//   reconstructed so nobody mistakes an inference for a record.
+// - The reads were windows. Every read here is a filter plus a cursor or an
+//   offset, so the whole history is reachable a page at a time.
+// ---------------------------------------------------------------------------
+const AUDIT_STAGE_KEYS = ['new', 'inp', 'wus', 'dft', 'wct', 'res'];
+const AUDIT_STAGE_LABELS = { new: 'New', inp: 'In Progress', wus: 'Waiting on Us', dft: 'Due for Test', wct: 'Waiting on Contact', res: 'Resolved' };
+const AUDIT_KINDS = {
+  created: 'Created',
+  stage: 'Stage moves',
+  assign: 'Support assignment',
+  cs: 'CS owner',
+  priority: 'Priority',
+  category: 'Category',
+  note: 'Notes',
+  reply: 'Replies',
+  jira: 'Jira',
+  link: 'Links',
+  sla: 'SLA',
+  snooze: 'Snooze',
+  archive: 'Archive',
+  resolution: 'Resolution review',
+  reopen: 'Re-opens',
+  duplicate: 'Duplicates',
+  sync: 'Mail sync'
+};
+const AUDIT_EVENT_INFO = {
+  ticket_created: { kind: 'created', label: 'Ticket created' },
+  ticket_received: { kind: 'created', label: 'Email received' },
+  ticket_status_changed: { kind: 'stage', label: 'Stage moved' },
+  ticket_assignedAgent_changed: { kind: 'assign', label: 'Support agent changed' },
+  ticket_csAgent_changed: { kind: 'cs', label: 'CS owner changed' },
+  ticket_priority_changed: { kind: 'priority', label: 'Priority changed' },
+  ticket_category_changed: { kind: 'category', label: 'Category changed' },
+  note_added: { kind: 'note', label: 'Note added' },
+  comment_added: { kind: 'note', label: 'Note added' },
+  comment_edited: { kind: 'note', label: 'Note edited' },
+  email_reply_sent: { kind: 'reply', label: 'Reply sent' },
+  outlook_draft_created: { kind: 'reply', label: 'Outlook draft created' },
+  reply_proposed: { kind: 'reply', label: 'Reply drafted' },
+  customer_replied: { kind: 'reply', label: 'New message in the thread' },
+  ticket_jira_linked: { kind: 'jira', label: 'Jira linked' },
+  ticket_jira_unlinked: { kind: 'jira', label: 'Jira unlinked' },
+  ticket_jiraTicketKey_changed: { kind: 'jira', label: 'Jira link changed' },
+  ticket_hubspotTicketId_changed: { kind: 'link', label: 'HubSpot link changed' },
+  ticket_velma_bug_linked: { kind: 'link', label: 'Velma bug linked' },
+  ticket_velma_bug_unlinked: { kind: 'link', label: 'Velma bug unlinked' },
+  ticket_velma_bug_done: { kind: 'sla', label: 'Velma bug fixed' },
+  ticket_velma_bug_reopened: { kind: 'sla', label: 'Velma bug re-opened' },
+  ticket_sla_hold: { kind: 'sla', label: 'SLA put on hold' },
+  ticket_sla_released: { kind: 'sla', label: 'SLA hold released' },
+  sla_reset: { kind: 'sla', label: 'SLA clock restarted' },
+  ticket_snoozed: { kind: 'snooze', label: 'Snoozed' },
+  ticket_unsnoozed: { kind: 'snooze', label: 'Woken up' },
+  ticket_snooze_expired: { kind: 'snooze', label: 'Snooze ended' },
+  ticket_archived: { kind: 'archive', label: 'Archived' },
+  ticket_restored: { kind: 'archive', label: 'Restored from archive' },
+  ticket_removed_from_board: { kind: 'archive', label: 'Removed from the board' },
+  ticket_resolution_confirmed: { kind: 'resolution', label: 'Resolution confirmed by CS' },
+  ticket_sent_back: { kind: 'resolution', label: 'Sent back by CS' },
+  ticket_reopen_requested: { kind: 'reopen', label: 'Re-open requested' },
+  ticket_reopen_decided: { kind: 'reopen', label: 'Re-open request decided' },
+  ticket_reopened: { kind: 'reopen', label: 'Re-opened by a client reply' },
+  ticket_marked_duplicate: { kind: 'duplicate', label: 'Marked as duplicate' },
+  ticket_unmarked_duplicate: { kind: 'duplicate', label: 'Duplicate mark removed' },
+  ticket_duplicateOfExternalId_changed: { kind: 'duplicate', label: 'Duplicate link changed' },
+  ticket_subject_changed: { kind: 'sync', label: 'Subject updated (mail sync)' },
+  ticket_senderEmail_changed: { kind: 'sync', label: 'Sender updated (mail sync)' },
+  ticket_companyName_changed: { kind: 'sync', label: 'Company updated (mail sync)' },
+  ticket_body_changed: { kind: 'sync', label: 'Body updated (mail sync)' }
+};
+// Written alongside a TicketComment row, which is what the audit reads for
+// notes; reading both would list every MCP note twice.
+const AUDIT_SHADOWED_EVENTS = ['comment_added', 'reply_proposed'];
+const AUDIT_SYNC_EVENTS = Object.keys(AUDIT_EVENT_INFO).filter(t => AUDIT_EVENT_INFO[t].kind === 'sync');
+
+function auditEventInfo(type) {
+  return AUDIT_EVENT_INFO[type] || { kind: 'other', label: String(type || 'event').replace(/^ticket_/, '').replace(/_/g, ' ') };
+}
+function auditClip(value, n = 400) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  return text.length > n ? `${text.slice(0, n - 1)}…` : text;
+}
+function auditStageOf(status) {
+  return status ? normalizeDbStatusForBoard(status) : null;
+}
+
+// The board state, read at most once per change of the file: a timeline open
+// should not re-parse a multi-megabyte JSON file each time.
+let auditStateCache = { key: '', state: {} };
+function readStateForAudit() {
+  try {
+    const stat = fs.statSync(DATA_PATH);
+    const key = `${stat.mtimeMs}:${stat.size}`;
+    if (auditStateCache.key !== key) auditStateCache = { key, state: safeReadState() };
+    return auditStateCache.state || {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+const AUDIT_USER_SELECT = { id: true, username: true, displayName: true, email: true, role: true, team: true };
+const AUDIT_TICKET_SELECT = {
+  id: true, externalId: true, displayNumber: true, subject: true, senderName: true, senderEmail: true, companyName: true,
+  status: true, priority: true, category: true, assignedAgent: true, csAgent: true, source: true,
+  hubspotTicketId: true, jiraTicketKey: true, velmaBugId: true, slaHoldAt: true, slaHoldBy: true,
+  createdAt: true, updatedAt: true, resolvedAt: true, slaResetAt: true,
+  duplicateOfExternalId: true, duplicateMarkedAt: true, duplicateMarkedBy: true
+};
+const AUDIT_TICKET_BRIEF_SELECT = {
+  id: true, externalId: true, displayNumber: true, subject: true, companyName: true, status: true,
+  priority: true, assignedAgent: true, csAgent: true, jiraTicketKey: true
+};
+
+const auditBoardIdCache = new WeakMap();
+function auditBoardTicketIds(state) {
+  if (!auditBoardIdCache.has(state)) auditBoardIdCache.set(state, new Set(state.allTickets.map(t => String(t && t.id))));
+  return auditBoardIdCache.get(state);
+}
+// What the board says about a ticket that no Ticket column holds.
+function auditBoardExtras(state, externalId) {
+  const ext = String(externalId || '');
+  const get = key => boardAuditMap(state, key)[ext];
+  const snooze = get('ticketSnooze');
+  const velma = get('ticketVelmaBug');
+  const rawStage = get('ticketState');
+  return {
+    stage: rawStage ? normalizeDbStatusForBoard(normalizeBoardStatusForDb(rawStage)) : null,
+    stageTouchedAt: boardAuditIso(get('ticketStageTouchedAt')),
+    assigneeTouchedAt: boardAuditIso(get('ticketAssigneeTouchedAt')),
+    assigneeBy: get('ticketAssigneeBy') || null,
+    csTouchedAt: boardAuditIso(get('ticketCSTouchedAt')),
+    createdBy: get('ticketCreatedBy') || null,
+    subtype: get('ticketSubtype') || null,
+    archived: get('ticketArchived') || null,
+    snooze: snooze && boardAuditTs(snooze.until) > Date.now() ? snooze : null,
+    lastSnooze: snooze || null,
+    slaHold: get('ticketSlaHold') || null,
+    resolution: get('ticketResolutionMeta') || null,
+    sendBack: get('ticketSendBackAlerts') || null,
+    reopenedAt: boardAuditIso(get('ticketReopenedAt')),
+    hasNewReply: !!get('ticketHasNewReply'),
+    velmaBug: velma && typeof velma === 'object' ? { id: velma.id || null, row: velma.row || null, status: velma.status || null } : null,
+    onBoard: Array.isArray(state.allTickets) ? auditBoardTicketIds(state).has(ext) : null
+  };
+}
+
+function auditActorFor(event) {
+  const meta = event.metadata && typeof event.metadata === 'object' ? event.metadata : {};
+  if (meta.actor) return String(meta.actor).toUpperCase();
+  if (event.user) return userAgentCode(event.user) || null;
+  return null;
+}
+
+function auditItemFromEvent(e) {
+  const meta = e.metadata && typeof e.metadata === 'object' ? e.metadata : {};
+  const info = auditEventInfo(e.eventType);
+  const item = {
+    id: `e${e.id}`,
+    at: new Date(e.createdAt).toISOString(),
+    type: e.eventType,
+    kind: info.kind,
+    label: info.label,
+    from: auditClip(e.oldValue),
+    to: auditClip(e.newValue),
+    actor: auditActorFor(e),
+    account: e.user ? (e.user.displayName || e.user.username) : null,
+    source: meta.source || meta.via || null,
+    reconstructed: false,
+    meta: {}
+  };
+  // The time the board says it happened, when that differs from when the
+  // save carrying it reached the server.
+  if (meta.at) item.happenedAt = meta.at;
+  for (const key of ['note', 'reason', 'to', 'from', 'row', 'status', 'mailbox', 'threaded', 'cc', 'slaResetAt', 'commentId']) {
+    if (meta[key] !== undefined && meta[key] !== null && meta[key] !== '') item.meta[key] = meta[key];
+  }
+  if (e.eventType === 'email_reply_sent' && Array.isArray(meta.to)) item.meta.recipients = meta.to.slice(0, 10);
+  if (e.eventType === 'ticket_status_changed') {
+    item.fromStage = auditStageOf(e.oldValue);
+    item.toStage = auditStageOf(e.newValue);
+  } else if (e.eventType === 'ticket_created') {
+    item.toStage = auditStageOf(e.newValue) || 'new';
+  }
+  if (info.kind === 'sync' || e.eventType === 'comment_edited') {
+    item.from = auditClip(e.oldValue, 160);
+    item.to = auditClip(e.newValue, 160);
+  }
+  return item;
+}
+
+function auditCommentAuthors(state, externalId) {
+  const list = boardAuditMap(state, 'ticketComments')[String(externalId || '')];
+  const byTs = new Map();
+  if (Array.isArray(list)) {
+    list.forEach((c) => {
+      const ts = boardAuditTs(c && (c.ts || c.createdAt));
+      if (ts) byTs.set(ts, c);
+    });
+  }
+  return byTs;
+}
+
+function auditItemFromComment(c, boardComment = null) {
+  const tags = Array.isArray(c.tags) ? c.tags : [];
+  const proposed = tags.includes(PROPOSED_REPLY_TAG);
+  const info = auditEventInfo(proposed ? 'reply_proposed' : 'note_added');
+  return {
+    id: `c${c.id}`,
+    at: new Date(c.createdAt).toISOString(),
+    type: proposed ? 'reply_proposed' : 'note_added',
+    kind: info.kind,
+    label: info.label,
+    text: auditClip(c.comment, 1200),
+    tags: tags.filter(t => t !== PROPOSED_REPLY_TAG),
+    actor: (boardComment && boardComment.author ? String(boardComment.author).toUpperCase() : null) || (c.user ? userAgentCode(c.user) : null),
+    account: c.user ? (c.user.displayName || c.user.username) : null,
+    edited: !!(boardComment && boardComment.editedAt),
+    source: c.user && c.user.team === HIDDEN_TEAM ? 'service' : null,
+    reconstructed: false,
+    meta: {}
+  };
+}
+
+/* One ticket's whole life, oldest first: the recorded events, the notes, and
+   whatever the Ticket row and the board state prove happened but nobody wrote
+   down at the time. A reconstructed item only fills a gap - when a recorded
+   event already says the same thing it is left out. */
+function buildTicketTimeline(ticket, events, comments, state) {
+  const ext = String(ticket.externalId || '');
+  const board = auditBoardExtras(state, ext);
+  const createdMs = new Date(ticket.createdAt).getTime();
+  const nowMs = Date.now();
+  const items = [];
+
+  events.filter(e => !AUDIT_SHADOWED_EVENTS.includes(e.eventType)).forEach(e => items.push(auditItemFromEvent(e)));
+  const authors = auditCommentAuthors(state, ext);
+  comments.forEach(c => items.push(auditItemFromComment(c, authors.get(new Date(c.createdAt).getTime()) || null)));
+
+  const recorded = items.slice();
+  const atMs = item => new Date(item.happenedAt || item.at).getTime();
+  const hasType = (types, nearMs = null, windowMs = 10 * 60 * 1000) => recorded.some(i => types.includes(i.type) && (nearMs === null || Math.abs(atMs(i) - nearMs) <= windowMs));
+  const recon = (type, when, fields = {}) => {
+    const ms = boardAuditTs(when);
+    if (!ms) return null;
+    const info = auditEventInfo(type);
+    const item = { id: `r-${type}-${ms}`, at: new Date(ms).toISOString(), type, kind: info.kind, label: info.label, from: null, to: null, actor: null, account: null, source: 'reconstructed', reconstructed: true, meta: {}, ...fields };
+    items.push(item);
+    return item;
+  };
+
+  // Creation, and when the email actually arrived if the row was written later.
+  const createdEvent = recorded.find(i => i.type === 'ticket_created');
+  // Set only for a ticket an agent typed in by hand.
+  const creator = typeof board.createdBy === 'string' && board.createdBy ? board.createdBy.toUpperCase().slice(0, 40) : null;
+  if (createdEvent && creator && !createdEvent.actor) createdEvent.actor = creator;
+  if (!createdEvent) {
+    recon('ticket_created', createdMs, { toStage: 'new', actor: creator, meta: { channel: creator ? 'manual' : (ticket.source || null) } });
+  } else if (atMs(createdEvent) - createdMs > 5 * 60 * 1000) {
+    recon('ticket_received', createdMs, { meta: { channel: ticket.source || null, from: ticket.senderEmail || null } });
+  }
+
+  // Stage: if the log never saw the ticket reach the stage it is in now, the
+  // move happened anyway - it is dated by when the card last changed column.
+  const currentStage = board.stage || auditStageOf(ticket.status) || 'new';
+  const stageEvents = recorded.filter(i => i.kind === 'stage').sort((a, b) => atMs(a) - atMs(b));
+  const lastStageEvent = stageEvents[stageEvents.length - 1];
+  const lastKnownStage = lastStageEvent ? lastStageEvent.toStage : (createdEvent && createdEvent.toStage) || 'new';
+  if (lastKnownStage !== currentStage) {
+    const lowerBound = lastStageEvent ? atMs(lastStageEvent) : createdMs;
+    const candidates = [board.stageTouchedAt, currentStage === 'res' ? (ticket.resolvedAt || (board.resolution && board.resolution.resolvedAt)) : null, ticket.updatedAt];
+    const when = candidates.map(boardAuditTs).find(ms => ms && ms >= lowerBound) || lowerBound + 1;
+    recon('ticket_status_changed', when, {
+      fromStage: lastKnownStage,
+      toStage: currentStage,
+      actor: currentStage === 'res' && board.resolution && board.resolution.resolvedBy ? String(board.resolution.resolvedBy).toUpperCase() : null
+    });
+  }
+
+  // Assignment: same idea for the current Support agent and CS owner.
+  const reconAssignment = (type, current, touchedAt, by) => {
+    if (!current) return;
+    const own = recorded.filter(i => i.type === type).sort((a, b) => atMs(a) - atMs(b));
+    const last = own[own.length - 1];
+    if (last && String(last.to || '').toUpperCase() === String(current).toUpperCase()) return;
+    const lowerBound = last ? atMs(last) : Math.max(createdMs, createdEvent ? atMs(createdEvent) : createdMs);
+    const when = [touchedAt].map(boardAuditTs).find(ms => ms && ms >= lowerBound) || lowerBound + 1;
+    recon(type, when, { from: last ? last.to : null, to: String(current).toUpperCase(), actor: by ? String(by.by || '').toUpperCase() || null : null, meta: by && by.source ? { mode: by.source } : {} });
+  };
+  reconAssignment('ticket_assignedAgent_changed', ticket.assignedAgent, board.assigneeTouchedAt, board.assigneeBy);
+  reconAssignment('ticket_csAgent_changed', ticket.csAgent, board.csTouchedAt, null);
+
+  // Board-only history that predates it being logged.
+  const res = board.resolution || {};
+  if (res.confirmedAt && !hasType(['ticket_resolution_confirmed'], boardAuditTs(res.confirmedAt))) {
+    recon('ticket_resolution_confirmed', res.confirmedAt, { actor: res.confirmedBy ? String(res.confirmedBy).toUpperCase() : null });
+  }
+  if (res.sentBackAt && !hasType(['ticket_sent_back'], boardAuditTs(res.sentBackAt))) {
+    recon('ticket_sent_back', res.sentBackAt, { actor: res.sentBackBy ? String(res.sentBackBy).toUpperCase() : null, to: auditClip(res.sendBackNote, 300), meta: board.sendBack && board.sendBack.to ? { to: board.sendBack.to } : {} });
+  }
+  if (board.archived && board.archived.archivedAt && !hasType(['ticket_archived'], boardAuditTs(board.archived.archivedAt))) {
+    recon('ticket_archived', board.archived.archivedAt, { actor: board.archived.archivedBy ? String(board.archived.archivedBy).toUpperCase() : null, to: board.archived.reason || null, meta: { reason: board.archived.reason || null } });
+  }
+  const snooze = board.lastSnooze;
+  if (snooze && snooze.at && !hasType(['ticket_snoozed'], boardAuditTs(snooze.at))) {
+    recon('ticket_snoozed', snooze.at, { actor: snooze.by ? String(snooze.by).toUpperCase() : null, to: boardAuditIso(snooze.until), meta: snooze.note ? { note: auditClip(snooze.note, 300) } : {} });
+  }
+  if (ticket.slaHoldAt && !hasType(['ticket_sla_hold'], new Date(ticket.slaHoldAt).getTime())) {
+    recon('ticket_sla_hold', ticket.slaHoldAt, { actor: ticket.slaHoldBy || null });
+  }
+  if (board.reopenedAt && !hasType(['ticket_reopened'], boardAuditTs(board.reopenedAt))) {
+    recon('ticket_reopened', board.reopenedAt, { source: 'customer_reply' });
+  }
+  Object.values(boardAuditMap(state, 'ticketReopenRequests')).forEach((r) => {
+    if (!r || String(r.ticketId) !== ext) return;
+    if (r.at && !hasType(['ticket_reopen_requested'], boardAuditTs(r.at))) recon('ticket_reopen_requested', r.at, { to: r.from || null, meta: { from: r.from || null } });
+    if (r.status && r.status !== 'pending' && r.decidedAt && !hasType(['ticket_reopen_decided'], boardAuditTs(r.decidedAt))) {
+      recon('ticket_reopen_decided', r.decidedAt, { from: 'pending', to: r.status, actor: r.decidedBy ? String(r.decidedBy).toUpperCase() : null });
+    }
+  });
+  if (ticket.duplicateMarkedAt && !hasType(['ticket_marked_duplicate', 'ticket_duplicateOfExternalId_changed'], new Date(ticket.duplicateMarkedAt).getTime())) {
+    recon('ticket_marked_duplicate', ticket.duplicateMarkedAt, { to: ticket.duplicateOfExternalId || null, actor: ticket.duplicateMarkedBy || null });
+  }
+  if (ticket.slaResetAt) {
+    const ms = new Date(ticket.slaResetAt).getTime();
+    if (ms > createdMs + 60 * 1000 && !hasType(['customer_replied', 'ticket_sla_released', 'ticket_velma_bug_done', 'sla_reset'], ms, 5 * 60 * 1000)) {
+      recon('sla_reset', ms, { meta: { note: 'Last restart of the response clock - usually a new message in the thread.' } });
+    }
+  }
+  authors.forEach((c, ts) => {
+    const edited = boardAuditTs(c && c.editedAt);
+    if (edited && !hasType(['comment_edited'], edited, 60 * 1000)) recon('comment_edited', edited, { actor: c.author ? String(c.author).toUpperCase() : null, to: auditClip(c.text, 160), meta: { noteFrom: new Date(ts).toISOString() } });
+  });
+
+  // Oldest first; creation always leads a tie.
+  const order = item => (item.type === 'ticket_received' ? 0 : item.type === 'ticket_created' ? 1 : 2);
+  items.sort((a, b) => atMs(a) - atMs(b) || order(a) - order(b));
+
+  // Time in each stage, from the moves in order.
+  const segments = [];
+  const firstCreated = items.find(i => i.type === 'ticket_created');
+  let cur = { stage: (firstCreated && firstCreated.toStage) || 'new', enteredAt: createdMs, by: firstCreated ? firstCreated.actor : null, reconstructed: false };
+  items.forEach((item) => {
+    if (item.kind !== 'stage' || !item.toStage) return;
+    const t = Math.max(atMs(item), cur.enteredAt);
+    if (item.toStage === cur.stage) return;
+    item.dwellMs = t - cur.enteredAt;
+    item.fromStage = item.fromStage || cur.stage;
+    segments.push({ ...cur, leftAt: t, durationMs: t - cur.enteredAt });
+    cur = { stage: item.toStage, enteredAt: t, by: item.actor || null, reconstructed: !!item.reconstructed };
+  });
+  segments.push({ ...cur, leftAt: null, durationMs: nowMs - cur.enteredAt, ongoing: true });
+  const stageTotals = {};
+  segments.forEach((s) => { stageTotals[s.stage] = (stageTotals[s.stage] || 0) + (s.stage === 'res' && s.ongoing ? 0 : s.durationMs); });
+
+  // SLA hold time: each hold paired with the release after it.
+  let holdMs = 0;
+  let heldSince = null;
+  items.forEach((i) => {
+    if (i.type === 'ticket_sla_hold' && heldSince === null) heldSince = atMs(i);
+    if ((i.type === 'ticket_sla_released' || i.type === 'ticket_velma_bug_done') && heldSince !== null) { holdMs += atMs(i) - heldSince; heldSince = null; }
+  });
+  if (heldSince !== null) holdMs += nowMs - heldSince;
+
+  const firstOf = pred => items.find(pred);
+  const firstReply = firstOf(i => i.type === 'email_reply_sent');
+  const firstMove = firstOf(i => i.kind === 'stage' && i.fromStage === 'new' && i.toStage && i.toStage !== 'new');
+  const resolvedMs = ticket.resolvedAt ? new Date(ticket.resolvedAt).getTime() : null;
+  const stats = {
+    recorded: items.filter(i => !i.reconstructed).length,
+    reconstructed: items.filter(i => i.reconstructed).length,
+    moves: items.filter(i => i.kind === 'stage').length,
+    reassignments: items.filter(i => i.kind === 'assign' || i.kind === 'cs').length,
+    notes: items.filter(i => i.type === 'note_added').length,
+    repliesSent: items.filter(i => i.type === 'email_reply_sent').length,
+    clientReplies: items.filter(i => i.type === 'customer_replied').length,
+    reopens: items.filter(i => i.type === 'ticket_reopened' || (i.kind === 'stage' && i.fromStage === 'res')).length,
+    sendBacks: items.filter(i => i.type === 'ticket_sent_back').length,
+    ageMs: nowMs - createdMs,
+    firstReplyMs: firstReply ? atMs(firstReply) - createdMs : null,
+    firstMoveMs: firstMove ? atMs(firstMove) - createdMs : null,
+    resolutionMs: resolvedMs && currentStage === 'res' ? resolvedMs - createdMs : null,
+    holdMs,
+    stageTotals,
+    actors: [...new Set(items.map(i => i.actor).filter(Boolean))]
+  };
+  return { board, items, segments, stats };
+}
+
+function auditTicketSummary(ticket, state, counts = null) {
+  const board = auditBoardExtras(state, ticket.externalId);
+  return {
+    id: ticket.id,
+    externalId: ticket.externalId,
+    number: ticket.displayNumber || null,
+    subject: ticket.subject || '',
+    senderName: ticket.senderName || null,
+    senderEmail: ticket.senderEmail || null,
+    companyName: ticket.companyName || null,
+    status: ticket.status,
+    stage: board.stage || auditStageOf(ticket.status) || 'new',
+    priority: ticket.priority || null,
+    category: ticket.category || null,
+    subtype: board.subtype,
+    assignedAgent: ticket.assignedAgent || null,
+    csAgent: ticket.csAgent || null,
+    source: ticket.source || null,
+    jiraTicketKey: ticket.jiraTicketKey || null,
+    hubspotTicketId: ticket.hubspotTicketId || null,
+    velmaBugId: ticket.velmaBugId || null,
+    duplicateOf: ticket.duplicateOfExternalId || null,
+    slaHoldAt: ticket.slaHoldAt || null,
+    slaResetAt: ticket.slaResetAt || null,
+    createdAt: ticket.createdAt,
+    updatedAt: ticket.updatedAt,
+    resolvedAt: ticket.resolvedAt || null,
+    archived: !!board.archived,
+    archivedReason: board.archived ? board.archived.reason || null : null,
+    snoozedUntil: board.snooze ? boardAuditIso(board.snooze.until) : null,
+    reopened: !!board.reopenedAt,
+    hasNewReply: board.hasNewReply,
+    onBoard: board.onBoard,
+    stageSince: board.stageTouchedAt,
+    ...(counts || {})
+  };
+}
+
+// Accepts the database id, "#42" (the number agents use) or the board's own id.
+async function findAuditTicket(ref) {
+  const raw = String(ref || '').trim();
+  if (!raw) return null;
+  const hash = raw.match(/^#\s*(\d{1,9})$/) || raw.match(/^n(\d{1,9})$/i);
+  if (hash) return prisma.ticket.findUnique({ where: { displayNumber: Number(hash[1]) }, select: AUDIT_TICKET_SELECT });
+  if (/^\d{1,9}$/.test(raw)) {
+    const byId = await prisma.ticket.findUnique({ where: { id: Number(raw) }, select: AUDIT_TICKET_SELECT });
+    if (byId) return byId;
+  }
+  return prisma.ticket.findUnique({ where: { externalId: raw }, select: AUDIT_TICKET_SELECT });
+}
+
+function auditDateParam(value, endOfDay = false) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(text) ? new Date(`${text}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}`) : new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+function auditListParam(value) {
+  return String(value || '').split(',').map(v => v.trim()).filter(Boolean);
+}
+function auditCode(value) {
+  const code = String(value || '').trim().toUpperCase();
+  return /^[A-Z0-9._-]{1,40}$/.test(code) ? code : null;
+}
+
+// The ticket-side filters every audit read shares: the caller's scope, then
+// search, agent, priority and category.
+function auditTicketFilters(req) {
+  const and = [];
+  const scope = auditTicketWhereForActor(req);
+  if (scope) and.push(scope);
+  const q = String(req.query.q || '').trim().slice(0, 120);
+  if (q) {
+    const or = [
+      { subject: { contains: q, mode: 'insensitive' } },
+      { companyName: { contains: q, mode: 'insensitive' } },
+      { senderEmail: { contains: q, mode: 'insensitive' } },
+      { senderName: { contains: q, mode: 'insensitive' } },
+      { jiraTicketKey: { contains: q, mode: 'insensitive' } },
+      { externalId: q }
+    ];
+    const num = q.replace(/^#\s*/, '');
+    if (/^\d{1,9}$/.test(num)) or.push({ displayNumber: Number(num) });
+    and.push({ OR: or });
+  }
+  const agent = auditCode(req.query.agent);
+  if (agent) {
+    const role = String(req.query.agentRole || '');
+    if (role === 'support') and.push({ assignedAgent: agent });
+    else if (role === 'cs') and.push({ csAgent: agent });
+    else and.push({ OR: [{ assignedAgent: agent }, { csAgent: agent }] });
+  }
+  const priorities = auditListParam(req.query.priority);
+  if (priorities.length) and.push({ priority: { in: priorities } });
+  const category = String(req.query.category || '').trim();
+  if (category) and.push({ category });
+  return and;
+}
+
+const AUDIT_STATUS_BY_STAGE = { inp: 'In Progress', wus: 'Waiting on Us', dft: 'Due for Test', wct: 'Waiting on Contact' };
+function auditStageWhere(stage) {
+  if (stage === 'res') return { status: { in: ['Resolved', 'Closed', 'resolved', 'closed'] } };
+  if (AUDIT_STATUS_BY_STAGE[stage]) return { status: AUDIT_STATUS_BY_STAGE[stage] };
+  // New is everything else, so a row with an unexpected status still shows up.
+  return { status: { notIn: [...Object.values(AUDIT_STATUS_BY_STAGE), 'Resolved', 'Closed', 'resolved', 'closed'] } };
+}
+
+// The agents the filters offer: everyone on a roster, past or present, but
+// never a hidden service account.
+async function auditAgentRoster() {
+  let hidden = new Set();
+  try {
+    const users = await prisma.user.findMany({ where: { team: HIDDEN_TEAM }, select: { username: true, email: true } });
+    hidden = new Set(users.map(userAgentCode));
+  } catch (_error) {}
+  const clean = list => [...new Set(list)].filter(code => code && !hidden.has(code)).sort();
+  return {
+    support: clean([...SUPPORT_AGENT_CODES]),
+    cs: clean([...CS_AGENT_CODES]),
+    former: clean([...FORMER_AGENT_CODES.support, ...FORMER_AGENT_CODES.cs]),
+    hidden
+  };
+}
+
+// Users whose agent code is `code`, for "who did it" filters on rows that
+// only carry a userId.
+async function auditUserIdsForCode(code) {
+  const users = await prisma.user.findMany({ select: { id: true, username: true, email: true } });
+  return users.filter(u => userAgentCode(u) === code).map(u => u.id);
+}
+
+// Event and note filters for the activity stream, its stats and the export.
+async function auditStreamWheres(req, { before = null, defaultFrom = null } = {}) {
+  const ticketAnd = auditTicketFilters(req);
+  const ticketId = Number(req.query.ticketId || 0);
+  if (Number.isInteger(ticketId) && ticketId > 0) ticketAnd.push({ id: ticketId });
+  const stage = String(req.query.stage || '');
+  if (AUDIT_STAGE_KEYS.includes(stage)) ticketAnd.push(auditStageWhere(stage));
+  const ticketWhere = ticketAnd.length ? { ticket: { AND: ticketAnd } } : {};
+
+  const createdAt = {};
+  const from = auditDateParam(req.query.from) || defaultFrom;
+  const to = auditDateParam(req.query.to, true);
+  if (from) createdAt.gte = from;
+  if (to) createdAt.lte = to;
+  if (before) createdAt.lt = before;
+  const timeWhere = Object.keys(createdAt).length ? { createdAt } : {};
+
+  const kinds = auditListParam(req.query.kinds).filter(k => AUDIT_KINDS[k] || k === 'other');
+  const types = auditListParam(req.query.types);
+  const includeSync = String(req.query.includeSync || '') === '1' || kinds.includes('sync');
+  const eventTypeWhere = {};
+  const wanted = new Set(types);
+  kinds.forEach(k => Object.keys(AUDIT_EVENT_INFO).forEach(t => { if (AUDIT_EVENT_INFO[t].kind === k) wanted.add(t); }));
+  const excluded = [...AUDIT_SHADOWED_EVENTS, ...(includeSync ? [] : AUDIT_SYNC_EVENTS)];
+  if (wanted.size || kinds.includes('other')) {
+    if (kinds.includes('other')) {
+      eventTypeWhere.OR = [{ eventType: { in: [...wanted].filter(t => !excluded.includes(t)) } }, { eventType: { notIn: Object.keys(AUDIT_EVENT_INFO) } }];
+    } else {
+      eventTypeWhere.eventType = { in: [...wanted].filter(t => !excluded.includes(t)) };
+    }
+  } else {
+    eventTypeWhere.eventType = { notIn: excluded };
+  }
+
+  const actor = auditCode(req.query.actor);
+  const actorIds = actor ? await auditUserIdsForCode(actor) : [];
+  const eventAnd = [ticketWhere, timeWhere, eventTypeWhere];
+  // Who did it: the agent the board named, or else the login that saved it.
+  if (actor) eventAnd.push({ OR: [{ metadata: { path: ['actor'], equals: actor } }, ...(actorIds.length ? [{ userId: { in: actorIds } }] : [])] });
+
+  // Notes come from TicketComment; they are in the stream unless a type
+  // filter leaves them out.
+  const wantNotes = !(wanted.size || kinds.length) || kinds.includes('note') || wanted.has('note_added');
+  const wantProposed = !(wanted.size || kinds.length) || kinds.includes('reply') || wanted.has('reply_proposed');
+  let commentWhere = null;
+  if (wantNotes || wantProposed) {
+    const tagWhere = wantNotes && wantProposed ? {} : wantProposed ? { tags: { has: PROPOSED_REPLY_TAG } } : { NOT: { tags: { has: PROPOSED_REPLY_TAG } } };
+    const commentAnd = [ticketWhere, timeWhere, tagWhere];
+    if (actor) commentAnd.push(actorIds.length ? { userId: { in: actorIds } } : { id: -1 });
+    commentWhere = { AND: commentAnd };
+  }
+  return { eventWhere: { AND: eventAnd }, commentWhere };
+}
+
+function auditStreamItem(item, ticket) {
+  return {
+    ...item,
+    ticket: ticket ? {
+      id: ticket.id,
+      number: ticket.displayNumber || null,
+      externalId: ticket.externalId || null,
+      subject: ticket.subject || '',
+      companyName: ticket.companyName || null,
+      stage: auditStageOf(ticket.status),
+      priority: ticket.priority || null,
+      assignedAgent: ticket.assignedAgent || null,
+      csAgent: ticket.csAgent || null,
+      jiraTicketKey: ticket.jiraTicketKey || null
+    } : null
+  };
+}
+
+// One page of the merged stream, newest first, older than `before`.
+async function auditStreamPage(req, before, limit) {
+  const { eventWhere, commentWhere } = await auditStreamWheres(req, { before });
+  const [events, comments] = await Promise.all([
+    prisma.ticketEvent.findMany({
+      where: eventWhere,
+      take: limit + 1,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      include: { ticket: { select: AUDIT_TICKET_BRIEF_SELECT }, user: { select: AUDIT_USER_SELECT } }
+    }),
+    commentWhere ? prisma.ticketComment.findMany({
+      where: commentWhere,
+      take: limit + 1,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      include: { ticket: { select: AUDIT_TICKET_BRIEF_SELECT }, user: { select: AUDIT_USER_SELECT } }
+    }) : Promise.resolve([])
+  ]);
+  const state = comments.length ? readStateForAudit() : null;
+  const authorCache = new Map();
+  const authorFor = (c) => {
+    const ext = c.ticket ? c.ticket.externalId : null;
+    if (!ext) return null;
+    if (!authorCache.has(ext)) authorCache.set(ext, auditCommentAuthors(state, ext));
+    return authorCache.get(ext).get(new Date(c.createdAt).getTime()) || null;
+  };
+  // Oldest-first dedupe of the double-written rows, then back to newest first.
+  const deduped = dedupeTicketEvents([...events].sort((a, b) => a.ticketId - b.ticketId || new Date(a.createdAt) - new Date(b.createdAt)));
+  const merged = [
+    ...deduped.map(e => auditStreamItem(auditItemFromEvent(e), e.ticket)),
+    ...comments.map(c => auditStreamItem(auditItemFromComment(c, authorFor(c)), c.ticket))
+  ].sort((a, b) => new Date(b.at) - new Date(a.at));
+  const rawCount = events.length + comments.length;
+  const page = merged.slice(0, limit);
+  const hasMore = rawCount > page.length;
+  return { items: page, hasMore, nextBefore: hasMore && page.length ? page[page.length - 1].at : null };
+}
+
+app.get('/api/audit/meta', requireSupportOrAdmin, async (req, res) => {
+  try {
+    const roster = await auditAgentRoster();
+    const scope = auditTicketWhereForActor(req);
+    const [tickets, events, notes, firstEvent] = await Promise.all([
+      prisma.ticket.count({ where: scope || {} }),
+      prisma.ticketEvent.count({ where: scope ? { ticket: scope } : {} }),
+      prisma.ticketComment.count({ where: scope ? { ticket: scope } : {} }),
+      prisma.ticketEvent.findFirst({ where: scope ? { ticket: scope } : {}, orderBy: { createdAt: 'asc' }, select: { createdAt: true } })
+    ]);
+    return res.json({
+      me: { code: actorAgentCode(req), team: actorTeam(req) },
+      scope: scope ? 'own_tickets' : 'all',
+      stages: AUDIT_STAGE_KEYS.map(key => ({ key, label: AUDIT_STAGE_LABELS[key] })),
+      kinds: Object.entries(AUDIT_KINDS).map(([key, label]) => ({ key, label })),
+      eventTypes: Object.entries(AUDIT_EVENT_INFO).map(([type, info]) => ({ type, ...info })),
+      agents: { support: roster.support, cs: roster.cs, former: roster.former },
+      categories: (await prisma.ticket.groupBy({ by: ['category'], where: scope || {}, _count: { _all: true } }).catch(() => []))
+        .filter(r => r.category).map(r => r.category).sort(),
+      totals: { tickets, events, notes, loggingSince: firstEvent ? firstEvent.createdAt : null }
+    });
+  } catch (error) {
+    console.error('Read audit meta failed:', error);
+    return res.status(500).json({ error: 'read_audit_meta_failed' });
+  }
+});
+
+/* The board, as the audit sees it: every ticket - resolved, archived and
+   taken-off-the-board ones included - in the column it is in now, with how
+   much history each one has. A column is paged on its own (stage + offset),
+   so a Resolved column of thousands loads 30 at a time. */
+app.get('/api/audit/board', requireSupportOrAdmin, async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  const onlyStage = AUDIT_STAGE_KEYS.includes(String(req.query.stage || '')) ? String(req.query.stage) : null;
+  try {
+    const state = readStateForAudit();
+    const and = auditTicketFilters(req);
+    const from = auditDateParam(req.query.from);
+    const to = auditDateParam(req.query.to, true);
+    if (from || to) {
+      const range = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
+      and.push({ OR: [{ createdAt: range }, { events: { some: { createdAt: range } } }, { comments: { some: { createdAt: range } } }] });
+    }
+    const archived = String(req.query.archived || 'all');
+    if (archived === 'hide' || archived === 'only') {
+      const ids = Object.entries(boardAuditMap(state, 'ticketArchived')).filter(([, v]) => v).map(([k]) => k);
+      and.push(archived === 'only' ? { externalId: { in: ids } } : { OR: [{ externalId: null }, { externalId: { notIn: ids } }] });
+    }
+    const stages = onlyStage ? [onlyStage] : AUDIT_STAGE_KEYS;
+    const columns = {};
+    await Promise.all(stages.map(async (stage) => {
+      const where = { AND: [...and, auditStageWhere(stage)] };
+      const [total, rows] = await Promise.all([
+        prisma.ticket.count({ where }),
+        prisma.ticket.findMany({
+          where,
+          select: { ...AUDIT_TICKET_SELECT, _count: { select: { events: true, comments: true } } },
+          orderBy: stage === 'res' ? [{ resolvedAt: { sort: 'desc', nulls: 'last' } }, { id: 'desc' }] : [{ updatedAt: 'desc' }, { id: 'desc' }],
+          skip: onlyStage ? offset : 0,
+          take: limit
+        })
+      ]);
+      columns[stage] = { total, offset: onlyStage ? offset : 0, rows };
+    }));
+
+    const allIds = Object.values(columns).flatMap(c => c.rows.map(r => r.id));
+    const grouped = allIds.length ? await prisma.ticketEvent.groupBy({
+      by: ['ticketId', 'eventType'],
+      where: { ticketId: { in: allIds } },
+      _count: { _all: true },
+      _max: { createdAt: true }
+    }) : [];
+    const perTicket = new Map();
+    grouped.forEach((g) => {
+      const t = perTicket.get(g.ticketId) || { moves: 0, reassignments: 0, lastEventAt: null, lastEventType: null };
+      if (g.eventType === 'ticket_status_changed') t.moves += g._count._all;
+      if (g.eventType === 'ticket_assignedAgent_changed' || g.eventType === 'ticket_csAgent_changed') t.reassignments += g._count._all;
+      if (g._max.createdAt && (!t.lastEventAt || g._max.createdAt > t.lastEventAt)) { t.lastEventAt = g._max.createdAt; t.lastEventType = g.eventType; }
+      perTicket.set(g.ticketId, t);
+    });
+
+    const out = {};
+    Object.entries(columns).forEach(([stage, col]) => {
+      out[stage] = {
+        total: col.total,
+        offset: col.offset,
+        tickets: col.rows.map((row) => {
+          const { _count, ...ticket } = row;
+          const extra = perTicket.get(row.id) || { moves: 0, reassignments: 0, lastEventAt: null, lastEventType: null };
+          return auditTicketSummary(ticket, state, {
+            eventCount: _count.events,
+            noteCount: _count.comments,
+            moves: extra.moves,
+            reassignments: extra.reassignments,
+            lastEventAt: extra.lastEventAt,
+            lastEventLabel: extra.lastEventType ? auditEventInfo(extra.lastEventType).label : null
+          });
+        })
+      };
+    });
+    return res.json({ generatedAt: new Date().toISOString(), scope: auditTicketWhereForActor(req) ? 'own_tickets' : 'all', columns: out });
+  } catch (error) {
+    console.error('Read audit board failed:', error);
+    return res.status(500).json({ error: 'read_audit_board_failed' });
+  }
+});
+
+app.get('/api/audit/timeline/:ref', requireSupportOrAdmin, async (req, res) => {
+  try {
+    const ticket = await findAuditTicket(req.params.ref);
+    const scope = auditTicketWhereForActor(req);
+    // 404 rather than 403 for someone else's ticket, as /api/tickets/:id/audit.
+    if (!ticket || (scope && String(ticket.assignedAgent || '').toUpperCase() !== scope.assignedAgent)) {
+      return res.status(404).json({ error: 'ticket_not_found' });
+    }
+    const [events, comments] = await Promise.all([
+      prisma.ticketEvent.findMany({ where: { ticketId: ticket.id }, include: { user: { select: AUDIT_USER_SELECT } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
+      prisma.ticketComment.findMany({ where: { ticketId: ticket.id }, include: { user: { select: AUDIT_USER_SELECT } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+    ]);
+    const state = readStateForAudit();
+    const timeline = buildTicketTimeline(ticket, dedupeTicketEvents(events), comments, state);
+    let duplicateOf = null;
+    if (ticket.duplicateOfExternalId) {
+      duplicateOf = await prisma.ticket.findUnique({ where: { externalId: ticket.duplicateOfExternalId }, select: { id: true, displayNumber: true, subject: true } }).catch(() => null);
+    }
+    return res.json({
+      generatedAt: new Date().toISOString(),
+      ticket: auditTicketSummary(ticket, state),
+      duplicateOf,
+      board: {
+        stageSince: timeline.board.stageTouchedAt,
+        archived: timeline.board.archived,
+        snooze: timeline.board.snooze,
+        slaHold: timeline.board.slaHold,
+        resolution: timeline.board.resolution,
+        reopenedAt: timeline.board.reopenedAt,
+        velmaBug: timeline.board.velmaBug,
+        onBoard: timeline.board.onBoard
+      },
+      items: timeline.items,
+      segments: timeline.segments,
+      stats: timeline.stats
+    });
+  } catch (error) {
+    console.error('Read audit timeline failed:', error);
+    return res.status(500).json({ error: 'read_audit_timeline_failed' });
+  }
+});
+
+app.get('/api/audit/stream', requireSupportOrAdmin, async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 60, 1), 200);
+  const before = auditDateParam(req.query.before);
+  try {
+    const page = await auditStreamPage(req, before, limit);
+    return res.json({ generatedAt: new Date().toISOString(), scope: auditTicketWhereForActor(req) ? 'own_tickets' : 'all', ...page });
+  } catch (error) {
+    console.error('Read audit stream failed:', error);
+    return res.status(500).json({ error: 'read_audit_stream_failed' });
+  }
+});
+
+/* Figures for whatever the filters select: counts by kind, a day-by-day
+   histogram, the busiest people, and how long tickets sat in each stage
+   before they were moved on. */
+const AUDIT_STATS_EVENT_CAP = 40000;
+app.get('/api/audit/stats', requireSupportOrAdmin, async (req, res) => {
+  try {
+    // Default window: the last 30 days, so an unfiltered open stays cheap.
+    const defaultFrom = !req.query.from && !req.query.to && !req.query.ticketId ? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) : null;
+    const { eventWhere, commentWhere } = await auditStreamWheres(req, { defaultFrom });
+    const [events, notes] = await Promise.all([
+      prisma.ticketEvent.findMany({
+        where: eventWhere,
+        take: AUDIT_STATS_EVENT_CAP,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: { id: true, ticketId: true, eventType: true, oldValue: true, newValue: true, metadata: true, createdAt: true, user: { select: { username: true, email: true } } }
+      }),
+      commentWhere ? prisma.ticketComment.findMany({ where: commentWhere, take: AUDIT_STATS_EVENT_CAP, select: { ticketId: true, createdAt: true, tags: true, user: { select: { username: true, email: true } } } }) : Promise.resolve([])
+    ]);
+    const list = dedupeTicketEvents([...events].sort((a, b) => a.ticketId - b.ticketId || new Date(a.createdAt) - new Date(b.createdAt)));
+    const byKind = {};
+    const byDay = {};
+    const byActor = {};
+    const tickets = new Set();
+    const bump = (map, key, n = 1) => { map[key] = (map[key] || 0) + n; };
+    const roster = await auditAgentRoster();
+    list.forEach((e) => {
+      const kind = auditEventInfo(e.eventType).kind;
+      bump(byKind, kind);
+      bump(byDay, new Date(e.createdAt).toISOString().slice(0, 10));
+      tickets.add(e.ticketId);
+      const actor = auditActorFor(e);
+      if (actor && !roster.hidden.has(actor)) bump(byActor, actor);
+    });
+    notes.forEach((c) => {
+      const proposed = Array.isArray(c.tags) && c.tags.includes(PROPOSED_REPLY_TAG);
+      bump(byKind, proposed ? 'reply' : 'note');
+      bump(byDay, new Date(c.createdAt).toISOString().slice(0, 10));
+      tickets.add(c.ticketId);
+      const actor = c.user ? userAgentCode(c.user) : null;
+      if (actor && !roster.hidden.has(actor)) bump(byActor, actor);
+    });
+
+    // Dwell: for each move in the window, how long the ticket had been in the
+    // stage it left - since its previous move, or since it was created.
+    const moves = list.filter(e => e.eventType === 'ticket_status_changed');
+    const moveTicketIds = [...new Set(moves.map(e => e.ticketId))].slice(0, 5000);
+    const dwell = {};
+    if (moveTicketIds.length) {
+      const [history, created] = await Promise.all([
+        prisma.ticketEvent.findMany({
+          where: { ticketId: { in: moveTicketIds }, eventType: 'ticket_status_changed' },
+          select: { ticketId: true, oldValue: true, newValue: true, createdAt: true },
+          orderBy: [{ ticketId: 'asc' }, { createdAt: 'asc' }],
+          take: 100000
+        }),
+        prisma.ticket.findMany({ where: { id: { in: moveTicketIds } }, select: { id: true, createdAt: true } })
+      ]);
+      const createdAt = new Map(created.map(t => [t.id, new Date(t.createdAt).getTime()]));
+      const inWindow = new Set(moves.map(e => `${e.ticketId}:${new Date(e.createdAt).getTime()}`));
+      const lastAt = new Map();
+      dedupeTicketEvents(history).forEach((e) => {
+        const t = new Date(e.createdAt).getTime();
+        const since = lastAt.has(e.ticketId) ? lastAt.get(e.ticketId) : createdAt.get(e.ticketId);
+        lastAt.set(e.ticketId, t);
+        if (!inWindow.has(`${e.ticketId}:${t}`) || !since || t < since) return;
+        const stage = auditStageOf(e.oldValue) || 'new';
+        (dwell[stage] = dwell[stage] || []).push(t - since);
+      });
+    }
+    const dwellStats = {};
+    Object.entries(dwell).forEach(([stage, values]) => {
+      const sorted = values.sort((a, b) => a - b);
+      dwellStats[stage] = {
+        count: sorted.length,
+        avgMs: Math.round(sorted.reduce((s, v) => s + v, 0) / sorted.length),
+        medianMs: sorted[Math.floor(sorted.length / 2)]
+      };
+    });
+
+    return res.json({
+      generatedAt: new Date().toISOString(),
+      from: req.query.from || (defaultFrom ? defaultFrom.toISOString() : null),
+      to: req.query.to || null,
+      truncated: events.length >= AUDIT_STATS_EVENT_CAP,
+      totals: {
+        items: list.length + notes.length,
+        events: list.length,
+        notes: notes.length,
+        tickets: tickets.size,
+        moves: byKind.stage || 0,
+        reassignments: (byKind.assign || 0) + (byKind.cs || 0),
+        replies: byKind.reply || 0,
+        reopens: list.filter(e => e.eventType === 'ticket_reopened').length,
+        sendBacks: list.filter(e => e.eventType === 'ticket_sent_back').length
+      },
+      byKind,
+      byDay,
+      topActors: Object.entries(byActor).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([code, count]) => ({ code, count })),
+      dwell: dwellStats
+    });
+  } catch (error) {
+    console.error('Read audit stats failed:', error);
+    return res.status(500).json({ error: 'read_audit_stats_failed' });
+  }
+});
+
+// The stream as CSV, every page of it, for whatever the filters select.
+const AUDIT_EXPORT_ROW_CAP = 100000;
+function auditCsvCell(value) {
+  let text = value === null || value === undefined ? '' : String(value);
+  // A cell starting with = + - @ is a formula to a spreadsheet.
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+app.get('/api/audit/export.csv', requireSupportOrAdmin, async (req, res) => {
+  try {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="ticket-audit-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.write('﻿');
+    res.write(['When', 'Ticket', 'Ticket id', 'Subject', 'Company', 'Event', 'Kind', 'From', 'To', 'Note text', 'By', 'Account', 'Source'].join(',') + '\r\n');
+    let before = null;
+    let rows = 0;
+    for (;;) {
+      const page = await auditStreamPage(req, before, 200);
+      for (const item of page.items) {
+        const t = item.ticket || {};
+        res.write([
+          item.at,
+          t.number ? `#${String(t.number).padStart(4, '0')}` : '',
+          t.id || '',
+          t.subject || '',
+          t.companyName || '',
+          item.label,
+          item.kind,
+          item.fromStage ? AUDIT_STAGE_LABELS[item.fromStage] : item.from,
+          item.toStage ? AUDIT_STAGE_LABELS[item.toStage] : item.to,
+          item.text || (item.meta && item.meta.note) || '',
+          item.actor || '',
+          item.account || '',
+          item.source || ''
+        ].map(auditCsvCell).join(',') + '\r\n');
+        rows += 1;
+      }
+      if (!page.hasMore || !page.nextBefore || rows >= AUDIT_EXPORT_ROW_CAP) break;
+      before = new Date(page.nextBefore);
+    }
+    return res.end();
+  } catch (error) {
+    console.error('Audit export failed:', error);
+    if (!res.headersSent) return res.status(500).json({ error: 'audit_export_failed' });
+    return res.end();
+  }
+});
+
 app.get('/audit/tickets', requireSupportOrAdmin, (req, res) => {
   res.type('html').sendFile(path.join(VIEWS_DIR, 'audit-tickets.html'));
 });
@@ -12053,6 +13021,128 @@ app.get('/api/events', requireAuth, (req, res) => {
   });
 });
 
+/* Board-only history.
+
+   Half of what happens to a ticket never reaches a Ticket column: archiving,
+   snoozing, a CS agent confirming or sending back a resolution, a client reply
+   re-opening it, a re-open request and its decision, the card being taken off
+   the board. Those live only in the board state, and the state keeps the
+   latest value, so each one overwrote the last and the audit log - which only
+   ever saw Ticket columns change - had no record that any of it happened.
+
+   Diffing the stored state before and after each save is what catches them:
+   it is the merged result, so a stale tab's rejected value is not recorded as
+   a change, and it runs once per save, so a transition is written once. */
+const BOARD_AUDIT_BULK_CAP = 150;
+function boardAuditMap(state, key) {
+  const value = state && state[key];
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+function boardAuditTs(value) {
+  if (value === null || value === undefined || value === '') return 0;
+  const n = Number(value);
+  if (Number.isFinite(n) && n > 0) return n;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+function boardAuditIso(value) {
+  const ts = boardAuditTs(value);
+  return ts ? new Date(ts).toISOString() : null;
+}
+async function auditBoardStateTransitions(before, after, req) {
+  if (!before || !after || typeof before !== 'object' || typeof after !== 'object') return 0;
+  const sessionActor = String(req?.session?.username || '').trim().toUpperCase() || null;
+  const userId = req?.session?.userId || null;
+  const pending = [];
+  const push = (externalId, eventType, oldValue, newValue, metadata = {}) => {
+    if (!externalId) return;
+    pending.push({ externalId: String(externalId), eventType, oldValue: oldValue ?? null, newValue: newValue ?? null, metadata });
+  };
+  const forEachChanged = (key, fn) => {
+    const prev = boardAuditMap(before, key);
+    const next = boardAuditMap(after, key);
+    const ids = [];
+    for (const id of new Set([...Object.keys(prev), ...Object.keys(next)])) {
+      if (JSON.stringify(prev[id] ?? null) !== JSON.stringify(next[id] ?? null)) ids.push(id);
+    }
+    // Hundreds of tickets changing one field in one save is a migration, a
+    // first load or a stale tab replaying old state - not people's actions.
+    if (ids.length > BOARD_AUDIT_BULK_CAP) return;
+    ids.forEach(id => fn(id, prev[id], next[id]));
+  };
+  const clip = (text, n = 300) => {
+    const value = String(text ?? '').trim();
+    return value ? value.slice(0, n) : null;
+  };
+
+  forEachChanged('ticketArchived', (id, p, n) => {
+    if (!p && n) push(id, 'ticket_archived', null, n.reason || 'manual', { actor: n.archivedBy || sessionActor, at: boardAuditIso(n.archivedAt), reason: n.reason || null });
+    else if (p && !n) {
+      const reopened = boardAuditTs(boardAuditMap(after, 'ticketReopenedAt')[id]) > boardAuditTs(boardAuditMap(before, 'ticketReopenedAt')[id]);
+      push(id, 'ticket_restored', p.reason || null, null, { actor: reopened ? null : sessionActor, source: reopened ? 'customer_reply' : 'board' });
+    }
+  });
+  forEachChanged('ticketSnooze', (id, p, n) => {
+    if (n && n.until && (!p || boardAuditTs(p.at) !== boardAuditTs(n.at) || boardAuditTs(p.until) !== boardAuditTs(n.until))) {
+      push(id, 'ticket_snoozed', p && p.until ? boardAuditIso(p.until) : null, boardAuditIso(n.until), { actor: n.by || sessionActor, note: clip(n.note), at: boardAuditIso(n.at) });
+    } else if (p && p.until && !(n && n.until)) {
+      const expired = boardAuditTs(p.until) <= Date.now() + 1000;
+      push(id, expired ? 'ticket_snooze_expired' : 'ticket_unsnoozed', boardAuditIso(p.until), null, { actor: expired ? null : sessionActor });
+    }
+  });
+  forEachChanged('ticketResolutionMeta', (id, p, n) => {
+    const prev = p || {};
+    const next = n || {};
+    if (next.confirmedAt && boardAuditTs(next.confirmedAt) !== boardAuditTs(prev.confirmedAt)) {
+      push(id, 'ticket_resolution_confirmed', null, next.confirmedBy || null, { actor: next.confirmedBy || sessionActor, at: boardAuditIso(next.confirmedAt) });
+    }
+    if (next.sentBackAt && boardAuditTs(next.sentBackAt) !== boardAuditTs(prev.sentBackAt)) {
+      const alert = boardAuditMap(after, 'ticketSendBackAlerts')[id];
+      push(id, 'ticket_sent_back', null, clip(next.sendBackNote), { actor: next.sentBackBy || sessionActor, at: boardAuditIso(next.sentBackAt), to: alert && alert.to ? String(alert.to) : null });
+    }
+  });
+  forEachChanged('ticketReopenRequests', (key, p, n) => {
+    if (!n || !n.ticketId) return;
+    if (!p && n.status === 'pending') {
+      push(n.ticketId, 'ticket_reopen_requested', null, n.from || null, { actor: null, from: n.from || null, at: boardAuditIso(n.at), source: 'customer_reply' });
+    } else if (n.status && n.status !== 'pending' && (!p || p.status !== n.status)) {
+      push(n.ticketId, 'ticket_reopen_decided', (p && p.status) || 'pending', n.status, { actor: n.decidedBy || sessionActor, from: n.from || null, at: boardAuditIso(n.decidedAt) });
+    }
+  });
+  forEachChanged('ticketReopenedAt', (id, p, n) => {
+    if (boardAuditTs(n) > boardAuditTs(p)) push(id, 'ticket_reopened', boardAuditIso(p), boardAuditIso(n), { actor: null, source: 'customer_reply' });
+  });
+  forEachChanged('ticketHasNewReply', (id, p, n) => {
+    if (n && !p) push(id, 'customer_replied', null, null, { actor: null, source: 'mail' });
+  });
+  const { removed } = diffBoardTickets(before, after);
+  if (removed.length && removed.length <= BOARD_AUDIT_BULK_CAP) {
+    removed.forEach(id => push(id, 'ticket_removed_from_board', null, null, { actor: sessionActor }));
+  }
+
+  if (!pending.length) return 0;
+  const rows = await prisma.ticket.findMany({
+    where: { externalId: { in: [...new Set(pending.map(p => p.externalId))] } },
+    select: { id: true, externalId: true }
+  });
+  const idByExternal = new Map(rows.map(r => [r.externalId, r.id]));
+  let written = 0;
+  for (const p of pending) {
+    const ticketId = idByExternal.get(p.externalId);
+    if (!ticketId) continue;
+    const created = await createTicketAuditEvent({
+      ticketId,
+      userId,
+      eventType: p.eventType,
+      oldValue: p.oldValue,
+      newValue: p.newValue,
+      metadata: { source: 'board', ...p.metadata }
+    });
+    if (created) written += 1;
+  }
+  return written;
+}
+
 app.get('/api/state', requireAuth, async (req, res) => {
   try {
     const state = await hydrateStateFromDatabase(safeReadState());
@@ -12137,6 +13227,13 @@ app.post('/api/state', requireAuth, async (req, res) => {
   }
 
   res.json({ ok: !!result.saved, ...resultSummary, ticketDb, liveRev });
+
+  // After the response: the history is not something the saving tab waits on.
+  if (result.saved) {
+    void auditBoardStateTransitions(beforeState, result.state || safeReadState(), req).catch((error) => {
+      console.warn('Board history audit failed:', error?.message || error);
+    });
+  }
 });
 
 app.post('/api/hubspot/companies/:companyId/custom-property', requireAuth, async (req, res) => {
