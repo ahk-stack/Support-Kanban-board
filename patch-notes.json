@@ -1,6 +1,13 @@
 {
   "patches": [
     {
+      "date": "2026-11-24",
+      "title": "Around the Clock",
+      "notes": [
+        { "type": "improved", "text": "New tickets are no longer given automatically to a support agent who is more than 8 hours away from the client, so clients don't wait a night for each reply. The client's time zone comes from their company in HubSpot; when it isn't known, nothing changes. You can still assign anyone by hand." }
+      ]
+    },
+    {
       "date": "2026-11-20",
       "title": "Jira Spotlight",
       "notes": [

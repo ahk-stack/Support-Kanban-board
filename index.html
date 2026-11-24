@@ -10138,18 +10138,29 @@ function seededUnit(seed){
   for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,0x01000193);}
   return ((h>>>0)%1000003)/1000003;
 }
-function fallbackSupportOwner(id){
-  const pool=SUPPORT_AGENTS.filter(a=>a!==FALLBACK_SUPPORT_OWNER&&!isAgentOff(a));
+// tz: the client's zone and the moment that counts ({zone,at}), or null -
+// agents more than 8 hours from the client are left out (see the client time
+// zone rule).
+function fallbackSupportOwner(id,tz){
+  const pool=SUPPORT_AGENTS.filter(a=>a!==FALLBACK_SUPPORT_OWNER&&!isAgentOff(a)&&!agentTooFarFromClient(a,tz));
   if(!pool.length){
     // Everyone but SGU is off (or SGU is the only one left on the roster): SGU
     // takes it if available, then whoever else is in, by fewest open tickets.
     // Only with the whole team off does it fall back to the plain least loaded
     // - a ticket has to belong to someone, and the server rejects a non-roster
     // assignee.
-    if(!isAgentOff(FALLBACK_SUPPORT_OWNER)&&normalizeSupportAgent(FALLBACK_SUPPORT_OWNER))return FALLBACK_SUPPORT_OWNER;
+    if(!isAgentOff(FALLBACK_SUPPORT_OWNER)&&normalizeSupportAgent(FALLBACK_SUPPORT_OWNER)&&!agentTooFarFromClient(FALLBACK_SUPPORT_OWNER,tz))return FALLBACK_SUPPORT_OWNER;
     const inToday=SUPPORT_AGENTS.filter(a=>!isAgentOff(a));
     const total=openWorkloadByAgent();
-    if(inToday.length)return inToday.reduce((best,a)=>total[a]<total[best]?a:best,inToday[0]);
+    if(inToday.length){
+      // Nobody in today is within 8 hours of the client: the closest one, not a
+      // random one - then fewest open tickets.
+      if(tz){
+        const gap=a=>agentClientGapMinutes(a,tz.zone,tz.at)??Infinity;
+        return inToday.reduce((best,a)=>(gap(a)<gap(best)||(gap(a)===gap(best)&&total[a]<total[best]))?a:best,inToday[0]);
+      }
+      return inToday.reduce((best,a)=>total[a]<total[best]?a:best,inToday[0]);
+    }
     return leastLoadedSupportAgent();
   }
   const priority=ticketPriorityBucket(id);
@@ -10172,11 +10183,206 @@ function fallbackSupportOwner(id){
 // client actually wrote - a CC is often just habit.
 // An agent who is off is skipped at each step: a client writing "Hi Zied" to
 // someone on holiday still needs an answer from whoever is in.
+// An agent more than 8 hours from the client is skipped at each step too, even
+// when the client names or copies them (see the client time zone rule).
 function defaultSupportAgentForTicket(emailObj,id){
+  const tz=clientTimeZoneForTicket(id,emailObj);
+  const available=a=>!isAgentOff(a)&&!agentTooFarFromClient(a,tz);
   const named=supportAgentNamedInEmail(emailObj);
-  if(named&&!isAgentOff(named))return named;
-  return supportAgentsTaggedInEmail(emailObj).find(a=>!isAgentOff(a))||fallbackSupportOwner(id);
+  if(named&&available(named))return named;
+  return supportAgentsTaggedInEmail(emailObj).find(available)||fallbackSupportOwner(id,tz);
 }
+/* ---- Client time zone rule ---------------------------------------------------
+   A support agent more than 8 hours apart from the client is not given the
+   ticket automatically: the client would be waiting a night for every reply.
+   JBA works from Colombia; everyone else from Tunisia (the board's SLA zone).
+
+   The client's zone comes from HubSpot: the company's own Time zone field,
+   else its country (and state, for countries spanning several zones). Unknown
+   - no company, a webmail address, a multi-zone country without a state -
+   means no restriction. HubSpot describes the company record, which for a
+   hotel group can be its head office rather than the hotel writing in.
+
+   The gap is measured at the moment the email arrived, in minutes, so
+   half-hour zones and daylight saving are handled; only a gap strictly over
+   8 hours excludes. Manual assignment is never blocked. */
+const SUPPORT_AGENT_TIME_ZONES={JBA:'America/Bogota'};
+const MAX_AGENT_CLIENT_GAP_MIN=8*60;
+function supportAgentTimeZone(agent){return SUPPORT_AGENT_TIME_ZONES[String(agent||'').toUpperCase()]||slaTimeZone||'Africa/Tunis';}
+const tzValidCache=new Map();
+function isValidTimeZone(zone){
+  const z=String(zone||'');
+  if(!z)return false;
+  if(!tzValidCache.has(z)){let ok=false;try{new Intl.DateTimeFormat('en-US',{timeZone:z});ok=true;}catch(_){}tzValidCache.set(z,ok);}
+  return tzValidCache.get(z);
+}
+// UTC offset of a zone at an instant, in minutes (cached per zone and hour).
+const tzOffsetCache=new Map();
+function zoneOffsetMinutes(zone,at){
+  if(!isValidTimeZone(zone))return null;
+  const key=zone+'|'+Math.floor(at/3600000);
+  if(tzOffsetCache.has(key))return tzOffsetCache.get(key);
+  let offset=null;
+  try{
+    const p=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:zone,hourCycle:'h23',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})
+      .formatToParts(new Date(at)).map(x=>[x.type,x.value]));
+    const wall=Date.UTC(+p.year,+p.month-1,+p.day,(+p.hour)%24,+p.minute);
+    offset=Math.round((wall-Math.floor(at/60000)*60000)/60000);
+  }catch(_){}
+  if(tzOffsetCache.size>5000)tzOffsetCache.clear();
+  tzOffsetCache.set(key,offset);
+  return offset;
+}
+function agentClientGapMinutes(agent,zone,at){
+  const a=zoneOffsetMinutes(supportAgentTimeZone(agent),at),c=zoneOffsetMinutes(zone,at);
+  return a===null||c===null?null:Math.abs(a-c);
+}
+function agentTooFarFromClient(agent,tz){
+  if(!tz)return false;
+  const gap=agentClientGapMinutes(agent,tz.zone,tz.at);
+  return gap!==null&&gap>MAX_AGENT_CLIENT_GAP_MIN;
+}
+// The client's zone and the moment that counts for a ticket, or null.
+function clientTimeZoneForTicket(id,emailObj){
+  const ce=String((id&&ticketClientEmail[id])||getClientEmail(emailObj)||'').toLowerCase();
+  const zone=ce?hsCache[ce]?.timeZone:null;
+  if(!zone||!isValidTimeZone(zone))return null;
+  const received=Date.parse(emailObj?.receivedDateTime||'');
+  return{zone,at:Number.isFinite(received)?received:boardNow()};
+}
+// Country (and, where the country spans several zones, state) to IANA zone.
+const COUNTRY_TIME_ZONES={
+  'albania':'Europe/Tirane','andorra':'Europe/Andorra','austria':'Europe/Vienna','belarus':'Europe/Minsk','belgium':'Europe/Brussels','bosnia and herzegovina':'Europe/Sarajevo','bulgaria':'Europe/Sofia','croatia':'Europe/Zagreb','cyprus':'Asia/Nicosia','czech republic':'Europe/Prague','czechia':'Europe/Prague','denmark':'Europe/Copenhagen','estonia':'Europe/Tallinn','finland':'Europe/Helsinki','france':'Europe/Paris','germany':'Europe/Berlin','gibraltar':'Europe/Gibraltar','greece':'Europe/Athens','hungary':'Europe/Budapest','iceland':'Atlantic/Reykjavik','ireland':'Europe/Dublin','italy':'Europe/Rome','kosovo':'Europe/Belgrade','latvia':'Europe/Riga','liechtenstein':'Europe/Vaduz','lithuania':'Europe/Vilnius','luxembourg':'Europe/Luxembourg','malta':'Europe/Malta','moldova':'Europe/Chisinau','monaco':'Europe/Monaco','montenegro':'Europe/Podgorica','netherlands':'Europe/Amsterdam','north macedonia':'Europe/Skopje','macedonia':'Europe/Skopje','norway':'Europe/Oslo','poland':'Europe/Warsaw','portugal':'Europe/Lisbon','romania':'Europe/Bucharest','san marino':'Europe/San_Marino','serbia':'Europe/Belgrade','slovakia':'Europe/Bratislava','slovenia':'Europe/Ljubljana','spain':'Europe/Madrid','sweden':'Europe/Stockholm','switzerland':'Europe/Zurich','ukraine':'Europe/Kyiv','united kingdom':'Europe/London','vatican city':'Europe/Rome','turkey':'Europe/Istanbul','georgia':'Asia/Tbilisi','armenia':'Asia/Yerevan','azerbaijan':'Asia/Baku',
+  'morocco':'Africa/Casablanca','algeria':'Africa/Algiers','tunisia':'Africa/Tunis','libya':'Africa/Tripoli','egypt':'Africa/Cairo','south africa':'Africa/Johannesburg','kenya':'Africa/Nairobi','tanzania':'Africa/Dar_es_Salaam','uganda':'Africa/Kampala','rwanda':'Africa/Kigali','ethiopia':'Africa/Addis_Ababa','nigeria':'Africa/Lagos','ghana':'Africa/Accra','senegal':'Africa/Dakar','ivory coast':'Africa/Abidjan','cote d ivoire':'Africa/Abidjan','cameroon':'Africa/Douala','gabon':'Africa/Libreville','namibia':'Africa/Windhoek','botswana':'Africa/Gaborone','zambia':'Africa/Lusaka','zimbabwe':'Africa/Harare','mozambique':'Africa/Maputo','madagascar':'Indian/Antananarivo','mauritius':'Indian/Mauritius','seychelles':'Indian/Mahe','reunion':'Indian/Reunion','cape verde':'Atlantic/Cape_Verde','cabo verde':'Atlantic/Cape_Verde','mauritania':'Africa/Nouakchott','mali':'Africa/Bamako','benin':'Africa/Porto-Novo','togo':'Africa/Lome','malawi':'Africa/Blantyre','angola':'Africa/Luanda','sudan':'Africa/Khartoum','eswatini':'Africa/Mbabane','lesotho':'Africa/Maseru','djibouti':'Africa/Djibouti','gambia':'Africa/Banjul','guinea':'Africa/Conakry','sierra leone':'Africa/Freetown','liberia':'Africa/Monrovia','burkina faso':'Africa/Ouagadougou','niger':'Africa/Niamey','chad':'Africa/Ndjamena','comoros':'Indian/Comoro','mayotte':'Indian/Mayotte','papua new guinea':'Pacific/Port_Moresby','samoa':'Pacific/Apia','vanuatu':'Pacific/Efate','tonga':'Pacific/Tongatapu','cook islands':'Pacific/Rarotonga','guam':'Pacific/Guam','timor leste':'Asia/Dili','east timor':'Asia/Dili',
+  'israel':'Asia/Jerusalem','palestine':'Asia/Hebron','jordan':'Asia/Amman','lebanon':'Asia/Beirut','syria':'Asia/Damascus','iraq':'Asia/Baghdad','iran':'Asia/Tehran','saudi arabia':'Asia/Riyadh','united arab emirates':'Asia/Dubai','qatar':'Asia/Qatar','bahrain':'Asia/Bahrain','kuwait':'Asia/Kuwait','oman':'Asia/Muscat','yemen':'Asia/Aden',
+  'india':'Asia/Kolkata','pakistan':'Asia/Karachi','bangladesh':'Asia/Dhaka','sri lanka':'Asia/Colombo','nepal':'Asia/Kathmandu','maldives':'Indian/Maldives','bhutan':'Asia/Thimphu','china':'Asia/Shanghai','hong kong':'Asia/Hong_Kong','macau':'Asia/Macau','macao':'Asia/Macau','taiwan':'Asia/Taipei','japan':'Asia/Tokyo','south korea':'Asia/Seoul','korea':'Asia/Seoul','mongolia':'Asia/Ulaanbaatar','thailand':'Asia/Bangkok','vietnam':'Asia/Ho_Chi_Minh','cambodia':'Asia/Phnom_Penh','laos':'Asia/Vientiane','myanmar':'Asia/Yangon','malaysia':'Asia/Kuala_Lumpur','singapore':'Asia/Singapore','philippines':'Asia/Manila','brunei':'Asia/Brunei','uzbekistan':'Asia/Tashkent','kyrgyzstan':'Asia/Bishkek','tajikistan':'Asia/Dushanbe','turkmenistan':'Asia/Ashgabat','afghanistan':'Asia/Kabul',
+  'new zealand':'Pacific/Auckland','fiji':'Pacific/Fiji','french polynesia':'Pacific/Tahiti','new caledonia':'Pacific/Noumea',
+  'colombia':'America/Bogota','peru':'America/Lima','ecuador':'America/Guayaquil','venezuela':'America/Caracas','bolivia':'America/La_Paz','paraguay':'America/Asuncion','uruguay':'America/Montevideo','argentina':'America/Argentina/Buenos_Aires','chile':'America/Santiago','guatemala':'America/Guatemala','belize':'America/Belize','honduras':'America/Tegucigalpa','el salvador':'America/El_Salvador','nicaragua':'America/Managua','costa rica':'America/Costa_Rica','panama':'America/Panama','cuba':'America/Havana','jamaica':'America/Jamaica','dominican republic':'America/Santo_Domingo','puerto rico':'America/Puerto_Rico','haiti':'America/Port-au-Prince','bahamas':'America/Nassau','barbados':'America/Barbados','trinidad and tobago':'America/Port_of_Spain','aruba':'America/Aruba','curacao':'America/Curacao','saint lucia':'America/St_Lucia','antigua and barbuda':'America/Antigua','grenada':'America/Grenada','bermuda':'Atlantic/Bermuda','cayman islands':'America/Cayman','turks and caicos islands':'America/Grand_Turk','guadeloupe':'America/Guadeloupe','martinique':'America/Martinique','french guiana':'America/Cayenne','sint maarten':'America/Lower_Princes','saint martin':'America/Marigot','saint barthelemy':'America/St_Barthelemy','us virgin islands':'America/St_Thomas','british virgin islands':'America/Tortola','guyana':'America/Guyana','suriname':'America/Paramaribo'
+};
+const COUNTRY_ALIASES={'usa':'united states','us':'united states','u s a':'united states','u s':'united states','united states of america':'united states','america':'united states','uk':'united kingdom','u k':'united kingdom','great britain':'united kingdom','britain':'united kingdom','england':'united kingdom','scotland':'united kingdom','wales':'united kingdom','northern ireland':'united kingdom','turkiye':'turkey','uae':'united arab emirates','u a e':'united arab emirates','emirates':'united arab emirates','the netherlands':'netherlands','holland':'netherlands','republic of ireland':'ireland','russian federation':'russia','korea republic of':'south korea','republic of korea':'south korea','viet nam':'vietnam','czech':'czech republic','bosnia':'bosnia and herzegovina','ksa':'saudi arabia','st lucia':'saint lucia','st martin':'saint martin','st barts':'saint barthelemy','st barth':'saint barthelemy'};
+// Countries spanning several zones: the state decides; without one, unknown.
+const US_ZONES={eastern:'America/New_York',central:'America/Chicago',mountain:'America/Denver',arizona:'America/Phoenix',pacific:'America/Los_Angeles',alaska:'America/Anchorage',hawaii:'Pacific/Honolulu'};
+const US_STATE_ZONE={al:'central',alabama:'central',ak:'alaska',alaska:'alaska',az:'arizona',arizona:'arizona',ar:'central',arkansas:'central',ca:'pacific',california:'pacific',co:'mountain',colorado:'mountain',ct:'eastern',connecticut:'eastern',de:'eastern',delaware:'eastern',dc:'eastern','district of columbia':'eastern','washington dc':'eastern',fl:'eastern',florida:'eastern',ga:'eastern',georgia:'eastern',hi:'hawaii',hawaii:'hawaii',id:'mountain',idaho:'mountain',il:'central',illinois:'central',in:'eastern',indiana:'eastern',ia:'central',iowa:'central',ks:'central',kansas:'central',ky:'eastern',kentucky:'eastern',la:'central',louisiana:'central',me:'eastern',maine:'eastern',md:'eastern',maryland:'eastern',ma:'eastern',massachusetts:'eastern',mi:'eastern',michigan:'eastern',mn:'central',minnesota:'central',ms:'central',mississippi:'central',mo:'central',missouri:'central',mt:'mountain',montana:'mountain',ne:'central',nebraska:'central',nv:'pacific',nevada:'pacific',nh:'eastern','new hampshire':'eastern',nj:'eastern','new jersey':'eastern',nm:'mountain','new mexico':'mountain',ny:'eastern','new york':'eastern',nc:'eastern','north carolina':'eastern',nd:'central','north dakota':'central',oh:'eastern',ohio:'eastern',ok:'central',oklahoma:'central',or:'pacific',oregon:'pacific',pa:'eastern',pennsylvania:'eastern',ri:'eastern','rhode island':'eastern',sc:'eastern','south carolina':'eastern',sd:'central','south dakota':'central',tn:'central',tennessee:'central',tx:'central',texas:'central',ut:'mountain',utah:'mountain',vt:'eastern',vermont:'eastern',va:'eastern',virginia:'eastern',wa:'pacific',washington:'pacific',wv:'eastern','west virginia':'eastern',wi:'central',wisconsin:'central',wy:'mountain',wyoming:'mountain'};
+const MULTI_ZONE_COUNTRIES={
+  'united states':st=>US_ZONES[US_STATE_ZONE[st]]||null,
+  'canada':st=>({'british columbia':'America/Vancouver',bc:'America/Vancouver',yukon:'America/Whitehorse',alberta:'America/Edmonton',ab:'America/Edmonton','northwest territories':'America/Yellowknife',saskatchewan:'America/Regina',sk:'America/Regina',manitoba:'America/Winnipeg',mb:'America/Winnipeg',ontario:'America/Toronto',on:'America/Toronto',quebec:'America/Toronto',qc:'America/Toronto','new brunswick':'America/Halifax',nb:'America/Halifax','nova scotia':'America/Halifax',ns:'America/Halifax','prince edward island':'America/Halifax',pe:'America/Halifax','newfoundland and labrador':'America/St_Johns',newfoundland:'America/St_Johns',nl:'America/St_Johns'})[st]||null,
+  'australia':st=>({'new south wales':'Australia/Sydney',nsw:'Australia/Sydney',victoria:'Australia/Melbourne',vic:'Australia/Melbourne','australian capital territory':'Australia/Sydney',act:'Australia/Sydney',tasmania:'Australia/Hobart',tas:'Australia/Hobart',queensland:'Australia/Brisbane',qld:'Australia/Brisbane','south australia':'Australia/Adelaide',sa:'Australia/Adelaide','northern territory':'Australia/Darwin',nt:'Australia/Darwin','western australia':'Australia/Perth',wa:'Australia/Perth'})[st]||null,
+  'mexico':st=>({'baja california':'America/Tijuana','baja california sur':'America/Mazatlan',sonora:'America/Hermosillo',chihuahua:'America/Chihuahua',sinaloa:'America/Mazatlan',nayarit:'America/Mazatlan','quintana roo':'America/Cancun'})[st]||(st?'America/Mexico_City':null),
+  'brazil':st=>({amazonas:'America/Manaus',roraima:'America/Boa_Vista',rondonia:'America/Porto_Velho','mato grosso':'America/Cuiaba','mato grosso do sul':'America/Campo_Grande',acre:'America/Rio_Branco'})[st]||(st?'America/Sao_Paulo':null),
+  'indonesia':st=>/bali|nusa tenggara|sulawesi|kalimantan (selatan|timur|utara)|south kalimantan|east kalimantan|north kalimantan/.test(st)?'Asia/Makassar':/papua|maluku/.test(st)?'Asia/Jayapura':(st?'Asia/Jakarta':null),
+  'russia':()=>null,'kazakhstan':()=>null
+};
+function normalizePlaceName(value){
+  return String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+}
+// HubSpot's Time zone property can hold its internal form ("europe_slash_rome")
+// rather than the IANA name; Intl accepts any letter case and returns the
+// canonical spelling.
+function canonicalTimeZone(value){
+  const raw=String(value||'').trim().replace(/_slash_/gi,'/');
+  if(!raw||!isValidTimeZone(raw))return null;
+  try{return new Intl.DateTimeFormat('en-US',{timeZone:raw}).resolvedOptions().timeZone||raw;}catch(_){return null;}
+}
+function resolveClientTimeZone(props){
+  const own=canonicalTimeZone(props?.timezone);
+  if(own)return{zone:own,source:'hubspot'};
+  let country=normalizePlaceName(props?.country);
+  country=COUNTRY_ALIASES[country]||country;
+  if(!country)return{zone:null,source:'none'};
+  if(MULTI_ZONE_COUNTRIES[country]){
+    const zone=MULTI_ZONE_COUNTRIES[country](normalizePlaceName(props?.state));
+    return{zone:zone&&isValidTimeZone(zone)?zone:null,source:zone?'state':'none'};
+  }
+  const zone=COUNTRY_TIME_ZONES[country]||null;
+  return{zone:zone&&isValidTimeZone(zone)?zone:null,source:zone?'country':'none'};
+}
+/* Fills in the client's zone for the HubSpot companies behind open tickets:
+   one batched search by company id (100 at a time), no contact lookups.
+   Rechecked after 30 days; a company with no usable zone is remembered as
+   checked so it is not asked again on every run. */
+let clientTzBackfillRunning=false;
+async function backfillClientTimeZones(){
+  if(!hasCowork||clientTzBackfillRunning)return false;
+  clientTzBackfillRunning=true;
+  try{
+    const now=Date.now();
+    const emails=new Set(allTickets.filter(t=>isOpenWorkloadTicket(t.id)).map(t=>String(ticketClientEmail[t.id]||getClientEmail(t.email)||'').toLowerCase()).filter(Boolean));
+    const ids=new Set();
+    emails.forEach(e=>{const c=hsCache[e];if(c&&c.companyId&&!(Number(c.tzCheckedAt)>now-30*86400000))ids.add(String(c.companyId));});
+    if(!ids.size)return false;
+    const list=[...ids].slice(0,500);
+    const found={};
+    for(let i=0;i<list.length;i+=100){
+      const chunk=list.slice(i,i+100);
+      const res=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{filters:[{propertyName:'hs_object_id',operator:'IN',values:chunk}]}],properties:['timezone','country','state'],limit:100,chatInsights:HS_INSIGHTS});
+      if(res?.isError)break;
+      hsResults(res).forEach(c=>{found[String(c.id)]=resolveClientTimeZone(c.properties||{});});
+      chunk.forEach(id=>{if(!found[id])found[id]={zone:null,source:'none'};});
+    }
+    let changed=false;
+    Object.values(hsCache).forEach(c=>{
+      const r=c&&c.companyId?found[String(c.companyId)]:null;
+      if(!r)return;
+      c.timeZone=r.zone;c.tzSource=r.source;c.tzCheckedAt=now;changed=true;
+    });
+    if(changed)saveHsCache();
+    return changed;
+  }catch(error){
+    console.warn('client time zone lookup failed',error);
+    return false;
+  }finally{
+    clientTzBackfillRunning=false;
+  }
+}
+/* A new ticket is usually assigned before its client is looked up in
+   HubSpot. Once the client's zone is known, a ticket the board assigned on its
+   own - first assignment, nobody chose it, still New, no notes, under a day
+   old - whose agent is over 8 hours away is handed on once.
+
+   Only from a CS or admin board: the server refuses a support agent's board
+   moving a ticket between colleagues. The new pick satisfies the rule, so the
+   ticket never moves back. */
+function applyClientTimeZoneRule(){
+  const team=currentUserTeam();
+  if(team!=='cs'&&team!=='admin')return 0;
+  const now=boardNow();
+  let moved=0;
+  allTickets.forEach(t=>{
+    const id=t.id;
+    if(!isOpenWorkloadTicket(id))return;
+    if(normalizeTicketStage(ticketState[id]||'new')!=='new')return;
+    if(manualSupportOverride[id]===true)return;
+    const by=ticketAssigneeBy[id];
+    if(!by||by.from||!(now-Number(by.at||0)<86400000))return;
+    // The ticket itself under a day old too, not just its assignment - a
+    // ticket that sat unassigned and was picked up today is not new.
+    const arrived=Date.parse(t.email?.receivedDateTime||ticketCreatedAt[id]||'');
+    if(!(Number.isFinite(arrived)&&now-arrived<86400000))return;
+    if(Array.isArray(ticketComments[id])&&ticketComments[id].length)return;
+    const current=ticketAssignee[id];
+    if(!SUPPORT_AGENTS.includes(current))return;
+    const tz=clientTimeZoneForTicket(id,t.email);
+    if(!tz||!agentTooFarFromClient(current,tz))return;
+    const next=defaultSupportAgentForTicket(t.email,id);
+    if(!next||next===current)return;
+    const gap=a=>agentClientGapMinutes(a,tz.zone,tz.at)??Infinity;
+    if(agentTooFarFromClient(next,tz)&&gap(next)>=gap(current))return;
+    if(setTicketAssignee(id,next,undefined,'clientTimeZoneRule'))moved++;
+  });
+  if(moved){saveState('client_time_zone_rule');updateWorkload();renderActiveView();}
+  return moved;
+}
+// The zone fields carried over when a client's HubSpot entry is rebuilt, as
+// long as it still points at the same company.
+function keepClientTz(prev,companyId){
+  if(!prev||!prev.tzCheckedAt||String(prev.companyId||'')!==String(companyId||''))return{};
+  return{timeZone:prev.timeZone??null,tzSource:prev.tzSource||'none',tzCheckedAt:prev.tzCheckedAt};
+}
+async function finishClientTimeZones(){
+  try{await backfillClientTimeZones();}catch(_){}
+  try{applyClientTimeZoneRule();}catch(error){console.warn('client time zone rule failed',error);}
+}
+
 function normalizeEmailList(values){return (Array.isArray(values)?values:[]).map(v=>String(v||'').trim().toLowerCase()).filter(Boolean);}
 function isAutomatic(e){if(!e||!e.sender)return true;const sl=e.sender.toLowerCase();if(sl===SUPPORT_BOX)return true;if(BLOCKED_EMAILS.has(sl))return true;const domain=(sl.split('@')[1]||'');if(BLOCKED_DOMAINS.has(domain))return true;if(NO_REPLY_PATTERNS.some(p=>sl.includes(p)))return true;if(!e.subject&&!e.summary)return true;const tl=((e.subject||'')+' '+(e.summary||'')).toLowerCase();if(NO_REPLY_SUBJECTS.some(p=>tl.includes(p)))return true;if(/\b(newsletter|webinar|digest|event reminder)\b/.test(tl))return true;if(/(microsoft teams meeting|join microsoft teams meeting|meeting invitation|accepted:|declined:|tentative:)/.test(tl))return true;return false;}
 /* Reply and forward prefixes as mail clients actually write them, not only the
@@ -10466,7 +10672,9 @@ function setTicketAssignee(id,agent,ts,source){
     // Not the first assignment, and not a resolved ticket, whose met/breached
     // is already settled. A live-sync or reconciled change was reset on the
     // board (or server) that made it, and the restart point syncs with it.
-    if(prev&&next&&!/^(liveSync|reconciled)\//.test(why)&&normalizeTicketStage(ticketState[id]||'new')!=='res'&&stamp>Number(ticketSlaResetAt[id]||0))ticketSlaResetAt[id]=stamp;
+    // Not for the client time zone rule's own correction: the client has been
+    // waiting since the email arrived, and a fresh SLA would hide that.
+    if(prev&&next&&why!=='clientTimeZoneRule'&&!/^(liveSync|reconciled)\//.test(why)&&normalizeTicketStage(ticketState[id]||'new')!=='res'&&stamp>Number(ticketSlaResetAt[id]||0))ticketSlaResetAt[id]=stamp;
     logAssignChange({id:String(id),from:prev||'(none)',to:next||'(none)',result:'applied',ts:stamp,prevTs,by:why,actor,at:Date.now()});
   }
   return true;
@@ -11811,7 +12019,7 @@ function normalizeLegacyAssignmentModes(){
       if(!ticketCSOwner[id])ticketCSOwner[id]=assignee;
       // Never overwrite a deliberate assignment during a data migration.
       if(!manualSupportOverride[id]){
-        setTicketAssignee(id,fallbackSupportOwner(id),undefined,'legacyMigration');
+        setTicketAssignee(id,fallbackSupportOwner(id,clientTimeZoneForTicket(id,t.email)),undefined,'legacyMigration');
         migrated++;
       }
       ticketAssignmentMode[id]='support';
@@ -14077,7 +14285,10 @@ document.getElementById('ct-submit').addEventListener('click',async()=>{
   if(clientEmail)ticketClientEmail[id]=clientEmail;
   ticketCategory[id]=category;
   if(subtype)ticketSubtype[id]=subtype;
-  setTicketAssignee(id,normalizeSupportAgent(document.getElementById('ct-agent').value)||fallbackSupportOwner(id));
+  const pickedAgent=normalizeSupportAgent(document.getElementById('ct-agent').value);
+  setTicketAssignee(id,pickedAgent||fallbackSupportOwner(id,clientTimeZoneForTicket(id,fakeEmail)));
+  // Picked in the form by a person: the client time zone rule never moves it.
+  if(pickedAgent)manualSupportOverride[id]=true;
   ticketAssignmentMode[id]='support';
   const chosenCS=normalizeCSAgent(document.getElementById('ct-cs')?.value||'');
   // Unassigned is a choice too: the override is set either way, or the company
@@ -17398,7 +17609,7 @@ function applyCompanyCSAssignments(){let changed=0;let reassigned=0;allTickets.f
 
 async function findCompanyByDomain(email,excludeContactId){const domain=(email.split('@')[1]||'').toLowerCase();if(!domain||domain.includes('quinta')||['gmail.com','yahoo.com','hotmail.com','outlook.com','live.com'].includes(domain))return{companies:[],via:null};if(domain in domainCompanyCache)return domainCompanyCache[domain];const domRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{filters:[{propertyName:'domain',operator:'EQ',value:domain}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const domCos=hsResults(domRes);if(domCos.length){const v={companies:domCos,via:'domain'};domainCompanyCache[domain]=v;saveHsCache();return v;}const peerRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'CONTAINS_TOKEN',value:'@'+domain}]}],properties:['email'],limit:8,chatInsights:HS_INSIGHTS});const peers=hsResults(peerRes).filter(c=>c.properties?.email&&(!excludeContactId||c.id.toString()!==excludeContactId.toString()));for(const peer of peers.slice(0,4)){const pCoRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIds:[String(peer.id)]}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:5,chatInsights:HS_INSIGHTS});const pCos=hsResults(pCoRes);if(pCos.length){const v={companies:pCos,via:'domain-contact'};domainCompanyCache[domain]=v;saveHsCache();return v;}}const v={companies:[],via:null};domainCompanyCache[domain]=v;return v;}
 
-async function enrichWithHubSpot(){try{if(!hasCowork)return;const emailSet=new Set();allTickets.forEach(t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);if(ce){ticketClientEmail[t.id]=ce;if(shouldRefreshHubspotCacheEntry(ce))emailSet.add(ce);}});const emails=[...emailSet];if(!emails.length){await syncUnsyncedTicketsToHubspot();document.getElementById('hs-status').style.display='none';return;}const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const foundContacts=[];const notFoundEmails=[];const BATCH=50;for(let i=0;i<emails.length;i+=BATCH){const batch=emails.slice(i,i+BATCH);hsProgress.textContent=`Contacts ${Math.min(i+BATCH,emails.length)}/${emails.length}?`;const cRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'IN',values:batch}]}],properties:['email','firstname','lastname'],limit:BATCH,chatInsights:HS_INSIGHTS});if(cRes?.isError)throw new Error(cRes.error||'hubspot_error');const contacts=hsResults(cRes);batch.forEach(email=>{if(!contacts.find(c=>c.properties?.email?.toLowerCase()===email))notFoundEmails.push(email);});foundContacts.push(...contacts);}const CONCURRENT=5;for(let i=0;i<foundContacts.length;i+=CONCURRENT){const chunk=foundContacts.slice(i,i+CONCURRENT);hsProgress.textContent=`Companies ${Math.min(i+CONCURRENT,foundContacts.length)}/${foundContacts.length}?`;await Promise.all(chunk.map(async contact=>{const email=(contact.properties?.email||'').toLowerCase();if(!email)return;const contactName=[contact.properties?.firstname,contact.properties?.lastname].filter(Boolean).join(' ')||email;const coRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIds:[String(contact.id)]}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:10,chatInsights:HS_INSIGHTS});if(coRes?.isError)throw new Error(coRes.error||'hubspot_error');let companies=hsResults(coRes);let inferredVia=null;if(!companies.length){const fb=await findCompanyByDomain(email,contact.id);companies=fb.companies;inferredVia=fb.via;}const primary=pickPrimaryCompany(companies,email);hsCache[email]={contactId:contact.id,contactName,companyName:primary?.properties?.name||null,companyId:primary?.id||null,coOwner:extractBestCompanyCoOwner(companies,primary,email),contactUrl:`https://app.hubspot.com/contacts/25445053/record/0-1/${contact.id}`,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:companies.map(c=>c.properties?.name).filter(Boolean),inferredVia};}));applyCompanyCSAssignments();saveHsCache();updateCompanyFilter();renderActiveView();}for(let i=0;i<notFoundEmails.length;i+=CONCURRENT){const chunk=notFoundEmails.slice(i,i+CONCURRENT);await Promise.all(chunk.map(async email=>{const fb=await findCompanyByDomain(email,null);if(fb.companies.length){const primary=pickPrimaryCompany(fb.companies,email);hsCache[email]={contactId:null,contactName:null,companyName:primary?.properties?.name||null,companyId:primary?.id||null,coOwner:extractBestCompanyCoOwner(fb.companies,primary,email),contactUrl:null,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:fb.companies.map(c=>c.properties?.name).filter(Boolean),inferredVia:fb.via};}else{hsCache[email]=null;}}));applyCompanyCSAssignments();saveHsCache();updateCompanyFilter();renderActiveView();}scheduleCompanyNetworkSync([...collectCompanyIdsFromHsCache()]);await syncUnsyncedTicketsToHubspot();hsStatus.style.display='none';}catch(e){const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const msg=String(e?.message||e||'').toLowerCase();if(msg.includes('hubspot_not_connected')){hsProgress.innerHTML='HubSpot not connected. <a href="/auth/hubspot/start" style="color:var(--indigo-600);font-weight:700;">Connect now</a>';return;}hsProgress.textContent='HubSpot sync error';}}
+async function enrichWithHubSpot(){try{if(!hasCowork)return;const emailSet=new Set();allTickets.forEach(t=>{const ce=ticketClientEmail[t.id]||getClientEmail(t.email);if(ce){ticketClientEmail[t.id]=ce;if(shouldRefreshHubspotCacheEntry(ce))emailSet.add(ce);}});const emails=[...emailSet];if(!emails.length){await finishClientTimeZones();await syncUnsyncedTicketsToHubspot();document.getElementById('hs-status').style.display='none';return;}const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const foundContacts=[];const notFoundEmails=[];const BATCH=50;for(let i=0;i<emails.length;i+=BATCH){const batch=emails.slice(i,i+BATCH);hsProgress.textContent=`Contacts ${Math.min(i+BATCH,emails.length)}/${emails.length}?`;const cRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'contacts',filterGroups:[{filters:[{propertyName:'email',operator:'IN',values:batch}]}],properties:['email','firstname','lastname'],limit:BATCH,chatInsights:HS_INSIGHTS});if(cRes?.isError)throw new Error(cRes.error||'hubspot_error');const contacts=hsResults(cRes);batch.forEach(email=>{if(!contacts.find(c=>c.properties?.email?.toLowerCase()===email))notFoundEmails.push(email);});foundContacts.push(...contacts);}const CONCURRENT=5;for(let i=0;i<foundContacts.length;i+=CONCURRENT){const chunk=foundContacts.slice(i,i+CONCURRENT);hsProgress.textContent=`Companies ${Math.min(i+CONCURRENT,foundContacts.length)}/${foundContacts.length}?`;await Promise.all(chunk.map(async contact=>{const email=(contact.properties?.email||'').toLowerCase();if(!email)return;const contactName=[contact.properties?.firstname,contact.properties?.lastname].filter(Boolean).join(' ')||email;const coRes=await window.cowork.callMcpTool(HS_SEARCH,{objectType:'companies',filterGroups:[{associatedWith:[{objectType:'contacts',operator:'EQUAL',objectIds:[String(contact.id)]}]}],properties:['name','domain','createdate','co_owner','co-owner','coowner','co_owner_name','cs_owner','customer_success_owner','am_owner','account_manager','am'],sorts:[{propertyName:'createdate',direction:'ASCENDING'}],limit:10,chatInsights:HS_INSIGHTS});if(coRes?.isError)throw new Error(coRes.error||'hubspot_error');let companies=hsResults(coRes);let inferredVia=null;if(!companies.length){const fb=await findCompanyByDomain(email,contact.id);companies=fb.companies;inferredVia=fb.via;}const primary=pickPrimaryCompany(companies,email);hsCache[email]={...keepClientTz(hsCache[email],primary?.id),contactId:contact.id,contactName,companyName:primary?.properties?.name||null,companyId:primary?.id||null,coOwner:extractBestCompanyCoOwner(companies,primary,email),contactUrl:`https://app.hubspot.com/contacts/25445053/record/0-1/${contact.id}`,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:companies.map(c=>c.properties?.name).filter(Boolean),inferredVia};}));applyCompanyCSAssignments();saveHsCache();updateCompanyFilter();renderActiveView();}for(let i=0;i<notFoundEmails.length;i+=CONCURRENT){const chunk=notFoundEmails.slice(i,i+CONCURRENT);await Promise.all(chunk.map(async email=>{const fb=await findCompanyByDomain(email,null);if(fb.companies.length){const primary=pickPrimaryCompany(fb.companies,email);hsCache[email]={...keepClientTz(hsCache[email],primary?.id),contactId:null,contactName:null,companyName:primary?.properties?.name||null,companyId:primary?.id||null,coOwner:extractBestCompanyCoOwner(fb.companies,primary,email),contactUrl:null,companyUrl:primary?`https://app.hubspot.com/contacts/25445053/record/0-2/${primary.id}`:null,allCompanies:fb.companies.map(c=>c.properties?.name).filter(Boolean),inferredVia:fb.via};}else{hsCache[email]=null;}}));applyCompanyCSAssignments();saveHsCache();updateCompanyFilter();renderActiveView();}scheduleCompanyNetworkSync([...collectCompanyIdsFromHsCache()]);await finishClientTimeZones();await syncUnsyncedTicketsToHubspot();hsStatus.style.display='none';}catch(e){const hsStatus=document.getElementById('hs-status');const hsProgress=document.getElementById('hs-progress');hsStatus.style.display='flex';const msg=String(e?.message||e||'').toLowerCase();if(msg.includes('hubspot_not_connected')){hsProgress.innerHTML='HubSpot not connected. <a href="/auth/hubspot/start" style="color:var(--indigo-600);font-weight:700;">Connect now</a>';return;}hsProgress.textContent='HubSpot sync error';}}
 
 function updateCompanyFilter(){const companies=new Map();allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)).forEach(t=>{const ce=ticketClientEmail[t.id];const hs=ce?hsCache[ce]:null;if(hs?.companyName)companies.set(hs.companyName,true);});const sel=document.getElementById('company-filter');const cur=sel.value;sel.innerHTML='<option value="all">All companies</option>';[...companies.keys()].sort((a,b)=>a.localeCompare(b)).forEach(name=>{const cnt=allTickets.filter(t=>ticketCategory[t.id]!=='Spam'&&!isArchivedTicket(t.id)&&(()=>{const ce=ticketClientEmail[t.id];return ce&&hsCache[ce]?.companyName===name;})()).length;const o=document.createElement('option');o.value=name;o.textContent=name+' ('+cnt+')';if(name===cur)o.selected=true;sel.appendChild(o);});}
 async function syncTicketToHubspot(ticket,opts={}){
